@@ -167,6 +167,7 @@ def merge(
         merged_radii   : [sum_k N_k] or None
     """
 
+    
 
 
     K = len(render_list)
@@ -305,7 +306,18 @@ def merge(
                 (0, 1), dtype=torch.long, device=device
             )
 
-    return final_rgb, bg_rgb, final_depth, final_viewspace_points, final_visibility_filter, final_radii
+    return {
+        "final_rgb": final_rgb,
+        "bg_rgb": bg_rgb,
+        "final_depth": final_depth,
+        "final_viewspace_points": final_viewspace_points,
+        "final_visibility_filter": final_visibility_filter,
+        "final_radii": final_radii,
+        "sort_idx": sort_idx,
+        "front_rgbs": front_rgbs,
+        "front_alphas": front_alphas,
+        "prefix_T": prefix_T
+    }
 
 
 

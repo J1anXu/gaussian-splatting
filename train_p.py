@@ -152,7 +152,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             for mask in block_masks:
                 if len(mask) == 0:
                     continue
-                
                 # 开启subset会导致高斯只能被访问到mask指定的部分(get()函数被mask限制) 所以渲染结果也就只包含这些高斯产生的RGB
                 gaussians.start_subset(mask)
                 out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -181,8 +180,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             else:
                 available_block_indices.append(idx)
 
-        # 先把这些东西在CPU上合并了, 不要传到GPU里去合并, 后续更新光照信息有用
-        rgb_cpu, depth_cpu, alpha_cpu, viewspace_point_tensor_cpu, visibility_filter_cpu, radii_cpu = merge(
+        cpu_merge_result = merge(
                 all_blocks_renders,
                 all_blocks_depths,
                 all_blocks_alphas,
@@ -190,54 +188,73 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 all_blocks_visibility_filter,
                 all_blocks_radii,
         )
-
+        C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
+        T_sorted = cpu_merge_result["front_alphas"] # 每个 block 的透明度，已经按照正确的前后顺序排列好
+        prefix_T = cpu_merge_result["prefix_T"]
+        sort_idx = cpu_merge_result["sort_idx"]
 
         gt_image = viewpoint_cam.original_image.cuda()
         GPU = "cuda"
 
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
-            
             active_mask = torch.as_tensor(block_masks[block_id], dtype=torch.long, device=gaussians._xyz.device)
-
+            
             # 1. 打开subset模式 使GPU只能看到指定的高斯, 并且开启这部分高斯的梯度
             gaussians.start_subset(active_mask, requires_grad=True) 
             
-            # 3. 渲染指定部分的高斯
+            # 2. 渲染指定部分的高斯
             active_block_out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             
-            # 4. 把其余非纯黑 blocks 从 CPU 搬到 GPU（不需要梯度）但是要参与最终的 merge 
-            rgb_list   = []
-            depth_list = []
-            alpha_list = []
-            vps_list   = []
-            vis_list   = []
-            radii_list = []
+            # 3. 此时我们已经得到了 
+            # active_block_out["render"] → 活动块的C
+            # active_block_out["alphaLeft"] → 活动块的T
+            # 以及
+            # all_blocks_renders = [C_0, C_1, ... C_{K-1}]     // CPU
+            # all_blocks_alphas  = [T_0, T_1, ... T_{K-1}]     // CPU
             
-            for idx in available_block_indices:
-                if idx == block_id:
-                    # 当前 active block：用刚刚重新渲染的版本 (带梯度)
-                    rgb_list.append(active_block_out["render"])
-                    depth_list.append(active_block_out["depth"])
-                    alpha_list.append(active_block_out["alphaLeft"])
-                    vps_list.append(active_block_out["viewspace_points"])
-                    vis_list.append(active_block_out["visibility_filter"])
-                    radii_list.append(active_block_out["radii"])
-                else:
-                    # 其他 block：用 cache 的 CPU 结果搬到 GPU，默认 requires_grad=False
-                    rgb_list.append(all_blocks_renders[idx].to(GPU))
-                    depth_list.append(all_blocks_depths[idx].to(GPU))
-                    alpha_list.append(all_blocks_alphas[idx].to(GPU))
-                    
-                    vps_list.append(all_blocks_viewspace_points[idx].to(GPU))
-                    vis_list.append(all_blocks_visibility_filter[idx].to(GPU))    # 一般是 index / long
-                    radii_list.append(all_blocks_radii[idx].to(GPU))
-            
-            
-            # 4. 在当前 active block 的图上进行一次 merge（这次 merge 有梯度链）
-            final_rgb, bg_rgb, final_depth = merge2(rgb_list, depth_list, alpha_list)
+            # sort_idx:     [K,H,W]
+            # prefix_T:     [K,1,H,W]
+            # block_id:     int
 
-            image = final_rgb
+            # 1. 每个像素获得 active block 的排序位置
+            sorted_pos = (sort_idx == block_id).long().argmax(dim=0)# [H,W]
+
+            # 2. 取出对应的 prefix （透明度前缀）
+            prefix_T_k = prefix_T[
+                :, 0
+            ].gather(
+                dim=0,
+                index=sorted_pos.unsqueeze(0)
+            ).squeeze(0)    # [H,W]
+            
+            # 3. 取出对应的 C （颜色贡献）
+            # C_sorted 就是 “每个 block 在每个像素上实际贡献到最终图像中的颜色项”，并且它可以直接从像素上扣除。
+            K, C, H, W = C_sorted.shape   # C应该=3
+
+            idx = sorted_pos.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
+            idx = idx.expand(1, C, H, W)                 # [1,3,H,W]
+
+            C_sorted_k = C_sorted.gather(
+                dim=0,
+                index=idx
+            ).squeeze(0)   # [3,H,W]
+
+                
+            # C_base 是除了 active block 之外所有 block 的贡献的和（CPU）
+            # 或者说：从全量渲染的最终图像中扣除当前 block 的旧颜色贡献，得到由其他 block 单独形成的背景图
+            C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k
+
+            # 把 CPU 的 prefix_T_k 和 C_base 搬到 GPU（很小，成本很低）
+            prefix_T_k_gpu = prefix_T_k.to("cuda")
+            C_base_gpu  = C_base.to("cuda")
+
+            # 合成 final image（GPU）
+            # 因为最终图像是所有 block 按透明度前缀系数的线性加权和
+            # 所以只需从全图中减去该 block 的旧贡献并加上重新渲染的新贡献，就能得到与全量渲染一致的结果
+            C_active = active_block_out["render"]      # [3,H,W], has grad
+            image = C_base_gpu + prefix_T_k_gpu * C_active
+            
             if viewpoint_cam.alpha_mask is not None:
                 alpha_mask = viewpoint_cam.alpha_mask.to(image.device)
                 image *= alpha_mask
