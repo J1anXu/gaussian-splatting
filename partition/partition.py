@@ -17,41 +17,37 @@ class Block:
 #                Split Block
 # ============================================
 def split_block(block, xyz, max_size):
-    """
-    xyz: torch [N,3]
-    mins/maxs: torch [3]
-    """
     pts = xyz[block.indices]  # [M,3] torch
 
-    # 1. 最长维度
-    extent = block.maxs - block.mins            # torch [3]
-    axis = torch.argmax(extent).item()          # python int
+    # 1. 选择最长维度（可以保持）
+    extent = block.maxs - block.mins
+    axis = torch.argmax(extent).item()
 
-    # 2. 中间值（tensor）
-    mid = (block.maxs[axis] + block.mins[axis]) / 2
+    # 2. 按 axis 排序
+    sorted_idx = block.indices[pts[:, axis].argsort()]  # numpy index
+    
+    # 3. 数量对半切（balanced）
+    mid = len(sorted_idx) // 2
+    left_idx  = sorted_idx[:mid]
+    right_idx = sorted_idx[mid:]
 
-    # 3. 复制 bounding box (tensor clone)
-    left_mins  = block.mins.clone()
-    left_maxs  = block.maxs.clone()
-    right_mins = block.mins.clone()
-    right_maxs = block.maxs.clone()
+    # 4. 重新计算 bounding box（基于真实点）
+    left_xyz  = xyz[left_idx]
+    right_xyz = xyz[right_idx]
 
-    # 4. 更新切分位置
-    left_maxs[axis]  = mid
-    right_mins[axis] = mid
-
-    # 5. 划分 index（tensor compare）
-    left_mask  = pts[:, axis] <= mid
-    right_mask = pts[:, axis] >  mid
-
-    left_idx  = block.indices[left_mask.cpu().numpy()]
-    right_idx = block.indices[right_mask.cpu().numpy()]
-
-    # 6. 生成两个 block
-    left_block  = Block(left_idx, left_mins, left_maxs)
-    right_block = Block(right_idx, right_mins, right_maxs)
+    left_block = Block(
+        left_idx,
+        left_xyz.min(dim=0).values,
+        left_xyz.max(dim=0).values
+    )
+    right_block = Block(
+        right_idx,
+        right_xyz.min(dim=0).values,
+        right_xyz.max(dim=0).values
+    )
 
     return left_block, right_block
+
 
 
 # ============================================
