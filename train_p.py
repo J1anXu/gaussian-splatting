@@ -27,6 +27,7 @@ import time
 from partition.partition import generate_block_masks
 from logger import get_logger
 import torchvision
+import config
 WANDB = True
 LOGGER = None
 try:
@@ -162,13 +163,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # torchvision.utils.save_image(img, save_path)
                 # count += 1
 
-                # 存储所有信息
-                all_blocks_renders.append(out["render"].detach().cpu())
-                all_blocks_depths.append(out["depth"].detach().cpu())
-                all_blocks_alphas.append(out["alphaLeft"].detach().cpu())
-                all_blocks_viewspace_points.append(out["viewspace_points"].detach().cpu())
-                all_blocks_visibility_filter.append(out["visibility_filter"].detach().cpu())
-                all_blocks_radii.append(out["radii"].detach().cpu())
+                # 存储所有信息(移动到CPU)
+                if config.CAL_RES_2_CPU:
+                    all_blocks_renders.append(out["render"].detach().cpu())
+                    all_blocks_depths.append(out["depth"].detach().cpu())
+                    all_blocks_alphas.append(out["alphaLeft"].detach().cpu())
+                    all_blocks_viewspace_points.append(out["viewspace_points"].detach().cpu())
+                    all_blocks_visibility_filter.append(out["visibility_filter"].detach().cpu())
+                    all_blocks_radii.append(out["radii"].detach().cpu())
+                else:
+                    all_blocks_renders.append(out["render"].detach())
+                    all_blocks_depths.append(out["depth"].detach())
+                    all_blocks_alphas.append(out["alphaLeft"].detach())
+                    all_blocks_viewspace_points.append(out["viewspace_points"].detach())
+                    all_blocks_visibility_filter.append(out["visibility_filter"].detach())
+                    all_blocks_radii.append(out["radii"].detach())
+                
         
         # contribution_lists
         black_block_indices = []
