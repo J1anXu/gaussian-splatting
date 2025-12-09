@@ -306,6 +306,20 @@ def merge(
                 (0, 1), dtype=torch.long, device=device
             )
 
+    # ------- 新增：计算 block_rank -------
+    # sort_idx[k,h,w] = block_id
+    # block_rank[block_id,h,w] = k     (反向映射）
+    K, H, W = sort_idx.shape
+    flat = sort_idx.reshape(K, -1)        # [K,HW]
+    br = torch.empty_like(flat)
+    cols = torch.arange(flat.shape[1])
+
+    for k in range(K):
+        br[ flat[k], cols ] = k
+
+    block_rank = br.reshape(K, H, W)
+
+    
     return {
         "final_rgb": final_rgb,
         "bg_rgb": bg_rgb,
@@ -316,7 +330,8 @@ def merge(
         "sort_idx": sort_idx,
         "front_rgbs": front_rgbs,
         "front_alphas": front_alphas,
-        "prefix_T": prefix_T
+        "prefix_T": prefix_T,
+        "block_rank": block_rank
     }
 
 

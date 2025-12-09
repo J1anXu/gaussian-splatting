@@ -202,7 +202,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         T_sorted = cpu_merge_result["front_alphas"] # 每个 block 的透明度，已经按照正确的前后顺序排列好
         prefix_T = cpu_merge_result["prefix_T"]
         sort_idx = cpu_merge_result["sort_idx"]
-
+        block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
+        
         gt_image = viewpoint_cam.original_image.cuda()
         GPU = "cuda"
 
@@ -227,28 +228,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # prefix_T:     [K,1,H,W]
             # block_id:     int
 
+            K, C, H, W = C_sorted.shape   # C应该=3
+            
             # 1. 每个像素获得 active block 的排序位置
-            sorted_pos = (sort_idx == block_id).long().argmax(dim=0)# [H,W]
+            # rank_map = (sort_idx == block_id).long().argmax(dim=0)# [H,W]
+            
+  
 
+            rank_map = block_rank[block_id]  # [H,W]，每个像素告诉你排序位置
+            
             # 2. 取出对应的 prefix （透明度前缀）
-            prefix_T_k = prefix_T[
-                :, 0
-            ].gather(
-                dim=0,
-                index=sorted_pos.unsqueeze(0)
-            ).squeeze(0)    # [H,W]
+            prefix_T_k = prefix_T[:, 0].gather(dim=0, index=rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
             
             # 3. 取出对应的 C （颜色贡献）
             # C_sorted 就是 “每个 block 在每个像素上实际贡献到最终图像中的颜色项”，并且它可以直接从像素上扣除。
-            K, C, H, W = C_sorted.shape   # C应该=3
+            
 
-            idx = sorted_pos.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
+            idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
             idx = idx.expand(1, C, H, W)                 # [1,3,H,W]
 
-            C_sorted_k = C_sorted.gather(
-                dim=0,
-                index=idx
-            ).squeeze(0)   # [3,H,W]
+            C_sorted_k = C_sorted.gather(dim=0,index=idx).squeeze(0)   # [3,H,W]
 
                 
             # C_base 是除了 active block 之外所有 block 的贡献的和（CPU）
