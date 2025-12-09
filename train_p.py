@@ -13,7 +13,7 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer import render, render_subset, merge, merge2, network_gui
+from gaussian_renderer import render, merge, network_gui
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
@@ -146,7 +146,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         all_blocks_visibility_filter = []
         all_blocks_radii = []
 
-        # 渲染全部结果 不带梯度
+        # 无渲染全部结果 为计算Loss做准备
         with torch.no_grad():
             count = 0
             for mask in block_masks:
@@ -157,10 +157,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
                 gaussians.end_subset()
                 
-                img = out["render"].detach().cpu()
-                save_path = f"debug/block_{count}.png"
-                torchvision.utils.save_image(img, save_path)
-                count += 1
+                # img = out["render"].detach().cpu()
+                # save_path = f"debug/block_{count}.png"
+                # torchvision.utils.save_image(img, save_path)
+                # count += 1
 
                 # 存储所有信息
                 all_blocks_renders.append(out["render"].detach().cpu())
