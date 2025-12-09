@@ -170,7 +170,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 all_blocks_viewspace_points.append(out["viewspace_points"].detach().cpu())
                 all_blocks_visibility_filter.append(out["visibility_filter"].detach().cpu())
                 all_blocks_radii.append(out["radii"].detach().cpu())
-                print("subset", mask.shape)
         
         # contribution_lists
         black_block_indices = []
@@ -199,7 +198,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
             
-            print(f"Iteration {iteration}, Curr act block = {block_id}")
             active_mask = torch.as_tensor(block_masks[block_id], dtype=torch.long, device=gaussians._xyz.device)
 
             # 1. 打开subset模式 使GPU只能看到指定的高斯, 并且开启这部分高斯的梯度

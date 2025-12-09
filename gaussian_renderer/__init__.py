@@ -150,9 +150,9 @@ def merge(
     Multi-block compositing for partitioned Gaussian rendering.
 
     Inputs per block k:
-        render_list[k]  : [3, H, W] RGB
+        render_list[k]  : [3, H, W] RGB -> 这个 block 自己贡献给这个像素的总颜色
         depth_list[k]   : [1, H, W] depth
-        alphaLeft_list[k]: [H, W] or [1, H, W]  (transmittance / alpha-like)
+        alphaLeft_list[k]: [H, W] or [1, H, W] -> 光线穿过这个 block 之后剩下的透射率（还没被前面挡掉的比例）
 
         cache_viewspace_points_list[k]: [N_k, 3]
         cache_visibility_filters_list[k]: [M_k, 1] or [M_k]
@@ -166,6 +166,8 @@ def merge(
         merged_vis_idx : [sum_k M_k, 1] or None (indices into merged_radii)
         merged_radii   : [sum_k N_k] or None
     """
+
+
 
     K = len(render_list)
     assert K > 0, "render_list is empty"
