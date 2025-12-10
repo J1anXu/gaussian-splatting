@@ -282,9 +282,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             # 7. 在 GPU 上用 subset 优化器做 Adam 更新，并把参数 & state 写回 CPU
             gaussians.adam_step_subset(active_mask)   
-                        
-            # 8. 更新参数
-            gaussians.optimizer.step() 
+                         
             
             # 9. 关闭subset模式 清空GPU
             gaussians.end_subset() 
