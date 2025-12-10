@@ -95,29 +95,28 @@ class GaussianModel:
     # =============================
     def start_subset(self, subset_indices, requires_grad=False):
         self.subset_mode = True
-
-        # subset index 保存在 CPU
         idx = self._to_cpu_index(subset_indices)
         self.subset_indices = idx
 
-        # 封装一个 helper：把 CPU subset 拷到 GPU，并根据是否需要梯度决定 requires_grad
-        def _to_gpu(tensor):
-            t = tensor[idx].cuda(non_blocking=True)
+        def send_subset_to_gpu(tensor):
+            subset = tensor[idx].cuda(non_blocking=True)
+
+            subset = subset.clone().detach()
+
             if requires_grad:
-                return t.detach().requires_grad_(True)
-            else:
-                return t.detach()  # 不需要 grad 的 subset，全程断开 autograd
+                subset.requires_grad_(True)
+
+            return subset
         
-        # 根据是否需要梯度选择创建 GPU 子集
-        self._xyz_gpu           = _to_gpu(self._xyz)
-        self._opacity_gpu       = _to_gpu(self._opacity)
-        self._scaling_gpu       = _to_gpu(self._scaling)
-        self._rotation_gpu      = _to_gpu(self._rotation)
-        self._features_dc_gpu   = _to_gpu(self._features_dc)
-        self._features_rest_gpu = _to_gpu(self._features_rest)
+        self._xyz_gpu           = send_subset_to_gpu(self._xyz)
+        self._opacity_gpu       = send_subset_to_gpu(self._opacity)
+        self._scaling_gpu       = send_subset_to_gpu(self._scaling)
+        self._rotation_gpu      = send_subset_to_gpu(self._rotation)
+        self._features_dc_gpu   = send_subset_to_gpu(self._features_dc)
+        self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
 
 
-        
+    # 注意不需要拷贝回去，直接清空就好了，因为梯度已经在训练过程中通过 copy_grad_to_cpu 写回 CPU master 参数了
     def end_subset(self):
         self.subset_mode = False
         self.subset_indices = None
