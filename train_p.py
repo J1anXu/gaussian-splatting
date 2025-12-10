@@ -78,7 +78,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
+    
     gaussians.training_setup_for_part(opt)
+    
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -203,9 +205,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         prefix_T = cpu_merge_result["prefix_T"]
         sort_idx = cpu_merge_result["sort_idx"]
         block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
-        
+        radii_cpu = cpu_merge_result["final_radii"]
         gt_image = viewpoint_cam.original_image.cuda()
-        GPU = "cuda"
 
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
@@ -217,36 +218,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # 2. 渲染指定部分的高斯
             active_block_out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             
-            # 3. 此时我们已经得到了 
-            # active_block_out["render"] → 活动块的C
-            # active_block_out["alphaLeft"] → 活动块的T
-            # 以及
-            # all_blocks_renders = [C_0, C_1, ... C_{K-1}]     // CPU
-            # all_blocks_alphas  = [T_0, T_1, ... T_{K-1}]     // CPU
-            
-            # sort_idx:     [K,H,W]
-            # prefix_T:     [K,1,H,W]
-            # block_id:     int
-
             K, C, H, W = C_sorted.shape   # C应该=3
             
-            # 1. 每个像素获得 active block 的排序位置
-            # rank_map = (sort_idx == block_id).long().argmax(dim=0)# [H,W]
-            
-  
-
             rank_map = block_rank[block_id]  # [H,W]，每个像素告诉你排序位置
             
-            # 2. 取出对应的 prefix （透明度前缀）
+            # 3. 取出对应的 prefix （透明度前缀）
             prefix_T_k = prefix_T[:, 0].gather(dim=0, index=rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
-            
-            # 3. 取出对应的 C （颜色贡献）
-            # C_sorted 就是 “每个 block 在每个像素上实际贡献到最终图像中的颜色项”，并且它可以直接从像素上扣除。
             
 
             idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
             idx = idx.expand(1, C, H, W)                 # [1,3,H,W]
-
+            
+            # 4. 取出对应的 C （颜色贡献）
+            # C_sorted 就是 “每个 block 在每个像素上实际贡献到最终图像中的颜色项”，并且它可以直接从像素上扣除。
             C_sorted_k = C_sorted.gather(dim=0,index=idx).squeeze(0)   # [3,H,W]
 
                 
@@ -291,36 +275,31 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             else:
                 Ll1depth = 0
                 
-            # 6. backward，梯度只会流向 active block 对应的 subset 参数
-            gaussians.optimizer.zero_grad() 
+            # 6. 只清 subset 的 grad
+            gaussians.zero_grad_subset()
+            
             loss.backward()
             
-            # 7. 把梯度从GPU搬回CPU
-            gaussians.copy_grad_to_cpu(active_mask)
+            # 7. 在 GPU 上用 subset 优化器做 Adam 更新，并把参数 & state 写回 CPU
+            gaussians.adam_step_subset(active_mask)   
                         
-            # 8. 关闭subset模式 清空GPU
-            gaussians.end_subset() 
-            
-            # xyz_before = gaussians._xyz.clone().detach()
-            # opacity_before = gaussians._opacity.clone().detach()
-            
-            
-            # 9. 更新参数
+            # 8. 更新参数
             gaussians.optimizer.step() 
             
+            # 9. 关闭subset模式 清空GPU
+            gaussians.end_subset() 
             
-            # xyz_after = gaussians._xyz.clone().detach()
-            # opacity_after = gaussians._opacity.clone().detach()
-
-            # check_update(xyz_before, xyz_after, active_mask)
-            # check_update(opacity_before, opacity_after, active_mask)
-
-
-            # 10. 更新学习率
-            gaussians.update_learning_rate(iteration)
             
-            iter_end.record()
-
+        
+        # --- 所有 block 完成后 ---
+        gaussians.adam_step += 1
+        # 10. 更新学习率
+        gaussians.update_learning_rate(iteration)
+        
+        
+        iter_end.record()
+        
+        
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -370,13 +349,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration < opt.iterations:
                 gaussians.exposure_optimizer.step()
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
-                if use_sparse_adam:
-                    visible = radii_cpu > 0
-                    gaussians.optimizer.step(visible, radii_cpu.shape[0])
-                    gaussians.optimizer.zero_grad(set_to_none = True)
-                else:
-                    gaussians.optimizer.step()
-                    gaussians.optimizer.zero_grad(set_to_none = True)
+                
+                #!几何参数的优化在上面的 per-block 循环里已经做完了，这里不要再 step 了
+                # if use_sparse_adam:
+                #     visible = radii_cpu > 0
+                #     gaussians.optimizer.step(visible, radii_cpu.shape[0])
+                #     gaussians.optimizer.zero_grad(set_to_none = True)
+                # else:
+                #     gaussians.optimizer.step()
+                #     gaussians.optimizer.zero_grad(set_to_none = True)
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))

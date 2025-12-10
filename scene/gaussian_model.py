@@ -108,12 +108,21 @@ class GaussianModel:
 
             return subset
         
+        # --------------- 参数子集（带梯度） ---------------
         self._xyz_gpu           = send_subset_to_gpu(self._xyz)
         self._opacity_gpu       = send_subset_to_gpu(self._opacity)
         self._scaling_gpu       = send_subset_to_gpu(self._scaling)
         self._rotation_gpu      = send_subset_to_gpu(self._rotation)
         self._features_dc_gpu   = send_subset_to_gpu(self._features_dc)
         self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
+
+        # --------------- 对应的 Adam 状态子集（不需要 grad） ---------------
+        self._m_xyz_gpu,      self._v_xyz_gpu      = send_subset_to_gpu(self.m_xyz),      send_subset_to_gpu(self.v_xyz)
+        self._m_f_dc_gpu,     self._v_f_dc_gpu     = send_subset_to_gpu(self.m_f_dc),     send_subset_to_gpu(self.v_f_dc)
+        self._m_f_rest_gpu,   self._v_f_rest_gpu   = send_subset_to_gpu(self.m_f_rest),   send_subset_to_gpu(self.v_f_rest)
+        self._m_opacity_gpu,  self._v_opacity_gpu  = send_subset_to_gpu(self.m_opacity),  send_subset_to_gpu(self.v_opacity)
+        self._m_scaling_gpu,  self._v_scaling_gpu  = send_subset_to_gpu(self.m_scaling),  send_subset_to_gpu(self.v_scaling)
+        self._m_rotation_gpu, self._v_rotation_gpu = send_subset_to_gpu(self.m_rotation), send_subset_to_gpu(self.v_rotation)
 
 
     # 注意不需要拷贝回去，直接清空就好了，因为梯度已经在训练过程中通过 copy_grad_to_cpu 写回 CPU master 参数了
@@ -128,7 +137,20 @@ class GaussianModel:
         del self._rotation_gpu
         del self._features_dc_gpu
         del self._features_rest_gpu
-
+        
+        del self._m_xyz_gpu
+        del self._v_xyz_gpu
+        del self._m_f_dc_gpu
+        del self._v_f_dc_gpu
+        del self._m_f_rest_gpu
+        del self._v_f_rest_gpu
+        del self._m_opacity_gpu
+        del self._v_opacity_gpu
+        del self._m_scaling_gpu
+        del self._v_scaling_gpu
+        del self._m_rotation_gpu
+        del self._v_rotation_gpu
+        
         self._xyz_gpu = None
         self._opacity_gpu = None
         self._scaling_gpu = None
@@ -136,9 +158,177 @@ class GaussianModel:
         self._features_dc_gpu = None
         self._features_rest_gpu = None
         
+        self._m_xyz_gpu = None
+        self._v_xyz_gpu = None
+        self._m_f_dc_gpu = None
+        self._v_f_dc_gpu = None
+        self._m_f_rest_gpu = None
+        self._v_f_rest_gpu = None
+        self._m_opacity_gpu = None
+        self._v_opacity_gpu = None
+        self._m_scaling_gpu = None
+        self._v_scaling_gpu = None
+        self._m_rotation_gpu = None
+        self._v_rotation_gpu = None
+        
         # 强制释放 GPU memory
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+  
+    def zero_grad_subset(self):
+        for t in [
+            getattr(self, "_xyz_gpu", None),
+            getattr(self, "_opacity_gpu", None),
+            getattr(self, "_scaling_gpu", None),
+            getattr(self, "_rotation_gpu", None),
+            getattr(self, "_features_dc_gpu", None),
+            getattr(self, "_features_rest_gpu", None),
+        ]:
+            if t is not None and t.grad is not None:
+                t.grad.zero_()  
+  
+    def adam_step_subset(self, active_mask):
+        """
+        active_mask: 这次 subset 的 index（跟 start_subset 里一致）
+        实际上我们用 self.subset_indices 就够了，这里 active_mask 可以不用。
+        """
+        if not hasattr(self, "subset_indices"):
+            return
+
+        idx_cpu = self.subset_indices        # CPU long tensor
+        
+        step = self.adam_step
+        b1, b2, eps = self.beta1, self.beta2, self.eps
+
+
+        grads = [
+            ("xyz", self._xyz_gpu),
+            ("opacity", self._opacity_gpu),
+            ("scaling", self._scaling_gpu),
+            ("rotation", self._rotation_gpu),
+            ("f_dc", self._features_dc_gpu),
+            ("f_rest", self._features_rest_gpu),
+        ]
+
+        for name, tensor in grads:
+            if tensor is not None and tensor.grad is None:
+                # 直接创建一个0梯度（和 copy_grad_to_cpu 完全一致的策略）
+                tensor.grad = torch.zeros_like(tensor)
+
+
+        def adam_update_block(param_gpu, grad_gpu, m_gpu, v_gpu, lr):
+            b1, b2, eps = self.beta1, self.beta2, self.eps
+            step = self.adam_step
+
+            # ---- m / v 更新（无 autograd） ----
+            with torch.no_grad():
+                m_gpu.mul_(b1).add_(grad_gpu, alpha=1 - b1)
+                v_gpu.mul_(b2).addcmul_(grad_gpu, grad_gpu, value=1 - b2)
+
+                m_hat = m_gpu / (1 - b1 ** step)
+                v_hat = v_gpu / (1 - b2 ** step)
+
+                # ---- 参数更新（必须禁用 autograd） ----
+                param_gpu.addcdiv_(m_hat, v_hat.sqrt().add_(eps), value=-lr)
+
+
+
+        # ======================================================
+        # xyz
+        # ======================================================
+        if hasattr(self, "_xyz_gpu") and self._xyz_gpu.grad is not None:
+            adam_update_block(
+                self._xyz_gpu,
+                self._xyz_gpu.grad,
+                self._m_xyz_gpu,
+                self._v_xyz_gpu,
+                lr=self.adam_lrs["xyz"],
+            )
+            with torch.no_grad():
+                self._xyz[idx_cpu] = self._xyz_gpu.detach().to(self._xyz.device)
+                self.m_xyz[idx_cpu] = self._m_xyz_gpu.detach().to(self.m_xyz.device)
+                self.v_xyz[idx_cpu] = self._v_xyz_gpu.detach().to(self.v_xyz.device)
+
+        # ======================================================
+        # features_dc
+        # ======================================================
+        if hasattr(self, "_features_dc_gpu") and self._features_dc_gpu.grad is not None:
+            adam_update_block(
+                self._features_dc_gpu,
+                self._features_dc_gpu.grad,
+                self._m_f_dc_gpu,
+                self._v_f_dc_gpu,
+                lr=self.adam_lrs["f_dc"],
+            )
+            with torch.no_grad():
+                self._features_dc[idx_cpu] = self._features_dc_gpu.detach().to(self._features_dc.device)
+                self.m_f_dc[idx_cpu] = self._m_f_dc_gpu.detach().to(self.m_f_dc.device)
+                self.v_f_dc[idx_cpu] = self._v_f_dc_gpu.detach().to(self.v_f_dc.device)
+
+        # ======================================================
+        # features_rest
+        # ======================================================
+        if hasattr(self, "_features_rest_gpu") and self._features_rest_gpu.grad is not None:
+            adam_update_block(
+                self._features_rest_gpu,
+                self._features_rest_gpu.grad,
+                self._m_f_rest_gpu,
+                self._v_f_rest_gpu,
+                lr=self.adam_lrs["f_rest"],
+            )
+            with torch.no_grad():
+                self._features_rest[idx_cpu] = self._features_rest_gpu.detach().to(self._features_rest.device)
+                self.m_f_rest[idx_cpu] = self._m_f_rest_gpu.detach().to(self.m_f_rest.device)
+                self.v_f_rest[idx_cpu] = self._v_f_rest_gpu.detach().to(self.v_f_rest.device)
+
+        # ======================================================
+        # opacity
+        # ======================================================
+        if hasattr(self, "_opacity_gpu") and self._opacity_gpu.grad is not None:
+            adam_update_block(
+                self._opacity_gpu,
+                self._opacity_gpu.grad,
+                self._m_opacity_gpu,
+                self._v_opacity_gpu,
+                lr=self.adam_lrs["opacity"],
+            )
+            with torch.no_grad():
+                self._opacity[idx_cpu] = self._opacity_gpu.detach().to(self._opacity.device)
+                self.m_opacity[idx_cpu] = self._m_opacity_gpu.detach().to(self.m_opacity.device)
+                self.v_opacity[idx_cpu] = self._v_opacity_gpu.detach().to(self.v_opacity.device)
+
+        # ======================================================
+        # scaling
+        # ======================================================
+        if hasattr(self, "_scaling_gpu") and self._scaling_gpu.grad is not None:
+            adam_update_block(
+                self._scaling_gpu,
+                self._scaling_gpu.grad,
+                self._m_scaling_gpu,
+                self._v_scaling_gpu,
+                lr=self.adam_lrs["scaling"],
+            )
+            with torch.no_grad():
+                self._scaling[idx_cpu] = self._scaling_gpu.detach().to(self._scaling.device)
+                self.m_scaling[idx_cpu] = self._m_scaling_gpu.detach().to(self.m_scaling.device)
+                self.v_scaling[idx_cpu] = self._v_scaling_gpu.detach().to(self.v_scaling.device)
+
+        # ======================================================
+        # rotation
+        # ======================================================
+        if hasattr(self, "_rotation_gpu") and self._rotation_gpu.grad is not None:
+            adam_update_block(
+                self._rotation_gpu,
+                self._rotation_gpu.grad,
+                self._m_rotation_gpu,
+                self._v_rotation_gpu,
+                lr=self.adam_lrs["rotation"],
+            )
+            with torch.no_grad():
+                self._rotation[idx_cpu] = self._rotation_gpu.detach().to(self._rotation.device)
+                self.m_rotation[idx_cpu] = self._m_rotation_gpu.detach().to(self.m_rotation.device)
+                self.v_rotation[idx_cpu] = self._v_rotation_gpu.detach().to(self.v_rotation.device)
+  
   
     def copy_grad_to_cpu(self, mask):
         """
@@ -379,7 +569,47 @@ class GaussianModel:
                                                         lr_delay_steps=training_args.exposure_lr_delay_steps,
                                                         lr_delay_mult=training_args.exposure_lr_delay_mult,
                                                         max_steps=training_args.iterations)
+        
+        
+        # ============================================================
+        #     Block-wise Adam State Initialization (CPU master)
+        # ============================================================
 
+        device_cpu = torch.device("cpu")
+
+        # 1. 获取每个参数的学习率
+        xyz_lr      = training_args.position_lr_init * self.spatial_lr_scale
+        f_dc_lr     = training_args.feature_lr
+        f_rest_lr   = training_args.feature_lr / 20.0
+        opacity_lr  = training_args.opacity_lr
+        scaling_lr  = training_args.scaling_lr
+        rotation_lr = training_args.rotation_lr
+
+        self.adam_lrs = {
+            "xyz": xyz_lr,
+            "f_dc": f_dc_lr,
+            "f_rest": f_rest_lr,
+            "opacity": opacity_lr,
+            "scaling": scaling_lr,
+            "rotation": rotation_lr
+        }
+
+        # 2. Adam 超参
+        self.beta1 = 0.9
+        self.beta2 = 0.999
+        self.eps    = 1e-8
+        self.adam_step = 0
+
+        # 3. CPU master m/v 为所有可学习参数创建
+        def make_m_v_like(p):
+            return torch.zeros_like(p, device=device_cpu), torch.zeros_like(p, device=device_cpu)
+
+        self.m_xyz,      self.v_xyz      = make_m_v_like(self._xyz.cpu())
+        self.m_f_dc,     self.v_f_dc     = make_m_v_like(self._features_dc.cpu())
+        self.m_f_rest,   self.v_f_rest   = make_m_v_like(self._features_rest.cpu())
+        self.m_opacity,  self.v_opacity  = make_m_v_like(self._opacity.cpu())
+        self.m_scaling,  self.v_scaling  = make_m_v_like(self._scaling.cpu())
+        self.m_rotation, self.v_rotation = make_m_v_like(self._rotation.cpu())
 
 
     def update_learning_rate(self, iteration):
