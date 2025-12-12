@@ -108,7 +108,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     just_densified = False
     block_masks = None
-    img_idx = 0
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
         # Every 1000 its we increase the levels of SH up to a maximum degree
@@ -122,7 +121,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         rand_idx = randint(0, len(viewpoint_indices) - 1)
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
         vind = viewpoint_indices.pop(rand_idx)
-
+        img_name = viewpoint_cam.image_name
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
@@ -146,18 +145,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         all_visibility_filter = []
         all_radii = []
 
-        img_name = viewpoint_cam.image_name
 
         # 1. 创建目录
         if config.PRINT_EVERYTHING:
-            save_dir = os.path.join("debug", '{0:05d}'.format(img_idx))
+            save_dir = os.path.join("debug", img_name)
             os.makedirs(save_dir, exist_ok=True)
-        img_idx += 1
         
         # 无渲染全部结果 为计算Loss做准备
         with torch.no_grad():
-            idx = 0
-            for mask in block_masks:
+            for block_idx in range(len(block_masks)):
+                
+                mask = block_masks[block_idx]
+                
                 if len(mask) == 0:
                     continue
                 # 开启subset会导致高斯只能被访问到mask指定的部分(get()函数被mask限制) 所以渲染结果也就只包含这些高斯产生的RGB
@@ -167,8 +166,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
 
                 if config.PRINT_EVERYTHING:
-                    torchvision.utils.save_image(out["render"].detach().cpu(), os.path.join(save_dir, f"block_{idx}.png"))
-                idx += 1
+                    torchvision.utils.save_image(out["render"].detach().cpu(), os.path.join(save_dir, f"block_{block_idx}.png"))
 
                 # 存储所有信息(移动到CPU)
                 if config.CAL_RES_2_CPU:
@@ -213,7 +211,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         merge_res = cpu_merge_result["final_rgb"].detach().cpu()
         
         if config.PRINT_EVERYTHING:
-            torchvision.utils.save_image(merge_res, os.path.join(save_dir, f"merge_res.png"))
+            torchvision.utils.save_image(merge_res, os.path.join(save_dir, f"merge.png"))
 
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
@@ -252,15 +250,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # 所以只需从全图中减去该 block 的旧贡献并加上重新渲染的新贡献，就能得到与全量渲染一致的结果
             C_active = active_block_out["render"]      # [3,H,W], has grad
 
-            
             image = C_base_gpu + prefix_T_k_gpu * C_active
             
-            if config.PRINT_EVERYTHING:
-                torchvision.utils.save_image(image, os.path.join(save_dir, f"reassemble_{block_id:03d}.png"))
-                torchvision.utils.save_image(C_active, os.path.join(save_dir, f"C_active_{block_id:03d}.png"))
-                torchvision.utils.save_image(C_sorted_k, os.path.join(save_dir, f"C_sorted_k_{block_id:03d}.png"))
-                torchvision.utils.save_image(C_base, os.path.join(save_dir, f"C_base_{block_id:03d}.png"))
-                
             if viewpoint_cam.alpha_mask is not None:
                 alpha_mask = viewpoint_cam.alpha_mask.to(image.device)
                 image *= alpha_mask
@@ -299,6 +290,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # 9. 关闭subset模式 清空GPU
             gaussians.end_subset() 
             
+        if config.PRINT_EVERYTHING:
+            torchvision.utils.save_image(image, os.path.join(save_dir, f"reassemble.png"))
+            torchvision.utils.save_image(C_active, os.path.join(save_dir, f"C_active.png"))
+            torchvision.utils.save_image(C_sorted_k, os.path.join(save_dir, f"C_sorted_k.png"))
+            torchvision.utils.save_image(C_base, os.path.join(save_dir, f"C_base.png"))            
         
         # --- 所有 block 完成后 ---
         gaussians.adam_step += 1
