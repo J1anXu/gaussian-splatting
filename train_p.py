@@ -149,11 +149,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         img_name = viewpoint_cam.image_name
 
         # 1. 创建目录
-        
-        save_dir = os.path.join("debug", '{0:05d}'.format(img_idx))
-        os.makedirs(save_dir, exist_ok=True)
+        if config.PRINT_EVERYTHING:
+            save_dir = os.path.join("debug", '{0:05d}'.format(img_idx))
+            os.makedirs(save_dir, exist_ok=True)
         img_idx += 1
-        subset_mode = gaussians.subset_mode
+        
         # 无渲染全部结果 为计算Loss做准备
         with torch.no_grad():
             idx = 0

@@ -3,7 +3,7 @@ LIMITED_DATASIZE = True
 LOAD_DATASIZE = 20
 
 # 是否打印所有调试信息
-PRINT_EVERYTHING = True
+PRINT_EVERYTHING = False
 
 # 是否把计算结果移动到CPU节省内存
 CAL_RES_2_CPU = False
