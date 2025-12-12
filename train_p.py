@@ -220,8 +220,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
 
         final_rgb = cpu_merge_result["final_rgb"].detach().cpu()
-        save_path = os.path.join(save_dir, f"final_rgb.png")
-        torchvision.utils.save_image(final_rgb, save_path)
+        torchvision.utils.save_image(final_rgb, os.path.join(save_dir, f"final_rgb.png"))
+        torchvision.utils.save_image(gt_image, os.path.join(save_dir, f"gt.png"))
 
 
         # 遍历所有block 轮流当active block
