@@ -22,7 +22,7 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
-
+from tqdm import tqdm
 class CameraInfo(NamedTuple):
     uid: int
     R: np.array
@@ -142,7 +142,15 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
+
 def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
+    import config
+
+    # -----------------------
+    # 读取相机外参和内参
+    # -----------------------
+    print("[INFO] Loading COLMAP extrinsics & intrinsics ...")
+
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -151,38 +159,64 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     except:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
-        cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
+        cam_extrinsics = read_extrinsics_text(cameras_extrinsics)
         cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
+    # -----------------------
+    # DEBUG MODE : 限制相机数量
+    # -----------------------
+    if config.LIMITED_DATASIZE:
+        LIMIT = config.DATASIZE_LIMIT
+        print(f"[DEBUG] DEBUG_MODE=True → limiting extrinsics to first {LIMIT} cameras")
+
+        sorted_ids = sorted(cam_extrinsics.keys())
+        keep_ids = set(sorted_ids[:LIMIT])
+
+        # 截断 extrinsics
+        cam_extrinsics = {cid: cam_extrinsics[cid] for cid in keep_ids}
+
+        print(f"[DEBUG] Using {len(cam_extrinsics)} cameras (extrinsics truncated)")
+
+    # -----------------------
+    # depth params
+    # -----------------------
     depth_params_file = os.path.join(path, "sparse/0", "depth_params.json")
-    ## if depth_params_file isnt there AND depths file is here -> throw error
     depths_params = None
     if depths != "":
         try:
             with open(depth_params_file, "r") as f:
                 depths_params = json.load(f)
-            all_scales = np.array([depths_params[key]["scale"] for key in depths_params])
-            if (all_scales > 0).sum():
-                med_scale = np.median(all_scales[all_scales > 0])
-            else:
-                med_scale = 0
-            for key in depths_params:
+
+            keys = list(depths_params.keys())
+            print(f"[INFO] Loading depth params ({len(keys)} items)")
+
+            all_scales = []
+            for k in tqdm(keys, desc="Parsing depth params"):
+                all_scales.append(depths_params[k]["scale"])
+
+            all_scales = np.array(all_scales)
+            med_scale = np.median(all_scales[all_scales > 0]) if (all_scales > 0).sum() else 0
+
+            for key in keys:
                 depths_params[key]["med_scale"] = med_scale
 
         except FileNotFoundError:
-            print(f"Error: depth_params.json file not found at path '{depth_params_file}'.")
+            print(f"Error: depth_params.json not found at '{depth_params_file}'")
             sys.exit(1)
         except Exception as e:
-            print(f"An unexpected error occurred when trying to open depth_params.json file: {e}")
+            print(f"Unexpected error when loading depth_params.json: {e}")
             sys.exit(1)
 
+    # -----------------------
+    # Test camera selection
+    # -----------------------
     if eval:
         if "360" in path:
             llffhold = 8
+
         if llffhold:
-            print("------------LLFF HOLD-------------")
-            cam_names = [cam_extrinsics[cam_id].name for cam_id in cam_extrinsics]
-            cam_names = sorted(cam_names)
+            print("[INFO] Selecting LLFF hold-out views")
+            cam_names = sorted([cam_extrinsics[id].name for id in cam_extrinsics])
             test_cam_names_list = [name for idx, name in enumerate(cam_names) if idx % llffhold == 0]
         else:
             with open(os.path.join(path, "sparse/0", "test.txt"), 'r') as file:
@@ -190,40 +224,79 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     else:
         test_cam_names_list = []
 
-    reading_dir = "images" if images == None else images
-    cam_infos_unsorted = readColmapCameras(
-        cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, depths_params=depths_params,
-        images_folder=os.path.join(path, reading_dir), 
-        depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list)
-    cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
+    # -----------------------
+    # 读取相机（较慢 → tqdm）
+    # -----------------------
+    reading_dir = "images" if images is None else images
 
+    print("[INFO] Loading camera infos ...")
+    cam_infos_unsorted = readColmapCameras(
+        cam_extrinsics=cam_extrinsics,        # ⭐ 已截断
+        cam_intrinsics=cam_intrinsics,
+        depths_params=depths_params,
+        images_folder=os.path.join(path, reading_dir),
+        depths_folder=os.path.join(path, depths) if depths != "" else "",
+        test_cam_names_list=test_cam_names_list
+    )
+
+    # DEBUG：进一步限制数量（保险）
+    if config.LIMITED_DATASIZE and len(cam_infos_unsorted) > config.DATASIZE_LIMIT:
+        cam_infos_unsorted = cam_infos_unsorted[:config.DATASIZE_LIMIT]
+
+    # -----------------------
+    # 相机排序（加 bar）
+    # -----------------------
+    print("[INFO] Sorting camera infos ...")
+    cam_infos = sorted(
+        tqdm(cam_infos_unsorted.copy(), desc="Sorting cameras"),
+        key=lambda x: x.image_name
+    )
+
+    # Train/Test 分割
     train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
     test_cam_infos = [c for c in cam_infos if c.is_test]
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
+    # -----------------------
+    # 点云加载
+    # -----------------------
     ply_path = os.path.join(path, "sparse/0/points3D.ply")
     bin_path = os.path.join(path, "sparse/0/points3D.bin")
     txt_path = os.path.join(path, "sparse/0/points3D.txt")
+
     if not os.path.exists(ply_path):
-        print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+        print("[INFO] Converting points3D.{bin/txt} → .ply (first time only)")
+
         try:
             xyz, rgb, _ = read_points3D_binary(bin_path)
         except:
             xyz, rgb, _ = read_points3D_text(txt_path)
+
         storePly(ply_path, xyz, rgb)
+
+    print("[INFO] Loading point cloud PLY ...")
     try:
         pcd = fetchPly(ply_path)
+        print("[INFO] Loaded point cloud successfully.")
     except:
         pcd = None
+        print("[WARN] Failed to load point cloud PLY.")
 
-    scene_info = SceneInfo(point_cloud=pcd,
-                           train_cameras=train_cam_infos,
-                           test_cameras=test_cam_infos,
-                           nerf_normalization=nerf_normalization,
-                           ply_path=ply_path,
-                           is_nerf_synthetic=False)
+    # -----------------------
+    # 构造 scene info
+    # -----------------------
+    scene_info = SceneInfo(
+        point_cloud=pcd,
+        train_cameras=train_cam_infos,
+        test_cameras=test_cam_infos,
+        nerf_normalization=nerf_normalization,
+        ply_path=ply_path,
+        is_nerf_synthetic=False
+    )
+
     return scene_info
+
 
 def readCamerasFromTransforms(path, transformsfile, depths_folder, white_background, is_test, extension=".png"):
     cam_infos = []
