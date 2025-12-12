@@ -108,6 +108,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     just_densified = False
     block_masks = None
+    img_idx = 0
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
         # Every 1000 its we increase the levels of SH up to a maximum degree
@@ -148,9 +149,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         img_name = viewpoint_cam.image_name
 
         # 1. 创建目录
-        save_dir = os.path.join("debug", img_name)
+        
+        save_dir = os.path.join("debug", '{0:05d}'.format(img_idx))
         os.makedirs(save_dir, exist_ok=True)
-
+        img_idx += 1
+        subset_mode = gaussians.subset_mode
         # 无渲染全部结果 为计算Loss做准备
         with torch.no_grad():
             idx = 0
@@ -161,7 +164,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.start_subset(mask)
                 out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
                 gaussians.end_subset()
-                
+
+
                 if config.PRINT_EVERYTHING:
                     torchvision.utils.save_image(out["render"].detach().cpu(), os.path.join(save_dir, f"block_{idx}.png"))
                 idx += 1
@@ -252,10 +256,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             image = C_base_gpu + prefix_T_k_gpu * C_active
             
             if config.PRINT_EVERYTHING:
-                torchvision.utils.save_image(image, os.path.join(save_dir, f"reassemble.png"))
-                torchvision.utils.save_image(C_active, os.path.join(save_dir, f"C_active.png"))
-                torchvision.utils.save_image(C_sorted_k, os.path.join(save_dir, f"C_sorted_k.png"))
-                torchvision.utils.save_image(C_base, os.path.join(save_dir, f"C_base.png"))
+                torchvision.utils.save_image(image, os.path.join(save_dir, f"reassemble_{block_id:03d}.png"))
+                torchvision.utils.save_image(C_active, os.path.join(save_dir, f"C_active_{block_id:03d}.png"))
+                torchvision.utils.save_image(C_sorted_k, os.path.join(save_dir, f"C_sorted_k_{block_id:03d}.png"))
+                torchvision.utils.save_image(C_base, os.path.join(save_dir, f"C_base_{block_id:03d}.png"))
                 
             if viewpoint_cam.alpha_mask is not None:
                 alpha_mask = viewpoint_cam.alpha_mask.to(image.device)
@@ -294,7 +298,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                          
             # 9. 关闭subset模式 清空GPU
             gaussians.end_subset() 
-            
             
         
         # --- 所有 block 完成后 ---

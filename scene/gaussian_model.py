@@ -174,7 +174,7 @@ class GaussianModel:
         # 强制释放 GPU memory
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
-  
+        
     def zero_grad_subset(self):
         for t in [
             getattr(self, "_xyz_gpu", None),
@@ -598,7 +598,7 @@ class GaussianModel:
         self.beta1 = 0.9
         self.beta2 = 0.999
         self.eps    = 1e-8
-        self.adam_step = 0
+        self.adam_step = 1
 
         # 3. CPU master m/v 为所有可学习参数创建
         def make_m_v_like(p):
