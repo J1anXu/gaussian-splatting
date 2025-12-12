@@ -131,12 +131,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # --------------------------
         # split into blocks (only when densified)
         # --------------------------
-        if iteration == first_iter or just_densified:
-            block_masks, _ = generate_block_masks(gaussians._xyz, max_size = 500_000)
-            block_masks = [m for m in block_masks if len(m) > 0]
+        # if iteration == first_iter or just_densified:
+        #     block_masks, _ = generate_block_masks(gaussians._xyz, max_size = 500_000)
+        #     block_masks = [m for m in block_masks if len(m) > 0]
 
-            just_densified = False
+        #     just_densified = False
 
+        block_masks = [torch.ones(gaussians._xyz.shape[0], dtype=torch.bool, device=gaussians._xyz.device)]
 
         K = len(block_masks)
         
@@ -149,9 +150,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         all_blocks_visibility_filter = []
         all_blocks_radii = []
 
+
+        img_name = viewpoint_cam.image_name
+
+        # 1. 创建目录
+        save_dir = os.path.join("debug", img_name)
+        os.makedirs(save_dir, exist_ok=True)
+
+
         # 无渲染全部结果 为计算Loss做准备
         with torch.no_grad():
-            count = 0
+            idx = 0
             for mask in block_masks:
                 if len(mask) == 0:
                     continue
@@ -160,10 +169,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
                 gaussians.end_subset()
                 
-                # img = out["render"].detach().cpu()
-                # save_path = f"debug/block_{count}.png"
-                # torchvision.utils.save_image(img, save_path)
-                # count += 1
+                img = out["render"].detach().cpu()
+                save_path = os.path.join(save_dir, f"block_{idx}.png")
+                torchvision.utils.save_image(img, save_path)
+
+                idx += 1
 
                 # 存储所有信息(移动到CPU)
                 if config.CAL_RES_2_CPU:
@@ -207,6 +217,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
         radii_cpu = cpu_merge_result["final_radii"]
         gt_image = viewpoint_cam.original_image.cuda()
+
+
+        final_rgb = cpu_merge_result["final_rgb"].detach().cpu()
+        save_path = os.path.join(save_dir, f"final_rgb.png")
+        torchvision.utils.save_image(final_rgb, save_path)
+
 
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
