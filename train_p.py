@@ -169,9 +169,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
                 gaussians.end_subset()
                 
-                img = out["render"].detach().cpu()
-                save_path = os.path.join(save_dir, f"block_{idx}.png")
-                torchvision.utils.save_image(img, save_path)
+                if config.PRINT_EVERYTHING:
+                    torchvision.utils.save_image(out["render"].detach().cpu(), os.path.join(save_dir, f"block_{idx}.png"))
 
                 idx += 1
 
@@ -210,17 +209,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         sort_idx = cpu_merge_result["sort_idx"]
         block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
         radii_cpu = cpu_merge_result["final_radii"]
+        
+        
         gt_image = viewpoint_cam.original_image.cuda()
 
 
-        # final_rgb = cpu_merge_result["final_rgb"].detach().cpu()
-        # torchvision.utils.save_image(final_rgb, os.path.join(save_dir, f"final_rgb.png"))
-        # torchvision.utils.save_image(gt_image, os.path.join(save_dir, f"gt.png"))
+        merge_res = cpu_merge_result["final_rgb"].detach().cpu()
+        
+        if config.PRINT_EVERYTHING:
+            torchvision.utils.save_image(merge_res, os.path.join(save_dir, f"merge_res.png"))
+
 
 
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
-            active_mask = torch.as_tensor(block_masks[block_id], dtype=torch.long, device=gaussians._xyz.device)
+            active_mask = block_masks[block_id]
             
             # 1. 打开subset模式 使GPU只能看到指定的高斯, 并且开启这部分高斯的梯度
             gaussians.start_subset(active_mask, requires_grad=True) 
@@ -243,7 +246,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # C_sorted 就是 “每个 block 在每个像素上实际贡献到最终图像中的颜色项”，并且它可以直接从像素上扣除。
             C_sorted_k = C_sorted.gather(dim=0,index=idx).squeeze(0)   # [3,H,W]
 
-                
             # C_base 是除了 active block 之外所有 block 的贡献的和（CPU）
             # 或者说：从全量渲染的最终图像中扣除当前 block 的旧颜色贡献，得到由其他 block 单独形成的背景图
             C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k
@@ -252,12 +254,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             prefix_T_k_gpu = prefix_T_k.to("cuda")
             C_base_gpu  = C_base.to("cuda")
 
+
             # 合成 final image（GPU）
             # 因为最终图像是所有 block 按透明度前缀系数的线性加权和
             # 所以只需从全图中减去该 block 的旧贡献并加上重新渲染的新贡献，就能得到与全量渲染一致的结果
             C_active = active_block_out["render"]      # [3,H,W], has grad
+
+            
             image = C_base_gpu + prefix_T_k_gpu * C_active
             
+            if config.PRINT_EVERYTHING:
+                torchvision.utils.save_image(image, os.path.join(save_dir, f"reassemble.png"))
+                torchvision.utils.save_image(C_active, os.path.join(save_dir, f"C_active.png"))
+                torchvision.utils.save_image(C_sorted_k, os.path.join(save_dir, f"C_sorted_k.png"))
+                torchvision.utils.save_image(C_base, os.path.join(save_dir, f"C_base.png"))
+                
             if viewpoint_cam.alpha_mask is not None:
                 alpha_mask = viewpoint_cam.alpha_mask.to(image.device)
                 image *= alpha_mask
@@ -293,7 +304,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # 7. 在 GPU 上用 subset 优化器做 Adam 更新，并把参数 & state 写回 CPU
             gaussians.adam_step_subset(active_mask)   
                          
-            
             # 9. 关闭subset模式 清空GPU
             gaussians.end_subset() 
             
@@ -301,9 +311,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         # --- 所有 block 完成后 ---
         gaussians.adam_step += 1
+        
         # 10. 更新学习率
         gaussians.update_learning_rate(iteration)
-        
         
         iter_end.record()
         

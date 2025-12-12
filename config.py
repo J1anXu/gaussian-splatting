@@ -1,8 +1,10 @@
-# config.py
-# 控制加载数据集大小,减少启动时间,用于调试
+# 是否启用数据集裁剪模式（debug 加速加载）
 LIMITED_DATASIZE = True
-DATASIZE_LIMIT = 20
-# DEBUG模式会load 30000
-DEBUG_MODE = True
+LOAD_DATASIZE = 20
 
-CAL_RES_2_CPU = False  #把计算结果移动到CPU节省内存 (能节省内存但是移动非常慢)
+# 是否打印所有调试信息
+PRINT_EVERYTHING = False
+
+# 是否把计算结果移动到CPU节省内存
+CAL_RES_2_CPU = False
+

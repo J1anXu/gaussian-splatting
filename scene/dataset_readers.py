@@ -167,7 +167,7 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     # DEBUG MODE : 限制相机数量
     # -----------------------
     if config.LIMITED_DATASIZE:
-        LIMIT = config.DATASIZE_LIMIT
+        LIMIT = config.LOAD_DATASIZE
         print(f"[DEBUG] DEBUG_MODE=True → limiting extrinsics to first {LIMIT} cameras")
 
         sorted_ids = sorted(cam_extrinsics.keys())
@@ -241,8 +241,8 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     )
 
     # DEBUG：进一步限制数量（保险）
-    if config.LIMITED_DATASIZE and len(cam_infos_unsorted) > config.DATASIZE_LIMIT:
-        cam_infos_unsorted = cam_infos_unsorted[:config.DATASIZE_LIMIT]
+    if config.LIMITED_DATASIZE and len(cam_infos_unsorted) > config.LOAD_DATASIZE:
+        cam_infos_unsorted = cam_infos_unsorted[:config.LOAD_DATASIZE]
 
     # -----------------------
     # 相机排序（加 bar）
