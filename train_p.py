@@ -82,7 +82,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians.training_setup_for_part(opt)
     
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
+        (model_params, first_iter) = torch.load(checkpoint, map_location='cpu')
         gaussians.restore(model_params, opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -107,7 +107,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # ============================================================
 
     just_densified = False
-    
+    block_masks = None
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
         # Every 1000 its we increase the levels of SH up to a maximum degree
@@ -131,12 +131,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # --------------------------
         # split into blocks (only when densified)
         # --------------------------
-        # if iteration == first_iter or just_densified:
-        #     block_masks, _ = generate_block_masks(gaussians._xyz, max_size = 500_000)
-        #     block_masks = [m for m in block_masks if len(m) > 0]
-        #     just_densified = False
+        if block_masks is None or just_densified:
+            block_masks , _ = generate_block_masks(gaussians._xyz, max_size = 500_000)
+            block_masks = [m for m in block_masks if len(m) > 0]
+            just_densified = False
 
-        block_masks = [torch.ones(gaussians._xyz.shape[0], dtype=torch.bool, device=gaussians._xyz.device)]
+        # block_masks = [torch.ones(gaussians._xyz.shape[0], dtype=torch.bool, device=gaussians._xyz.device)]
 
         all_renders = []
         all_depths  = []
