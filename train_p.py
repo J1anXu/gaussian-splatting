@@ -65,7 +65,7 @@ def check_update(cpu_param_before, cpu_param_after, mask):
 
     diff_other = (after_other - before_other).abs().sum().item()
 
-    print(f"[MASK   UPDATED] diff = {diff_mask:.8f}")
+    print(f"[MASK  UPDATED] diff = {diff_mask:.8f}")
     print(f"[OTHERS STATIC] diff = {diff_other:.8f}")
 
 
@@ -134,14 +134,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # if iteration == first_iter or just_densified:
         #     block_masks, _ = generate_block_masks(gaussians._xyz, max_size = 500_000)
         #     block_masks = [m for m in block_masks if len(m) > 0]
-
         #     just_densified = False
 
         block_masks = [torch.ones(gaussians._xyz.shape[0], dtype=torch.bool, device=gaussians._xyz.device)]
-
-        K = len(block_masks)
-        
-    
 
         all_renders = []
         all_depths  = []
@@ -150,13 +145,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         all_visibility_filter = []
         all_radii = []
 
-
         img_name = viewpoint_cam.image_name
 
         # 1. 创建目录
         save_dir = os.path.join("debug", img_name)
         os.makedirs(save_dir, exist_ok=True)
-
 
         # 无渲染全部结果 为计算Loss做准备
         with torch.no_grad():
@@ -171,7 +164,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 
                 if config.PRINT_EVERYTHING:
                     torchvision.utils.save_image(out["render"].detach().cpu(), os.path.join(save_dir, f"block_{idx}.png"))
-
                 idx += 1
 
                 # 存储所有信息(移动到CPU)
@@ -219,8 +211,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if config.PRINT_EVERYTHING:
             torchvision.utils.save_image(merge_res, os.path.join(save_dir, f"merge_res.png"))
 
-
-
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
             active_mask = block_masks[block_id]
@@ -237,7 +227,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             # 3. 取出对应的 prefix （透明度前缀）
             prefix_T_k = prefix_T[:, 0].gather(dim=0, index=rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
-            
 
             idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
             idx = idx.expand(1, C, H, W)                 # [1,3,H,W]
@@ -253,7 +242,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # 把 CPU 的 prefix_T_k 和 C_base 搬到 GPU（很小，成本很低）
             prefix_T_k_gpu = prefix_T_k.to("cuda")
             C_base_gpu  = C_base.to("cuda")
-
 
             # 合成 final image（GPU）
             # 因为最终图像是所有 block 按透明度前缀系数的线性加权和
