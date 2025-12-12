@@ -143,12 +143,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
     
 
-        all_blocks_renders = []
-        all_blocks_depths  = []
-        all_blocks_alphas  = []
-        all_blocks_viewspace_points = []
-        all_blocks_visibility_filter = []
-        all_blocks_radii = []
+        all_renders = []
+        all_depths  = []
+        all_alphas  = []
+        all_viewspace_points = []
+        all_visibility_filter = []
+        all_radii = []
 
 
         img_name = viewpoint_cam.image_name
@@ -177,39 +177,33 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 # 存储所有信息(移动到CPU)
                 if config.CAL_RES_2_CPU:
-                    all_blocks_renders.append(out["render"].detach().cpu())
-                    all_blocks_depths.append(out["depth"].detach().cpu())
-                    all_blocks_alphas.append(out["alphaLeft"].detach().cpu())
-                    all_blocks_viewspace_points.append(out["viewspace_points"].detach().cpu())
-                    all_blocks_visibility_filter.append(out["visibility_filter"].detach().cpu())
-                    all_blocks_radii.append(out["radii"].detach().cpu())
+                    all_renders.append(out["render"].detach().cpu())
+                    all_depths.append(out["depth"].detach().cpu())
+                    all_alphas.append(out["alphaLeft"].detach().cpu())
+                    all_viewspace_points.append(out["viewspace_points"].detach().cpu())
+                    all_visibility_filter.append(out["visibility_filter"].detach().cpu())
+                    all_radii.append(out["radii"].detach().cpu())
                 else:
-                    all_blocks_renders.append(out["render"].detach())
-                    all_blocks_depths.append(out["depth"].detach())
-                    all_blocks_alphas.append(out["alphaLeft"].detach())
-                    all_blocks_viewspace_points.append(out["viewspace_points"].detach())
-                    all_blocks_visibility_filter.append(out["visibility_filter"].detach())
-                    all_blocks_radii.append(out["radii"].detach())
+                    all_renders.append(out["render"].detach())
+                    all_depths.append(out["depth"].detach())
+                    all_alphas.append(out["alphaLeft"].detach())
+                    all_viewspace_points.append(out["viewspace_points"].detach())
+                    all_visibility_filter.append(out["visibility_filter"].detach())
+                    all_radii.append(out["radii"].detach())
                 
         
         # contribution_lists
         black_block_indices = []
         available_block_indices = []
-        for idx, r in enumerate(all_blocks_renders):
+        for idx, r in enumerate(all_renders):
             # r 是 CPU tensor: [3,H,W]
             if r.abs().sum().item() == 0:  # 全黑
                 black_block_indices.append(idx)
             else:
                 available_block_indices.append(idx)
 
-        cpu_merge_result = merge(
-                all_blocks_renders,
-                all_blocks_depths,
-                all_blocks_alphas,
-                all_blocks_viewspace_points,
-                all_blocks_visibility_filter,
-                all_blocks_radii,
-        )
+        cpu_merge_result = merge(all_renders, all_depths, all_alphas, all_viewspace_points, all_visibility_filter, all_radii)
+        
         C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
         T_sorted = cpu_merge_result["front_alphas"] # 每个 block 的透明度，已经按照正确的前后顺序排列好
         prefix_T = cpu_merge_result["prefix_T"]
@@ -219,9 +213,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gt_image = viewpoint_cam.original_image.cuda()
 
 
-        final_rgb = cpu_merge_result["final_rgb"].detach().cpu()
-        torchvision.utils.save_image(final_rgb, os.path.join(save_dir, f"final_rgb.png"))
-        torchvision.utils.save_image(gt_image, os.path.join(save_dir, f"gt.png"))
+        # final_rgb = cpu_merge_result["final_rgb"].detach().cpu()
+        # torchvision.utils.save_image(final_rgb, os.path.join(save_dir, f"final_rgb.png"))
+        # torchvision.utils.save_image(gt_image, os.path.join(save_dir, f"gt.png"))
 
 
         # 遍历所有block 轮流当active block
