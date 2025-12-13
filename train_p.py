@@ -195,6 +195,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             else:
                 available_block_indices.append(idx)
 
+        # torch.save(
+        #     {
+        #         "all_renders": [x.detach().cpu() for x in all_renders],
+        #         "all_depths": [x.detach().cpu() for x in all_depths],
+        #         "all_alphas": [x.detach().cpu() for x in all_alphas],
+        #         "all_viewspace_points": [x.detach().cpu() for x in all_viewspace_points],
+        #         "all_visibility_filter": [x.detach().cpu() for x in all_visibility_filter],
+        #         "all_radii": [x.detach().cpu() for x in all_radii],
+        #     },
+        #     os.path.join(save_dir, "merge_inputs.pt")
+        # )
+
+
         cpu_merge_result = merge(all_renders, all_depths, all_alphas, all_viewspace_points, all_visibility_filter, all_radii)
         
         C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
