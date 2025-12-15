@@ -347,7 +347,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
-
+                
             # Densification
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning 它在为每一个 Gaussian 记录： “在训练过程中，它在屏幕上出现过的最大 2D footprint（最大投影半径）。”
@@ -359,7 +359,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii_cpu)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
+                    gaussians.reset_opacity_party()
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -469,8 +469,8 @@ if __name__ == "__main__":
     if WANDB:
         wandb.login()
         run = wandb.init(
-            project="PartitionGS",
-            name = f"bicycle_{time.strftime('%Y%m%d_%H%M%S')}",
+            project="party",
+            name = f"{scene_name}_{time.strftime('%Y%m%d_%H%M%S')}",
             job_type="train",
             config=vars(op.extract(args))
         )

@@ -1,5 +1,5 @@
 # 是否启用数据集裁剪模式（debug 加速加载）
-LIMITED_DATASIZE = False
+LIMITED_DATASIZE = True
 LOAD_DATASIZE = 20
 
 # 是否打印所有调试信息

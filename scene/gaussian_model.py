@@ -672,10 +672,26 @@ class GaussianModel:
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
 
+    # 把所有 Gaussian 的 opacity 强行压到一个很小的上限（≈0.01），
+    # 然后把它当成“新参数”重新塞回优化器里，从头再学 opacity。
     def reset_opacity(self):
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
+
+    def reset_opacity_party(self):
+        # 1. 计算新的 opacity（数值语义不变）
+        with torch.no_grad():
+            opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity) * 0.01))
+
+        # 2. 直接替换 CPU master 参数
+        self._opacity = nn.Parameter(opacities_new.requires_grad_(True))
+
+        # 3. 重置你自己维护的 Adam 状态
+        self.m_opacity.zero_()
+        self.v_opacity.zero_()
+
+
 
     def load_ply(self, path, use_train_test_exp = False):
         plydata = PlyData.read(path)
@@ -755,6 +771,7 @@ class GaussianModel:
 
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
+
 
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
