@@ -76,7 +76,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
+    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type, max_block_size = 500_000)
     scene = Scene(dataset, gaussians)
     
     gaussians.training_setup_for_part(opt)
@@ -106,8 +106,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #   Partitioned Training Loop (recommended full structure)
     # ============================================================
 
-    just_densified = False
-    block_masks = None
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
         # Every 1000 its we increase the levels of SH up to a maximum degree
@@ -131,12 +129,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # --------------------------
         # split into blocks (only when densified)
         # --------------------------
-        if block_masks is None or just_densified:
-            block_masks , _ = generate_block_masks(gaussians._xyz, max_size = 500_000)
-            block_masks = [m for m in block_masks if len(m) > 0]
-            just_densified = False
 
-        # block_masks = [torch.ones(gaussians._xyz.shape[0], dtype=torch.bool, device=gaussians._xyz.device)]
+        gaussians.partition()     
+        
 
         all_renders = []
         all_depths  = []
@@ -153,10 +148,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         # 无渲染全部结果 为计算Loss做准备
         with torch.no_grad():
-            for block_idx in range(len(block_masks)):
-                
-                mask = block_masks[block_idx]
-                
+            for block_idx in range(len(gaussians.block_masks)):
+                mask = gaussians.block_masks[block_idx]
                 if len(mask) == 0:
                     continue
                 # 开启subset会导致高斯只能被访问到mask指定的部分(get()函数被mask限制) 所以渲染结果也就只包含这些高斯产生的RGB
@@ -236,7 +229,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
-            active_mask = block_masks[block_id]
+            active_mask = gaussians.block_masks[block_id]
             
             # 1. 打开subset模式 使GPU只能看到指定的高斯, 并且开启这部分高斯的梯度
             gaussians.start_subset(active_mask, requires_grad=True) 
@@ -309,7 +302,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             full_viewspace_grad[active_mask] = viewspace_point_tensor.grad.detach().cpu() 
             
             # 7. 在 GPU 上用 subset 优化器做 Adam 更新，并把参数 & state 写回 CPU
-            gaussians.adam_step_subset(active_mask)   
+            gaussians.adam_step_subset()   
                          
             # 9. 关闭subset模式 清空GPU
             gaussians.end_subset() 
@@ -342,16 +335,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     "Pts": total_points
                     })
                 progress_bar.update(10)
+                log_info = {"iter": iteration,"loss": ema_loss_for_log,"pts": total_points}
                 if WANDB:
-                    wandb.log({
-                        "iteration": iteration,
-                        "loss": ema_loss_for_log,
-                        "pts": total_points
-                    }, step=iteration)
-                LOGGER.info({
-                    "iter":iteration,
-                    "loss":ema_loss_for_log,
-                    "pts":total_points})
+                    wandb.log(log_info, step=iteration)
+                LOGGER.info(log_info)
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -367,9 +354,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.max_radii2D[visibility_filter_cpu] = torch.max(gaussians.max_radii2D[visibility_filter_cpu], radii_cpu[visibility_filter_cpu])
                 gaussians.add_densification_stats(full_viewspace_grad, visibility_filter_cpu)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii_cpu)
+                size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii_cpu)
+
+                # if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                #     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                #     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii_cpu)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()

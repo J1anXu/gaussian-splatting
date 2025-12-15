@@ -21,7 +21,7 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-
+from partition import generate_block_masks
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
 except:
@@ -47,7 +47,7 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree, optimizer_type="default"):
+    def __init__(self, sh_degree, optimizer_type="default", max_block_size = 500_000):
         self.active_sh_degree = 0
         self.optimizer_type = optimizer_type
         self.max_sh_degree = sh_degree  
@@ -80,8 +80,26 @@ class GaussianModel:
         self._features_dc_gpu = None
         self._features_rest_gpu = None
 
+        # 一个block最多包含点数,超过这个数量就要重新分
+        self.max_block_size = max_block_size
+        self.block_masks = None
+        self.blocks = None
+        self.just_densified = False
+
         self.setup_functions()
         
+    def partition(self):
+        # 刚刚增加过点数 & 总数超过限制
+        if self.just_densified and self._xyz.shape[0]>=self.max_block_size:
+            block_masks , blocks = generate_block_masks(self._xyz, max_size = self.max_block_size)
+            block_masks = [m for m in block_masks if len(m) > 0]
+            self.blocks = blocks
+            self.block_masks = block_masks
+        else:
+            self.block_masks = [torch.arange(self._xyz.shape[0])]
+        self.just_densified = False
+            
+
         
         
     def _to_cpu_index(self, idx):
@@ -100,12 +118,9 @@ class GaussianModel:
 
         def send_subset_to_gpu(tensor):
             subset = tensor[idx].cuda(non_blocking=True)
-
             subset = subset.clone().detach()
-
             if requires_grad:
                 subset.requires_grad_(True)
-
             return subset
         
         # --------------- 参数子集（带梯度） ---------------
@@ -117,6 +132,7 @@ class GaussianModel:
         self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
 
         # --------------- 对应的 Adam 状态子集（不需要 grad） ---------------
+        # TODO 当3dgs扩增的时候,这个优化器的状态需要清空并扩增
         self._m_xyz_gpu,      self._v_xyz_gpu      = send_subset_to_gpu(self.m_xyz),      send_subset_to_gpu(self.v_xyz)
         self._m_f_dc_gpu,     self._v_f_dc_gpu     = send_subset_to_gpu(self.m_f_dc),     send_subset_to_gpu(self.v_f_dc)
         self._m_f_rest_gpu,   self._v_f_rest_gpu   = send_subset_to_gpu(self.m_f_rest),   send_subset_to_gpu(self.v_f_rest)
@@ -171,6 +187,8 @@ class GaussianModel:
         self._m_rotation_gpu = None
         self._v_rotation_gpu = None
         
+
+        
         # 强制释放 GPU memory
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
@@ -187,20 +205,12 @@ class GaussianModel:
             if t is not None and t.grad is not None:
                 t.grad.zero_()  
   
-    def adam_step_subset(self, active_mask):
-        """
-        active_mask: 这次 subset 的 index（跟 start_subset 里一致）
-        实际上我们用 self.subset_indices 就够了，这里 active_mask 可以不用。
-        """
+    def adam_step_subset(self):
         if not hasattr(self, "subset_indices"):
             return
 
         idx_cpu = self.subset_indices        # CPU long tensor
         
-        step = self.adam_step
-        b1, b2, eps = self.beta1, self.beta2, self.eps
-
-
         grads = [
             ("xyz", self._xyz_gpu),
             ("opacity", self._opacity_gpu),
@@ -780,6 +790,27 @@ class GaussianModel:
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
         self.tmp_radii = self.tmp_radii[valid_points_mask]
+        
+        # ===== 同步 prune 你自己维护的 Adam 状态（必须） =====
+        self.m_xyz      = self.m_xyz[valid_points_mask]
+        self.v_xyz      = self.v_xyz[valid_points_mask]
+
+        self.m_opacity  = self.m_opacity[valid_points_mask]
+        self.v_opacity  = self.v_opacity[valid_points_mask]
+
+        self.m_scaling  = self.m_scaling[valid_points_mask]
+        self.v_scaling  = self.v_scaling[valid_points_mask]
+
+        self.m_rotation = self.m_rotation[valid_points_mask]
+        self.v_rotation = self.v_rotation[valid_points_mask]
+
+        self.m_f_dc     = self.m_f_dc[valid_points_mask]
+        self.v_f_dc     = self.v_f_dc[valid_points_mask]
+
+        self.m_f_rest   = self.m_f_rest[valid_points_mask]
+        self.v_f_rest   = self.v_f_rest[valid_points_mask]
+        # ======================================================
+
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -803,6 +834,9 @@ class GaussianModel:
 
         return optimizable_tensors
 
+
+
+
     def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
@@ -814,6 +848,8 @@ class GaussianModel:
         # 复制一份高梯度的高斯, 就直接cat上去
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         
+        #ADD - 维护新添加点的adam中间状态
+        
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
@@ -822,21 +858,45 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
         self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1))
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1))
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]))
+        
+        
+        # 你自己维护的 Adam 状态（关键）
+        self.m_xyz      = torch.cat([self.m_xyz,      torch.zeros_like(new_xyz)], dim=0)
+        self.v_xyz      = torch.cat([self.v_xyz,      torch.zeros_like(new_xyz)], dim=0)
+
+        self.m_opacity  = torch.cat([self.m_opacity,  torch.zeros_like(new_opacities)], dim=0)
+        self.v_opacity  = torch.cat([self.v_opacity,  torch.zeros_like(new_opacities)], dim=0)
+
+        self.m_scaling  = torch.cat([self.m_scaling,  torch.zeros_like(new_scaling)], dim=0)
+        self.v_scaling  = torch.cat([self.v_scaling,  torch.zeros_like(new_scaling)], dim=0)
+
+        self.m_rotation = torch.cat([self.m_rotation, torch.zeros_like(new_rotation)], dim=0)
+        self.v_rotation = torch.cat([self.v_rotation, torch.zeros_like(new_rotation)], dim=0)
+
+        self.m_f_dc     = torch.cat([self.m_f_dc,     torch.zeros_like(new_features_dc)], dim=0)
+        self.v_f_dc     = torch.cat([self.v_f_dc,     torch.zeros_like(new_features_dc)], dim=0)
+
+        self.m_f_rest   = torch.cat([self.m_f_rest,   torch.zeros_like(new_features_rest)], dim=0)
+        self.v_f_rest   = torch.cat([self.v_f_rest,   torch.zeros_like(new_features_rest)], dim=0)
+
+        
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
-        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad = torch.zeros((n_init_points))
         padded_grad[:grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        
+        # 筛选： “尺寸已经很大、但梯度仍然很大的 Gaussian”
+        size = torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent
+        selected_pts_mask = torch.logical_and(selected_pts_mask, size)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
-        means =torch.zeros((stds.size(0), 3),device="cuda")
+        means =torch.zeros((stds.size(0), 3))
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
@@ -849,7 +909,8 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
 
-        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), dtype=bool)))
+        
         self.prune_points(prune_filter)
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
@@ -874,7 +935,11 @@ class GaussianModel:
         grads[grads.isnan()] = 0.0
 
         self.tmp_radii = radii
+        
+        # 需要克隆的点 (克隆操作没什么优化的 判断梯度然后复制就是了)
         self.densify_and_clone(grads, max_grad, extent)
+        
+        # 需要分裂的点
         self.densify_and_split(grads, max_grad, extent)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
@@ -882,11 +947,13 @@ class GaussianModel:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+            
         self.prune_points(prune_mask)
         tmp_radii = self.tmp_radii
         self.tmp_radii = None
 
         torch.cuda.empty_cache()
+        self.just_densified = True
 
     def add_densification_stats(self, full_viewspace_grad, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(full_viewspace_grad[update_filter,:2], dim=-1, keepdim=True)
