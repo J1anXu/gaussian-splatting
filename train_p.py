@@ -76,7 +76,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type, max_block_size = 500_000)
+    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type, max_block_size = 250_000)
     scene = Scene(dataset, gaussians)
     
     gaussians.training_setup_for_part(opt)

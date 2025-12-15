@@ -65,20 +65,17 @@ def generate_block_masks(xyz, max_size=100000):
     blocks = [Block(np.arange(N), mins, maxs)]
     expected = max(1, N // max_size)
 
-    with tqdm(total=expected, desc="KD-tree splitting") as pbar:
-        i = 0
-        while i < len(blocks):
-            blk = blocks[i]
-            if len(blk.indices) > max_size:
-                left, right = split_block(blk, xyz, max_size)
-                blocks.pop(i)
-                blocks.append(left)
-                blocks.append(right)
-                pbar.update(1)
-            else:
-                i += 1
+    i = 0
+    while i < len(blocks):
+        blk = blocks[i]
+        if len(blk.indices) > max_size:
+            left, right = split_block(blk, xyz, max_size)
+            blocks.pop(i)
+            blocks.append(left)
+            blocks.append(right)
+        else:
+            i += 1
 
-    print(f"[INFO] Total blocks: {len(blocks)}")
 
     block_masks = [blk.indices for blk in blocks]
     for i, mask in enumerate(block_masks):
