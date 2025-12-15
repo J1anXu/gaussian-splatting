@@ -392,6 +392,8 @@ class GaussianModel:
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
 
+
+
     @property
     def get_scaling(self):
         if self.subset_mode:
@@ -537,8 +539,11 @@ class GaussianModel:
 
     def training_setup_for_part(self, training_args):
         self.percent_dense = training_args.percent_dense
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        # 每个高斯的累积梯度 用于判断这个地方是否重要 重要的话需要分裂更多的高斯
+        # 注意这个地方扩增以后需要清空
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1)) 
+        # 每个 Gaussian 在 densification 统计中，被“看到并产生梯度”的次数（计数器）
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1))
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
@@ -806,7 +811,9 @@ class GaussianModel:
         "scaling" : new_scaling,
         "rotation" : new_rotation}
 
+        # 复制一份高梯度的高斯, 就直接cat上去
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
+        
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
@@ -881,8 +888,8 @@ class GaussianModel:
 
         torch.cuda.empty_cache()
 
-    def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
+    def add_densification_stats(self, full_viewspace_grad, update_filter):
+        self.xyz_gradient_accum[update_filter] += torch.norm(full_viewspace_grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1 # denom = 每个 Gaussian 被“观察到/产生梯度”的次数（visibility count） 平均梯度 = 累积梯度 / 出现次数(denom)
 
 

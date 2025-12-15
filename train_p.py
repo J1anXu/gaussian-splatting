@@ -218,7 +218,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         radii_cpu = cpu_merge_result["final_radii"].detach().cpu()
         visibility_filter_cpu = cpu_merge_result["final_visibility_filter"].detach().cpu()
-        
+        K, C, H, W = C_sorted.shape   # C应该=3
+
         gt_image = viewpoint_cam.original_image.cuda()
 
 
@@ -226,6 +227,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         if config.PRINT_EVERYTHING:
             torchvision.utils.save_image(merge_res, os.path.join(save_dir, f"merge.png"))
+
+        # iteration 开始
+        N_total = gaussians.get_xyz.shape[0]
+
+        full_viewspace_grad = torch.zeros((N_total, 3),dtype=torch.float32,device="cpu")
+        
 
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
@@ -237,7 +244,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # 2. 渲染指定部分的高斯
             active_block_out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             
-            K, C, H, W = C_sorted.shape   # C应该=3
+            viewspace_point_tensor = active_block_out["viewspace_points"]  # [N,3]，N是当前 subset 的高斯数
+            
             
             rank_map = block_rank[block_id]  # [H,W]，每个像素告诉你排序位置
             
@@ -298,6 +306,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             loss.backward()
             
+            full_viewspace_grad[active_mask] = viewspace_point_tensor.grad.detach().cpu() 
+            
             # 7. 在 GPU 上用 subset 优化器做 Adam 更新，并把参数 & state 写回 CPU
             gaussians.adam_step_subset(active_mask)   
                          
@@ -355,7 +365,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning 它在为每一个 Gaussian 记录： “在训练过程中，它在屏幕上出现过的最大 2D footprint（最大投影半径）。”
                 gaussians.max_radii2D[visibility_filter_cpu] = torch.max(gaussians.max_radii2D[visibility_filter_cpu], radii_cpu[visibility_filter_cpu])
-                gaussians.add_densification_stats(viewspace_point_tensor_cpu, visibility_filter_cpu)
+                gaussians.add_densification_stats(full_viewspace_grad, visibility_filter_cpu)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
