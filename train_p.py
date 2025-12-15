@@ -24,7 +24,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
 import time
-from partition.partition import generate_block_masks
+from partition import generate_block_masks
 from logger import get_logger
 import torchvision
 import config
