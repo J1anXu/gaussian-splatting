@@ -286,6 +286,15 @@ if __name__ == "__main__":
     safe_state(args.quiet)
     scene_name = args.source_path.strip('/').split('/')[-1]
     LOGGER = get_logger(scene_name, os.path.join("./logs", "train_p", scene_name))
+    if WANDB:
+        wandb.login()
+        run = wandb.init(
+            project="3dgs_baseline",
+            name = f"{scene_name}_{time.strftime('%Y%m%d_%H%M%S')}",
+            job_type="train",
+            config=vars(op.extract(args))
+        )
+        wandb.define_metric("iteration")  # 
     # Start GUI server, configure and run training
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
