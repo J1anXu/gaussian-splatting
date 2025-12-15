@@ -215,8 +215,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         prefix_T = cpu_merge_result["prefix_T"]
         sort_idx = cpu_merge_result["sort_idx"]
         block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
-        radii_cpu = cpu_merge_result["final_radii"]
-        visibility_filter_cpu = cpu_merge_result["final_visibility_filter"]
+        
+        radii_cpu = cpu_merge_result["final_radii"].detach().cpu()
+        visibility_filter_cpu = cpu_merge_result["final_visibility_filter"].detach().cpu()
         
         gt_image = viewpoint_cam.original_image.cuda()
 
@@ -352,7 +353,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Densification
             if iteration < opt.densify_until_iter:
-                # Keep track of max radii in image-space for pruning
+                # Keep track of max radii in image-space for pruning 它在为每一个 Gaussian 记录： “在训练过程中，它在屏幕上出现过的最大 2D footprint（最大投影半径）。”
                 gaussians.max_radii2D[visibility_filter_cpu] = torch.max(gaussians.max_radii2D[visibility_filter_cpu], radii_cpu[visibility_filter_cpu])
                 gaussians.add_densification_stats(viewspace_point_tensor_cpu, visibility_filter_cpu)
 
