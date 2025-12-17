@@ -16,7 +16,7 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianR
 import torchvision
 from scene_p.gaussian_model import GaussianModel_p
 from utils_p.sh_utils import eval_sh
-
+import config
 def render(viewpoint_camera, pc : GaussianModel_p, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
     """
     Render the scene. 
@@ -330,6 +330,92 @@ def merge(
     }
 
 
+def get_frustum_planes(view_proj_matrix):
+    """
+    view_proj_matrix: viewpoint_cam.full_proj_transform (已经转置好的 4x4)
+    """
+    # 如果 matrix 是 [4,4], 我们直接按行提取
+    # 3DGS 的 full_proj_transform 通常已经是转置后的逻辑
+    matrix = view_proj_matrix.T 
+    planes = torch.stack([
+        matrix[3] + matrix[0], # Left
+        matrix[3] - matrix[0], # Right
+        matrix[3] + matrix[1], # Bottom
+        matrix[3] - matrix[1], # Top
+        matrix[3] + matrix[2], # Near
+        matrix[3] - matrix[2]  # Far
+    ])
+    # 归一化平面系数，方便后续计算
+    norms = torch.norm(planes[:, :3], dim=1, keepdim=True)
+    return planes / norms
+
+def is_block_visible(block, planes):
+    """
+    判断 Block 对象的 AABB 是否在视锥体内
+    """
+    # 拿到 Block 里的 mins 和 maxs
+    # 确保它们在 GPU 上且是 torch 类型
+    b_min = torch.as_tensor(block.mins, device=planes.device)
+    b_max = torch.as_tensor(block.maxs, device=planes.device)
+    
+    for i in range(6):
+        # 寻找 P-vertex (法线方向上最远的点)
+        p_vertex = torch.where(planes[i, :3] > 0, b_max, b_min)
+        # 如果最远点都在平面后面，则盒子完全不可见
+        if torch.dot(planes[i, :3], p_vertex) + planes[i, 3] < 0:
+            return False
+    return True
+
+def is_block_within_dist(block, cam_center, max_dist):
+    """
+    block: 你的 Block 对象，包含 mins, maxs
+    cam_center: 相机在世界坐标系的位置 (viewpoint_cam.camera_center)
+    max_dist: 你设定的可见距离阈值
+    """
+    # 计算块的中心点
+    b_min = torch.as_tensor(block.mins, device=cam_center.device)
+    b_max = torch.as_tensor(block.maxs, device=cam_center.device)
+    center = (b_min + b_max) * 0.5
+    
+    # 计算欧式距离的平方（避免开方计算，更快）
+    dist_sq = torch.sum((center - cam_center) ** 2)
+    return dist_sq < (max_dist ** 2)
+
+def is_block_on_screen(block, viewpoint_cam):
+    """
+    更精细的判断：检查块投影到 2D 屏幕后的范围
+    """
+    # 1. 拿到 AABB 的 8 个顶点
+    mins, maxs = block.mins, block.maxs
+    corners = torch.tensor([
+        [mins[0], mins[1], mins[2]], [mins[0], mins[1], maxs[2]],
+        [mins[0], maxs[1], mins[2]], [mins[0], maxs[1], maxs[2]],
+        [maxs[0], mins[1], mins[2]], [maxs[0], mins[1], maxs[2]],
+        [maxs[0], maxs[1], mins[2]], [maxs[0], maxs[1], maxs[2]],
+    ], device='cuda', dtype=torch.float32)
+
+    # 2. 投影到屏幕空间 (使用相机的全局矩阵)
+    # world_to_clip: p_clip = p_world * full_proj_transform
+    # 注意维度匹配
+    p_homo = torch.cat([corners, torch.ones((8, 1), device='cuda')], dim=-1)
+    p_clip = p_homo @ viewpoint_cam.full_proj_transform
+    
+    # 归一化设备坐标 (NDC)
+    w = p_clip[:, 3:4]
+    # 如果所有点的 w 都是负数，说明在相机后面
+    if (w < 0.001).all():
+        return False
+        
+    ndc = p_clip[:, :3] / (w + 1e-7)
+    
+    # 3. 检查 NDC 是否在有效范围内 [-1, 1]
+    # 如果 8 个顶点的投影全在屏幕外（比如全在左边），则剔除
+    if (ndc[:, 0] < -1.1).all() or (ndc[:, 0] > 1.1).all() or \
+       (ndc[:, 1] < -1.1).all() or (ndc[:, 1] > 1.1).all():
+        return False
+
+    return True
+
 def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
     all_renders = []
     all_depths  = []
@@ -340,23 +426,50 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
     img_name = viewpoint_cam.image_name
     save_dir = os.path.join("debug", f"{img_name}")
     os.makedirs(save_dir, exist_ok=True)
+    visible_indices = []
+    # 1. 提取当前相机的视锥平面
+
+    # 设定一个合理的全局可见距离，根据你的场景大小调整（比如 50.0 或 100.0）
+    MAX_RENDER_DIST = 70.0
+    cam_center = viewpoint_cam.camera_center # 获取相机位置
+    vp_matrix = viewpoint_cam.full_proj_transform
+    planes = get_frustum_planes(vp_matrix)
     for block_idx in range(len(gaussians.block_masks)):
         mask = gaussians.block_masks[block_idx]
-        if len(mask) == 0:
-            continue
-        # 开启subset会导致高斯只能被访问到mask指定的部分(get()函数被mask限制) 所以渲染结果也就只包含这些高斯产生的RGB
+        blk = gaussians.blocks[block_idx]
+        
+        
+        # 3. 渲染可见块
         gaussians.start_subset(mask)
         out = render(viewpoint_cam, gaussians, pipe, bg,  scaling_modifier=scaling_modifier, separate_sh=separate_sh, override_color=override_color, use_trained_exp=use_trained_exp)
         gaussians.end_subset()
+        if config.PRINT_EVERYTHING:
+            torchvision.utils.save_image(out["render"], os.path.join(save_dir, f"{block_idx}.png"))
+        
+        
+        
+        # --- 第一层：距离粗筛 ---
+        # # 过滤掉那些在视锥内但离得太远、投影后几乎没像素的块
+        # if not is_block_within_dist(blk, cam_center, MAX_RENDER_DIST):
+        #     print(f"In {viewpoint_cam.image_name} Block {block_idx} skipped due to distance.")
+        #     continue
+        
+        # 2. 视锥剔除：如果块不在视野内，直接跳过
+        if not is_block_visible(blk, planes):
+            continue
+        
+        visible_indices.append(block_idx)
+        
 
-        torchvision.utils.save_image(out["render"], os.path.join(save_dir, f"{block_idx}.png"))
         all_renders.append(out["render"].detach())
         all_depths.append(out["depth"].detach())
         all_alphas.append(out["alphaLeft"].detach())
         all_viewspace_points.append(out["viewspace_points"].detach())
         all_visibility_filter.append(out["visibility_filter"].detach())
         all_radii.append(out["radii"].detach())
-
+        
+    print(f"Rendered {len(visible_indices)} / {len(gaussians.block_masks)} blocks for view {img_name}")
+    
     cpu_merge_result = merge(all_renders, all_depths, all_alphas, all_viewspace_points, all_visibility_filter, all_radii)
     
     rendered_image = cpu_merge_result["final_rgb"]
