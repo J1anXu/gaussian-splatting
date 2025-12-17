@@ -522,11 +522,20 @@ def get_block_screen_bbox_pre_render(xyz, scaling, full_proj_transform, W, H, Fo
     max_s = torch.max(scaling[mask], dim=1).values
     radii_px = (max_s * f) / depth.squeeze() * 3.0
 
+
+
+    
     # 7. 计算最终包围盒
     x_min = max(0, int((screen_x - radii_px).min().item()))
     y_min = max(0, int((screen_y - radii_px).min().item()))
     x_max = min(W, int((screen_x + radii_px).max().item()))
     y_max = min(H, int((screen_y + radii_px).max().item()))
+
+    # 8.增加一点pad
+    #FIXME - 这个pad影响效率,当框架能运行的时候,应该调节这里或者去掉
+    pad = max(32, 0.05 * max(W, H))
+    x_min -= pad
+    x_max += pad
 
     return x_min, y_min, x_max, y_max
 
