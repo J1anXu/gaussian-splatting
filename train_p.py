@@ -13,9 +13,9 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer import render, merge, network_gui
+from gaussian_renderer_p import render, merge, network_gui
 import sys
-from scene import Scene, GaussianModel
+from scene_p import Scene_p, GaussianModel_p
 from utils.general_utils import safe_state, get_expon_lr_func
 import uuid
 from tqdm import tqdm
@@ -76,8 +76,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type, max_block_size = 250_000)
-    scene = Scene(dataset, gaussians)
+    gaussians = GaussianModel_p(dataset.sh_degree, opt.optimizer_type, max_block_size = 250_000)
+    scene = Scene_p(dataset, gaussians)
     
     gaussians.training_setup_for_part(opt)
     
@@ -401,7 +401,7 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, train_test_exp):
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene_p, renderFunc, renderArgs, train_test_exp):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
