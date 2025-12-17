@@ -16,6 +16,8 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianR
 import torchvision
 from scene_p.gaussian_model import GaussianModel_p
 from utils_p.sh_utils import eval_sh
+from torchvision.utils import draw_bounding_boxes
+
 import config
 def render(viewpoint_camera, pc : GaussianModel_p, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
     """
@@ -416,8 +418,6 @@ def is_block_on_screen(block, viewpoint_cam):
 
     return True
 
-
-
 def get_visible_mask_in_block(block_mask, xyz, planes):
     """
     block_mask: 该块对应的原始索引 [N_block]
@@ -442,6 +442,85 @@ def get_visible_mask_in_block(block_mask, xyz, planes):
     
     return block_mask[visible_bool]
 
+def get_block_screen_bbox(xyz, full_proj_transform, W, H):
+    """
+    xyz: [N, 3] 高斯点坐标 (GPU)
+    full_proj_transform: viewpoint_cam.full_proj_transform
+    W, H: 图像宽高
+    """
+    device = xyz.device
+    # 1. 确保矩阵在 GPU 上且类型匹配
+    full_proj_transform = full_proj_transform.to(device=device, dtype=xyz.dtype)
+
+    # 2. 构造齐次坐标
+    p_homo = torch.cat([xyz, torch.ones((xyz.shape[0], 1), device=device, dtype=xyz.dtype)], dim=-1)
+    
+    # 3. 投影变换
+    p_clip = p_homo @ full_proj_transform
+    
+    # 4. 关键：剔除 w <= 0.05 的点（相机背后的点）
+    w = p_clip[:, 3:4]
+    mask = (w > 0.05).squeeze() 
+    
+    # 容错：如果没有点在相机前方
+    if not mask.any():
+        return 0, 0, 0, 0
+    
+    # 5. 提取有效点并进行透视除法
+    valid_p_clip = p_clip[mask]
+    valid_w = w[mask]
+    
+    # 这里的关键：即使只有一个点，也通过 reshape 确保 ndc 是 [N, 2]
+    # 避免 [2] 这种一维向量导致 ndc[:, 1] 报错
+    ndc = (valid_p_clip[:, :2] / valid_w).reshape(-1, 2)
+    
+    # 6. 映射到像素空间 (保持你验证正确的 +1.0 逻辑)
+    screen_x = (ndc[:, 0] + 1.0) * W / 2.0
+    screen_y = (ndc[:, 1] + 1.0) * H / 2.0
+    
+    # 7. 取得边界并转为整数，增加简单的边界溢出保护
+    x_min = max(0, int(screen_x.min().item()))
+    y_min = max(0, int(screen_y.min().item()))
+    x_max = min(W, int(screen_x.max().item()))
+    y_max = min(H, int(screen_y.max().item()))
+    
+    return x_min, y_min, x_max, y_max
+
+
+
+def print_box_on_image(image, x_min, y_min, x_max, y_max):
+    """
+    在渲染图上绘制 BBox 并返回结果 Tensor
+    :param image: [3, H, W] 的 torch.Tensor, 范围 [0, 1]
+    :param x_min, y_min, x_max, y_max: 像素坐标 (int)
+    :return: [3, H, W] 的 torch.Tensor, 范围 [0, 1]
+    """
+    with torch.no_grad():
+        # 1. 转换到 uint8 格式 (draw_bounding_boxes 的标准要求)
+        # clamp 保证 [0, 1] 范围，避免溢出
+        img_uint8 = (image.detach().clamp(0, 1) * 255).to(torch.uint8).cpu()
+        
+        # 2. 坐标合法性裁剪，防止投影计算出屏导致的报错
+        H, W = img_uint8.shape[1], img_uint8.shape[2]
+        x1, y1 = max(0, int(x_min)), max(0, int(y_min))
+        x2, y2 = min(W, int(x_max)), min(H, int(y_max))
+        
+        # 3. 如果有效区域太小或非法，直接返回原图
+        if x2 <= x1 or y2 <= y1:
+            return image
+        
+        # 4. 构造 boxes [N, 4] 格式为 [xmin, ymin, xmax, ymax]
+        boxes = torch.tensor([[x1, y1, x2, y2]], dtype=torch.float)
+        
+        # 5. 绘制框：颜色红色，宽度可调
+        # 注意：这里返回的也是 uint8 Tensor
+        res_uint8 = draw_bounding_boxes(img_uint8, boxes, colors="red", width=3)
+        
+        # 6. 转回 float32 且范围回到 [0, 1] 并送回原始设备
+        return res_uint8.to(image.device).float() / 255.0
+    
+
+
 def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
     all_renders = []
     all_depths  = []
@@ -458,8 +537,12 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
     # 设定一个合理的全局可见距离，根据你的场景大小调整（比如 50.0 或 100.0）
     MAX_RENDER_DIST = 70.0
     cam_center = viewpoint_cam.camera_center # 获取相机位置
-    vp_matrix = viewpoint_cam.full_proj_transform
-    planes = get_frustum_planes(vp_matrix)
+    proj_matrix = viewpoint_cam.full_proj_transform
+    planes = get_frustum_planes(proj_matrix)
+    
+    view_matrix=viewpoint_cam.world_view_transform
+    W = viewpoint_cam.image_width
+    H = viewpoint_cam.image_height
     for block_idx in range(len(gaussians.block_masks)):
         mask = gaussians.block_masks[block_idx]
         blk = gaussians.blocks[block_idx]
@@ -493,6 +576,9 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
 
         visible_indices.append(block_idx)
 
+        xyz=gaussians.get_xyz[fine_mask]
+        x_min, y_min, x_max, y_max = get_block_screen_bbox(xyz, proj_matrix, W, H)
+
 
         # 3. 渲染可见块
         gaussians.start_subset(fine_mask)
@@ -500,7 +586,8 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
         gaussians.end_subset()
         
         if config.PRINT_EVERYTHING:
-            torchvision.utils.save_image(out["render"], os.path.join(save_dir, f"{block_idx}.png"))
+            block_img_with_box = print_box_on_image(out["render"], x_min, y_min, x_max, y_max)
+            torchvision.utils.save_image(block_img_with_box, os.path.join(save_dir, f"{block_idx}.png"))
 
         all_renders.append(out["render"].detach())
         all_depths.append(out["depth"].detach())
