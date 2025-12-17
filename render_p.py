@@ -47,7 +47,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():
-        gaussians = GaussianModel_p(dataset.sh_degree, max_block_size = 30000000)
+        gaussians = GaussianModel_p(dataset.sh_degree, max_block_size = 300000)
         scene = Scene_p(dataset, gaussians, load_iteration=iteration, shuffle=False)
         gaussians.partition_for_rendering()
 

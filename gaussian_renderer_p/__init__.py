@@ -9,11 +9,13 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import os
 import torch
 import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+import torchvision
 from scene_p.gaussian_model import GaussianModel_p
-from utils.sh_utils import eval_sh
+from utils_p.sh_utils import eval_sh
 
 def render(viewpoint_camera, pc : GaussianModel_p, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
     """
@@ -335,17 +337,19 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
     all_viewspace_points = []
     all_visibility_filter = []
     all_radii = []
-
+    img_name = viewpoint_cam.image_name
+    save_dir = os.path.join("debug", f"{img_name}")
+    os.makedirs(save_dir, exist_ok=True)
     for block_idx in range(len(gaussians.block_masks)):
         mask = gaussians.block_masks[block_idx]
         if len(mask) == 0:
             continue
         # 开启subset会导致高斯只能被访问到mask指定的部分(get()函数被mask限制) 所以渲染结果也就只包含这些高斯产生的RGB
         gaussians.start_subset(mask)
-        out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp, separate_sh)
+        out = render(viewpoint_cam, gaussians, pipe, bg,  scaling_modifier=scaling_modifier, separate_sh=separate_sh, override_color=override_color, use_trained_exp=use_trained_exp)
         gaussians.end_subset()
 
-
+        torchvision.utils.save_image(out["render"], os.path.join(save_dir, f"{block_idx}.png"))
         all_renders.append(out["render"].detach())
         all_depths.append(out["depth"].detach())
         all_alphas.append(out["alphaLeft"].detach())
