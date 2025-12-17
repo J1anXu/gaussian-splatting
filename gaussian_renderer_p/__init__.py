@@ -486,7 +486,49 @@ def get_block_screen_bbox(xyz, full_proj_transform, W, H):
     
     return x_min, y_min, x_max, y_max
 
+def get_block_screen_bbox_pre_render(xyz, scaling, full_proj_transform, W, H, FoVx, FoVy):
+    """
+    将高斯视为球体（取 scaling 长边为半径）进行投影预估
+    """
+    device = xyz.device
+    
+    # 1. 计算焦距 (用于投影缩放)
+    focal_x = W / (2.0 * math.tan(FoVx / 2.0))
+    focal_y = H / (2.0 * math.tan(FoVy / 2.0))
+    f = max(focal_x, focal_y)
 
+    # 2. 坐标投影到裁剪空间
+    full_proj_transform = full_proj_transform.to(device)
+    p_homo = torch.cat([xyz, torch.ones((xyz.shape[0], 1), device=device)], dim=-1)
+    p_clip = p_homo @ full_proj_transform
+    
+    # 3. 近平面裁剪 (w <= 0.1 的点不参与计算)
+    w = p_clip[:, 3:4]
+    mask = (w > 0.1).squeeze()
+    if not mask.any():
+        return 0, 0, 0, 0
+
+    # 4. 提取有效点
+    valid_p_clip = p_clip[mask].reshape(-1, 4)
+    depth = w[mask].reshape(-1, 1) # 在裁剪空间，w 就是线性深度
+    
+    # 5. 计算中心点像素坐标
+    ndc = valid_p_clip[:, :2] / depth
+    screen_x = (ndc[:, 0] + 1.0) * W / 2.0
+    screen_y = (ndc[:, 1] + 1.0) * H / 2.0
+
+    # 6. 【核心建议实现】：取 scaling 长边作为球体半径
+    # 3DGS 默认 scaling 是标准差，通常取 3 倍以包含 99% 的能量
+    max_s = torch.max(scaling[mask], dim=1).values
+    radii_px = (max_s * f) / depth.squeeze() * 3.0
+
+    # 7. 计算最终包围盒
+    x_min = max(0, int((screen_x - radii_px).min().item()))
+    y_min = max(0, int((screen_y - radii_px).min().item()))
+    x_max = min(W, int((screen_x + radii_px).max().item()))
+    y_max = min(H, int((screen_y + radii_px).max().item()))
+
+    return x_min, y_min, x_max, y_max
 
 def print_box_on_image(image, x_min, y_min, x_max, y_max):
     """
@@ -577,7 +619,10 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
         visible_indices.append(block_idx)
 
         xyz=gaussians.get_xyz[fine_mask]
-        x_min, y_min, x_max, y_max = get_block_screen_bbox(xyz, proj_matrix, W, H)
+        scaling=gaussians.get_scaling[fine_mask]
+        focal_x = viewpoint_cam.image_width / (2 * math.tan(viewpoint_cam.FoVx / 2))
+        focal_y = viewpoint_cam.image_height / (2 * math.tan(viewpoint_cam.FoVy / 2))
+        x_min, y_min, x_max, y_max = get_block_screen_bbox_pre_render(xyz, scaling, proj_matrix, W, H, focal_x, focal_y)
 
 
         # 3. 渲染可见块
