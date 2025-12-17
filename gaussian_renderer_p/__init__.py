@@ -416,6 +416,32 @@ def is_block_on_screen(block, viewpoint_cam):
 
     return True
 
+
+
+def get_visible_mask_in_block(block_mask, xyz, planes):
+    """
+    block_mask: 该块对应的原始索引 [N_block]
+    xyz: 全局点云坐标 [N_total, 3]
+    planes: 视锥体 6 个平面 [6, 4]
+    """
+    # 1. 提取该块内的点
+    p_xyz = xyz[block_mask] # [N_block, 3]
+    device = p_xyz.device
+    
+    # 2. 确保 planes 在同一设备
+    planes = planes.to(device)
+
+    # 3. 无齐次坐标计算点到平面的距离
+    # 距离公式: Dist = A*x + B*y + C*z + D
+    # planes[:, :3] 是 (A, B, C), planes[:, 3] 是 D
+    # [6, 3] @ [3, N_block] + [6, 1] -> [6, N_block]
+    distances = planes[:, :3] @ p_xyz.T + planes[:, 3:4]
+    
+    # 4. 只有在所有 6 个平面“内侧”（距离 >= 0）的点才是可见的
+    visible_bool = torch.all(distances >= 0, dim=0) # [N_block]
+    
+    return block_mask[visible_bool]
+
 def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
     all_renders = []
     all_depths  = []
@@ -439,15 +465,6 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
         blk = gaussians.blocks[block_idx]
         
         
-        # 3. 渲染可见块
-        gaussians.start_subset(mask)
-        out = render(viewpoint_cam, gaussians, pipe, bg,  scaling_modifier=scaling_modifier, separate_sh=separate_sh, override_color=override_color, use_trained_exp=use_trained_exp)
-        gaussians.end_subset()
-        if config.PRINT_EVERYTHING:
-            torchvision.utils.save_image(out["render"], os.path.join(save_dir, f"{block_idx}.png"))
-        
-        
-        
         # --- 第一层：距离粗筛 ---
         # # 过滤掉那些在视锥内但离得太远、投影后几乎没像素的块
         # if not is_block_within_dist(blk, cam_center, MAX_RENDER_DIST):
@@ -458,8 +475,32 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
         if not is_block_visible(blk, planes):
             continue
         
-        visible_indices.append(block_idx)
+
+        # --- 第二步：点级精筛 ---
+        # 此时只处理那些“部分可见”的块，剔除掉该块中在视野外的冗余点
+        original_count = len(mask)
+        fine_mask = get_visible_mask_in_block(mask, gaussians.get_xyz, planes)
+        culled_count = original_count - len(fine_mask)
         
+        # 打印剔除情况
+        if culled_count > 0:
+            percent = (culled_count / original_count) * 100
+            print(f"  [Block {block_idx:2d}] Fine Culling: {original_count:7d} -> {len(fine_mask):7d} points (-{percent:.1f}%)")
+
+        if len(fine_mask) == 0:
+            print(f"  [Block {block_idx:2d}] Fully culled by point-level check.")
+            continue
+
+        visible_indices.append(block_idx)
+
+
+        # 3. 渲染可见块
+        gaussians.start_subset(fine_mask)
+        out = render(viewpoint_cam, gaussians, pipe, bg,  scaling_modifier=scaling_modifier, separate_sh=separate_sh, override_color=override_color, use_trained_exp=use_trained_exp)
+        gaussians.end_subset()
+        
+        if config.PRINT_EVERYTHING:
+            torchvision.utils.save_image(out["render"], os.path.join(save_dir, f"{block_idx}.png"))
 
         all_renders.append(out["render"].detach())
         all_depths.append(out["depth"].detach())
