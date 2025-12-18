@@ -17,7 +17,7 @@ import torchvision
 from scene_p.gaussian_model import GaussianModel_p
 from utils_p.sh_utils import eval_sh
 from torchvision.utils import draw_bounding_boxes
-
+from collections import namedtuple
 import config
 def render(viewpoint_camera, pc : GaussianModel_p, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
     """
@@ -536,10 +536,10 @@ def get_block_screen_bbox_pre_render(xyz, scaling, full_proj_transform, W, H, Fo
     pad = max(32, 0.05 * max(W, H))
     x_min -= pad
     x_max += pad
+    BBox = namedtuple("BBox", ["x_min", "y_min", "x_max", "y_max"])
+    return BBox
 
-    return x_min, y_min, x_max, y_max
-
-def print_box_on_image(image, x_min, y_min, x_max, y_max):
+def print_box_on_image(image, bbox):
     """
     在渲染图上绘制 BBox 并返回结果 Tensor
     :param image: [3, H, W] 的 torch.Tensor, 范围 [0, 1]
@@ -553,8 +553,8 @@ def print_box_on_image(image, x_min, y_min, x_max, y_max):
         
         # 2. 坐标合法性裁剪，防止投影计算出屏导致的报错
         H, W = img_uint8.shape[1], img_uint8.shape[2]
-        x1, y1 = max(0, int(x_min)), max(0, int(y_min))
-        x2, y2 = min(W, int(x_max)), min(H, int(y_max))
+        x1, y1 = max(0, int(bbox.x_min)), max(0, int(bbox.y_min))
+        x2, y2 = min(W, int(bbox.x_max)), min(H, int(bbox.y_max))
         
         # 3. 如果有效区域太小或非法，直接返回原图
         if x2 <= x1 or y2 <= y1:
@@ -631,7 +631,8 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
         scaling=gaussians.get_scaling[fine_mask]
         focal_x = viewpoint_cam.image_width / (2 * math.tan(viewpoint_cam.FoVx / 2))
         focal_y = viewpoint_cam.image_height / (2 * math.tan(viewpoint_cam.FoVy / 2))
-        x_min, y_min, x_max, y_max = get_block_screen_bbox_pre_render(xyz, scaling, proj_matrix, W, H, focal_x, focal_y)
+        
+        bbox = get_block_screen_bbox_pre_render(xyz, scaling, proj_matrix, W, H, focal_x, focal_y)
 
 
         # 3. 渲染可见块
@@ -640,7 +641,7 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
         gaussians.end_subset()
         
         if config.PRINT_EVERYTHING:
-            block_img_with_box = print_box_on_image(out["render"], x_min, y_min, x_max, y_max)
+            block_img_with_box = print_box_on_image(out["render"], bbox)
             torchvision.utils.save_image(block_img_with_box, os.path.join(save_dir, f"{block_idx}.png"))
 
         all_renders.append(out["render"].detach())
