@@ -22,6 +22,10 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+import time
+from logger import get_logger
+LOGGER = None
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -70,37 +74,33 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    
+    t_update_learning_rate = 0.0
+    t_getTrainCameras = 0.0
+    t_render = 0.0
+    t_unpack_render = 0.0
+    t_loss_cal = 0.0
+    t_backward = 0.0
+    t_exposure_optimizer = 0.0
+    t_update_gaussians_optimizer = 0.0
+    
     for iteration in range(first_iter, opt.iterations + 1):
-        if network_gui.conn == None:
-            network_gui.try_connect()
-        while network_gui.conn != None:
-            try:
-                net_image_bytes = None
-                custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
-                if custom_cam != None:
-                    net_image = render(custom_cam, gaussians, pipe, background, scaling_modifier=scaling_modifer, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)["render"]
-                    net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
-                network_gui.send(net_image_bytes, dataset.source_path)
-                if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
-                    break
-            except Exception as e:
-                network_gui.conn = None
-
-        iter_start.record()
-
+        t0 = time.perf_counter()
         gaussians.update_learning_rate(iteration)
-
-        # Every 1000 its we increase the levels of SH up to a maximum degree
+        t_update_learning_rate += time.perf_counter() - t0
+        
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
         # Pick a random Camera
+        t0 = time.perf_counter()
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_indices = list(range(len(viewpoint_stack)))
         rand_idx = randint(0, len(viewpoint_indices) - 1)
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
         vind = viewpoint_indices.pop(rand_idx)
+        t_getTrainCameras += time.perf_counter() - t0
 
         # Render
         if (iteration - 1) == debug_from:
@@ -108,14 +108,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
+        t0 = time.perf_counter()
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        t_render += time.perf_counter() - t0
+        
+        
+        t0 = time.perf_counter()
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        t_unpack_render += time.perf_counter() - t0
 
+
+        
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
 
+        
         # Loss
+        t0 = time.perf_counter()
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         if FUSED_SSIM_AVAILABLE:
@@ -138,9 +148,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = Ll1depth.item()
         else:
             Ll1depth = 0
+        t_loss_cal += time.perf_counter() - t0
 
+
+        t0 = time.perf_counter()
         loss.backward()
-
+        t_backward += time.perf_counter() - t0
+        
         iter_end.record()
 
         with torch.no_grad():
@@ -160,10 +174,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
-            if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
+            # if (iteration in saving_iterations):
+            #     print("\n[ITER {}] Saving Gaussians".format(iteration))
+            #     scene.save(iteration)
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -180,8 +193,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Optimizer step
             if iteration < opt.iterations:
+                t_0 = time.perf_counter()
                 gaussians.exposure_optimizer.step()
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
+                t_exposure_optimizer += time.perf_counter() - t_0
+                
+                t_0 = time.perf_counter()
                 if use_sparse_adam:
                     visible = radii > 0
                     gaussians.optimizer.step(visible, radii.shape[0])
@@ -189,11 +206,36 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
+                t_update_gaussians_optimizer += time.perf_counter() - t_0
+                
+            # if (iteration in checkpoint_iterations):
+            #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
+            #     torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
-            if (iteration in checkpoint_iterations):
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+    timing = {
+        "update_learning_rate": t_update_learning_rate,
+        "getTrainCameras":      t_getTrainCameras,
+        "render":               t_render,
+        "unpack_render":        t_unpack_render,
+        "loss_calculation":     t_loss_cal,
+        "backward":             t_backward,
+        "exposure_optimizer":   t_exposure_optimizer,
+        "gaussians_optimizer":  t_update_gaussians_optimizer,
+    }
+    timing_log = (
+        "Timing summary (ms):\n"
+        + "\n".join(
+            f"  {k:25s}: {v*1000:8.2f} ms"
+            for k, v in timing.items()
+        )+ "\n"
+    )
 
+
+    print(timing_log)
+    LOGGER.info(timing_log)
+    
+    
+    
 def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
@@ -279,7 +321,8 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
-
+    scene_name = args.source_path.strip('/').split('/')[-1]
+    LOGGER = get_logger(scene_name, os.path.join("./logs", "train", scene_name))
     # Start GUI server, configure and run training
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)

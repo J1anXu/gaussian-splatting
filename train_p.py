@@ -106,6 +106,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #   Partitioned Training Loop (recommended full structure)
     # ============================================================
 
+    t_update_learning_rate = 0.0
+    t_getTrainCameras = 0.0
+    t_render = 0.0
+    t_unpack_render = 0.0
+    t_loss_cal = 0.0
+    t_backward = 0.0
+    t_exposure_optimizer = 0.0
+    t_update_gaussians_optimizer = 0.0
+    
+    t_preparetion_render = 0.0
+    t_merge = 0.0
+    t_unpack_merged = 0.0
+    t_start_subset = 0.0
+    t_end_subset = 0.0
+    t_cal_image_local = 0.0
+    t_zero_grad_subset = 0.0
+    
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
         # Every 1000 its we increase the levels of SH up to a maximum degree
@@ -113,12 +130,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             gaussians.oneupSHdegree()
 
         # Pick a random Camera
+        t0 = time.perf_counter()
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_indices = list(range(len(viewpoint_stack)))
         rand_idx = randint(0, len(viewpoint_indices) - 1)
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
         vind = viewpoint_indices.pop(rand_idx)
+        t_getTrainCameras += time.perf_counter() - t0
+        
         img_name = viewpoint_cam.image_name
         # Render
         if (iteration - 1) == debug_from:
@@ -147,6 +167,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             os.makedirs(save_dir, exist_ok=True)
         
         # 无渲染全部结果 为计算Loss做准备
+        
+        t0 = time.perf_counter()
         with torch.no_grad():
             for block_idx in range(len(gaussians.block_masks)):
                 mask = gaussians.block_masks[block_idx]
@@ -176,7 +198,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     all_viewspace_points.append(out["viewspace_points"].detach())
                     all_visibility_filter.append(out["visibility_filter"].detach())
                     all_radii.append(out["radii"].detach())
-                
+        t_preparetion_render += time.perf_counter() - t0
         
         # contribution_lists
         black_block_indices = []
@@ -200,78 +222,82 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         #     os.path.join(save_dir, "merge_inputs.pt")
         # )
 
-
+        t0 = time.perf_counter()
         cpu_merge_result = merge(all_renders, all_depths, all_alphas, all_viewspace_points, all_visibility_filter, all_radii)
+        t_merge += time.perf_counter() - t0
         
+        t0 = time.perf_counter()
         C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
         T_sorted = cpu_merge_result["front_alphas"] # 每个 block 的透明度，已经按照正确的前后顺序排列好
         prefix_T = cpu_merge_result["prefix_T"]
         sort_idx = cpu_merge_result["sort_idx"]
         block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
-        
         radii_cpu = cpu_merge_result["final_radii"].detach().cpu()
         visibility_filter_cpu = cpu_merge_result["final_visibility_filter"].detach().cpu()
         K, C, H, W = C_sorted.shape   # C应该=3
+        merge_res = cpu_merge_result["final_rgb"].detach().cpu()
+        if config.PRINT_EVERYTHING:
+            torchvision.utils.save_image(merge_res, os.path.join(save_dir, f"merge.png"))
+        # iteration 开始
+        N_total = gaussians.get_xyz.shape[0]
+        full_viewspace_grad = torch.zeros((N_total, 3),dtype=torch.float32,device="cpu")
+        t_unpack_merged += time.perf_counter() - t0
 
         gt_image = viewpoint_cam.original_image.cuda()
 
 
-        merge_res = cpu_merge_result["final_rgb"].detach().cpu()
-        
-        if config.PRINT_EVERYTHING:
-            torchvision.utils.save_image(merge_res, os.path.join(save_dir, f"merge.png"))
-
-        # iteration 开始
-        N_total = gaussians.get_xyz.shape[0]
-
-        full_viewspace_grad = torch.zeros((N_total, 3),dtype=torch.float32,device="cpu")
-        
-
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
+            t0 = time.perf_counter()
             active_mask = gaussians.block_masks[block_id]
-            
             # 1. 打开subset模式 使GPU只能看到指定的高斯, 并且开启这部分高斯的梯度
             gaussians.start_subset(active_mask, requires_grad=True) 
+            t_start_subset += time.perf_counter() - t0
+            
             
             # 2. 渲染指定部分的高斯
+            t0 = time.perf_counter()
             active_block_out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            t_render += time.perf_counter() - t0
             
-            viewspace_point_tensor = active_block_out["viewspace_points"]  # [N,3]，N是当前 subset 的高斯数
-            
-            
-            rank_map = block_rank[block_id]  # [H,W]，每个像素告诉你排序位置
-            
-            # 3. 取出对应的 prefix （透明度前缀）
-            prefix_T_k = prefix_T[:, 0].gather(dim=0, index=rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
+            if True:
+                t0 = time.perf_counter()
+                viewspace_point_tensor = active_block_out["viewspace_points"]  # [N,3]，N是当前 subset 的高斯数
+                rank_map = block_rank[block_id]  # [H,W]，每个像素告诉你排序位置
+                
+                # 3. 取出对应的 prefix （透明度前缀）
+                prefix_T_k = prefix_T[:, 0].gather(dim=0, index=rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
 
-            idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
-            idx = idx.expand(1, C, H, W)                 # [1,3,H,W]
-            
-            # 4. 取出对应的 C （颜色贡献）
-            # C_sorted 就是 “每个 block 在每个像素上实际贡献到最终图像中的颜色项”，并且它可以直接从像素上扣除。
-            C_sorted_k = C_sorted.gather(dim=0,index=idx).squeeze(0)   # [3,H,W]
+                idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
+                idx = idx.expand(1, C, H, W)                 # [1,3,H,W]
+                
+                # 4. 取出对应的 C （颜色贡献）
+                # C_sorted 就是 “每个 block 在每个像素上实际贡献到最终图像中的颜色项”，并且它可以直接从像素上扣除。
+                C_sorted_k = C_sorted.gather(dim=0,index=idx).squeeze(0)   # [3,H,W]
 
-            # C_base 是除了 active block 之外所有 block 的贡献的和（CPU）
-            # 或者说：从全量渲染的最终图像中扣除当前 block 的旧颜色贡献，得到由其他 block 单独形成的背景图
-            C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k
+                # C_base 是除了 active block 之外所有 block 的贡献的和（CPU）
+                # 或者说：从全量渲染的最终图像中扣除当前 block 的旧颜色贡献，得到由其他 block 单独形成的背景图
+                C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k
 
-            # 把 CPU 的 prefix_T_k 和 C_base 搬到 GPU（很小，成本很低）
-            prefix_T_k_gpu = prefix_T_k.to("cuda")
-            C_base_gpu  = C_base.to("cuda")
+                # 把 CPU 的 prefix_T_k 和 C_base 搬到 GPU（很小，成本很低）
+                prefix_T_k_gpu = prefix_T_k.to("cuda")
+                C_base_gpu  = C_base.to("cuda")
 
-            # 合成 final image（GPU）
-            # 因为最终图像是所有 block 按透明度前缀系数的线性加权和
-            # 所以只需从全图中减去该 block 的旧贡献并加上重新渲染的新贡献，就能得到与全量渲染一致的结果
-            C_active = active_block_out["render"]      # [3,H,W], has grad
+                # 合成 final image（GPU）
+                # 因为最终图像是所有 block 按透明度前缀系数的线性加权和
+                # 所以只需从全图中减去该 block 的旧贡献并加上重新渲染的新贡献，就能得到与全量渲染一致的结果
+                C_active = active_block_out["render"]      # [3,H,W], has grad
 
-            image = C_base_gpu + prefix_T_k_gpu * C_active
-            
+                image = C_base_gpu + prefix_T_k_gpu * C_active
+                t_cal_image_local += time.perf_counter() - t0
+                
+                
             if viewpoint_cam.alpha_mask is not None:
                 alpha_mask = viewpoint_cam.alpha_mask.to(image.device)
                 image *= alpha_mask
             
             # 5. 计算 loss（依赖于 active_out → 依赖于当前 subset 的高斯）
+            t0 = time.perf_counter()
             Ll1 = l1_loss(image, gt_image)
             if FUSED_SSIM_AVAILABLE:
                 ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
@@ -293,19 +319,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 Ll1depth = Ll1depth.item()
             else:
                 Ll1depth = 0
-                
-            # 6. 只清 subset 的 grad
-            gaussians.zero_grad_subset()
+            t_loss_cal += time.perf_counter() - t0
             
+            
+            # 6. 只清 subset 的 grad
+            t0 = time.perf_counter()
+            gaussians.zero_grad_subset()
+            t_zero_grad_subset += time.perf_counter() - t0
+            
+            t0 = time.perf_counter()
             loss.backward()
+            t_backward += time.perf_counter() - t0
             
             full_viewspace_grad[active_mask] = viewspace_point_tensor.grad.detach().cpu() 
             
             # 7. 在 GPU 上用 subset 优化器做 Adam 更新，并把参数 & state 写回 CPU
+            t0 = time.perf_counter()
             gaussians.adam_step_subset()   
+            t_update_gaussians_optimizer += time.perf_counter() - t0
                          
             # 9. 关闭subset模式 清空GPU
+            t0 = time.perf_counter()
             gaussians.end_subset() 
+            t_end_subset += time.perf_counter() - t0
             
         if config.PRINT_EVERYTHING:
             torchvision.utils.save_image(image, os.path.join(save_dir, f"reassemble.png"))
@@ -317,7 +353,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gaussians.adam_step += 1
         
         # 10. 更新学习率
+        t0 = time.perf_counter()
         gaussians.update_learning_rate(iteration)
+        t_update_learning_rate += time.perf_counter() - t0
         
         iter_end.record()
         
@@ -343,10 +381,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
-            if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
+            # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+            # if (iteration in saving_iterations):
+            #     print("\n[ITER {}] Saving Gaussians".format(iteration))
+            #     scene.save(iteration)
                 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -363,9 +401,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Optimizer step
             if iteration < opt.iterations:
+                t0 = time.perf_counter()
                 gaussians.exposure_optimizer.step()
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
-                
+                t_exposure_optimizer += time.perf_counter() - t0
                 #!几何参数的优化在上面的 per-block 循环里已经做完了，这里不要再 step 了
                 # if use_sparse_adam:
                 #     visible = radii_cpu > 0
@@ -378,6 +417,36 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+    timing = {
+        "update_learning_rate": t_update_learning_rate,
+        "getTrainCameras":      t_getTrainCameras,
+        "render":               t_render,
+        "unpack_render":        t_unpack_render,
+        "loss_calculation":     t_loss_cal,
+        "backward":             t_backward,
+        "exposure_optimizer":   t_exposure_optimizer,
+        "gaussians_optimizer":  t_update_gaussians_optimizer,
+        "preparation_render":   t_preparetion_render,
+        "merge":                t_merge,
+        "unpack_merged":        t_unpack_merged,
+        "start_subset":         t_start_subset,
+        "end_subset":           t_end_subset,
+        "cal_image_local":      t_cal_image_local,
+        "zero_grad_subset":     t_zero_grad_subset,
+    }
+
+    timing_log = (
+        "Timing summary (ms):\n"
+        + "\n".join(
+            f"  {k:25s}: {v*1000:8.2f} ms"
+            for k, v in timing.items()
+        )+ "\n"
+    )
+
+
+    print(timing_log)
+    LOGGER.info(timing_log)
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
