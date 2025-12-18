@@ -14,7 +14,7 @@ from scene_p import Scene_p
 import os
 from tqdm import tqdm
 from os import makedirs
-from gaussian_renderer_p import render, render_and_merge
+from gaussian_renderer_p import render, render_and_merge, render_and_merge2
 import torchvision
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
@@ -35,7 +35,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     makedirs(gts_path, exist_ok=True)
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        rendering = render_and_merge(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)["render"]
+        rendering = render_and_merge2(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)["render"]
         gt = view.original_image[0:3, :, :]
 
         if args.train_test_exp:

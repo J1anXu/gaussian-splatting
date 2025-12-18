@@ -138,10 +138,10 @@ def merge(
     render_list,
     depth_list,
     alphaLeft_list,
-    cache_viewspace_points_list=None,
-    cache_visibility_filters_list=None,
-    cache_radii_list=None,
-    eps=1e-10
+    viewpoints_list=None,
+    vis_filter_list=None,
+    radii_list=None,
+    eps=1e-10,
 ):
     """
     Multi-block compositing for partitioned Gaussian rendering.
@@ -263,22 +263,22 @@ def merge(
     final_visibility_filter   = None
 
     # 4.1 viewspace_points: 直接 cat
-    if cache_viewspace_points_list is not None and len(cache_viewspace_points_list) > 0:
-        final_viewspace_points = torch.cat(cache_viewspace_points_list, dim=0)
+    if viewpoints_list is not None and len(viewpoints_list) > 0:
+        final_viewspace_points = torch.cat(viewpoints_list, dim=0)
 
     # 4.2 radii: 直接 cat
-    if cache_radii_list is not None and len(cache_radii_list) > 0:
-        final_radii = torch.cat(cache_radii_list, dim=0)
+    if radii_list is not None and len(radii_list) > 0:
+        final_radii = torch.cat(radii_list, dim=0)
 
     # 4.3 visibility_filter: 需要做 index offset 后 cat
     if (
-        cache_visibility_filters_list is not None
-        and cache_radii_list is not None
-        and len(cache_visibility_filters_list) == len(cache_radii_list)
+        vis_filter_list is not None
+        and radii_list is not None
+        and len(vis_filter_list) == len(radii_list)
     ):
         vis_list = []
         offset = 0
-        for vf, radii in zip(cache_visibility_filters_list, cache_radii_list):
+        for vf, radii in zip(vis_filter_list, radii_list):
             num_r = radii.shape[0]
 
             if vf is None or vf.numel() == 0:
@@ -330,6 +330,201 @@ def merge(
         "prefix_T": prefix_T,
         "block_rank": block_rank
     }
+
+
+def merge2(
+    render_list,
+    depth_list,
+    alphaLeft_list,
+    viewpoints_list=None,
+    vis_filter_list=None,
+    radii_list=None,
+    eps=1e-10,
+    bbox_list=None,
+    H=None,
+    W=None,
+):
+    
+
+
+    K = len(render_list)
+    assert K > 0, "render_list is empty"
+
+    device = render_list[0].device
+    dtype  = render_list[0].dtype
+
+
+
+    # ---------------------------------------------------------
+    # 0. 替换 stack 逻辑：按 BBox 展开 Patch 到全屏容器
+    # ---------------------------------------------------------
+    # 这样只在 merge 函数内部瞬时占用显存，且支持不同尺寸的 Patch
+    renders = torch.zeros((K, 3, H, W), device=device, dtype=dtype)
+    depths  = torch.full((K, 1, H, W), 1e10, device=device, dtype=dtype) # 默认无穷远
+    alphas  = torch.ones((K, 1, H, W), device=device, dtype=dtype)  # 默认全透射 (1.0)
+
+    for k in range(K):
+        # 确保坐标合法
+        x1, y1, x2, y2 = bbox_list[k]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(W, x2), min(H, y2)
+
+
+        # 拿到对应的 Patch 数据
+        r_p = render_list[k]
+        d_p = depth_list[k]
+        a_p = alphaLeft_list[k]
+
+        # 获取实际可填充的尺寸 (防止 Patch 稍微大于 BBox 边界的情况)
+        th = min(y2 - y1, r_p.shape[-2])
+        tw = min(x2 - x1, r_p.shape[-1])
+
+        y1 = int(y1)
+        x1 = int(x1)
+        th = int(th)
+        tw = int(tw)
+        k  = int(k)
+
+
+        if th > 0 and tw > 0:
+            # 颜色填充
+            renders[k, :, y1:y1+th, x1:x1+tw] = r_p[..., :th, :tw]
+            # 深度填充 (Depth 可能是 [1,H,W] 或 [H,W]，用 [..., :th, :tw] 自动兼容)
+            depths[k, :, y1:y1+th, x1:x1+tw]  = d_p[..., :th, :tw]
+            # Alpha 填充
+            alphas[k, :, y1:y1+th, x1:x1+tw]  = a_p[..., :th, :tw]
+            
+
+    # ------------------------
+    # 1. sort pixels along depth
+    # ------------------------
+    _, C, H, W = renders.shape
+    assert C == 3, f"render channel should be 3, got {C}"
+    
+    # 如果你的 depth 是 "越大越近" 或 "inverse depth"，这里可以改成 descending=True/False
+    sort_idx = torch.argsort(depths.squeeze(1), dim=0, descending=True)  # [K,H,W]
+
+    # RGB 排序
+    idx_rgb = sort_idx.unsqueeze(1).expand(-1, C, -1, -1)        # [K,3,H,W]
+    front_rgbs = torch.gather(renders, 0, idx_rgb)               # [K,3,H,W]
+
+    # alpha 排序
+    idx_alpha = sort_idx.unsqueeze(1)                            # [K,1,H,W]
+    front_alphas = torch.gather(alphas, 0, idx_alpha)            # [K,1,H,W]
+
+    # depth 排序（用于 final_depth）
+    front_depths = torch.gather(depths, 0, idx_alpha)            # [K,1,H,W]
+
+    # ------------------------
+    # 2. forward compositing
+    # ------------------------
+    # cumT[k] = prod_{i<=k} alpha_i
+    cumT = torch.cumprod(front_alphas, dim=0)                    # [K,1,H,W]
+    # prefix_T[k] = prod_{i<k} alpha_i
+    prefix_T = torch.cat([torch.ones_like(cumT[:1]), cumT[:-1]], dim=0)  # [K,1,H,W]
+
+    # color & depth 合成
+    final_rgb   = (prefix_T * front_rgbs).sum(dim=0)       # [3,H,W]
+    final_rgb = final_rgb.clamp(0, 1)
+
+    
+    
+
+    final_depth = (prefix_T * front_depths).sum(dim=0)           # [1,H,W]
+
+    # ------------------------
+    # 3. background color
+    # ------------------------
+    log_front_Ts = torch.log(front_alphas.clamp(min=eps))        # [K,1,H,W]
+    log_post_prod_inc   = torch.cumsum(log_front_Ts.flip(0), dim=0).flip(0)
+    log_post_prod_shift = torch.cat(
+        [log_post_prod_inc[1:], torch.zeros_like(log_post_prod_inc[:1])],
+        dim=0
+    )
+
+    inv_scale    = torch.exp(-log_post_prod_inc).clamp(max=1e6)
+    C_scaled     = front_rgbs * inv_scale
+    suffix_sum_C = torch.cumsum(C_scaled.flip(0), dim=0).flip(0) - C_scaled
+    scale        = torch.exp(log_post_prod_shift)
+    suffix_color = scale * suffix_sum_C
+    bg_rgb       = suffix_color[0]                               # [3,H,W]
+
+    # ------------------------
+    # 4. merge caches (viewspace_points, radii, visibility_filter)
+    # ------------------------
+    final_viewspace_points   = None
+    final_radii = None
+    final_visibility_filter   = None
+
+    # 4.1 viewspace_points: 直接 cat
+    if viewpoints_list is not None and len(viewpoints_list) > 0:
+        final_viewspace_points = torch.cat(viewpoints_list, dim=0)
+
+    # 4.2 radii: 直接 cat
+    if radii_list is not None and len(radii_list) > 0:
+        final_radii = torch.cat(radii_list, dim=0)
+
+    # 4.3 visibility_filter: 需要做 index offset 后 cat
+    if (
+        vis_filter_list is not None
+        and radii_list is not None
+        and len(vis_filter_list) == len(radii_list)
+    ):
+        vis_list = []
+        offset = 0
+        for vf, radii in zip(vis_filter_list, radii_list):
+            num_r = radii.shape[0]
+
+            if vf is None or vf.numel() == 0:
+                offset += num_r
+                continue
+
+            # vf 可能是 [M,1] 或 [M]
+            if vf.dim() == 2 and vf.size(1) == 1:
+                local_idx = vf[:, 0]
+            else:
+                local_idx = vf.view(-1)
+
+            global_idx = local_idx + offset
+            vis_list.append(global_idx)
+
+            offset += num_r
+
+        if len(vis_list) > 0:
+            final_visibility_filter = torch.cat(vis_list, dim=0).unsqueeze(1)  # [M_total,1]
+        else:
+            final_visibility_filter = torch.empty(
+                (0, 1), dtype=torch.long, device=device
+            )
+
+    # ------- 新增：计算 block_rank -------
+    # sort_idx[k,h,w] = block_id
+    # block_rank[block_id,h,w] = k     (反向映射）
+    K, H, W = sort_idx.shape
+    flat = sort_idx.reshape(K, -1)        # [K,HW]
+    br = torch.empty_like(flat)
+    cols = torch.arange(flat.shape[1])
+
+    for k in range(K):
+        br[ flat[k], cols ] = k
+
+    block_rank = br.reshape(K, H, W)
+
+    
+    return {
+        "final_rgb": final_rgb,
+        "bg_rgb": bg_rgb,
+        "final_depth": final_depth,
+        "final_viewspace_points": final_viewspace_points,
+        "final_visibility_filter": final_visibility_filter,
+        "final_radii": final_radii,
+        "sort_idx": sort_idx,
+        "front_rgbs": front_rgbs,
+        "front_alphas": front_alphas,
+        "prefix_T": prefix_T,
+        "block_rank": block_rank
+    }
+
 
 
 def get_frustum_planes(view_proj_matrix):
@@ -536,10 +731,9 @@ def get_block_screen_bbox_pre_render(xyz, scaling, full_proj_transform, W, H, Fo
     pad = max(32, 0.05 * max(W, H))
     x_min -= pad
     x_max += pad
-    BBox = namedtuple("BBox", ["x_min", "y_min", "x_max", "y_max"])
-    return BBox
+    return x_min, y_min, x_max, y_max
 
-def print_box_on_image(image, bbox):
+def print_box_on_image(image, x_min, y_min, x_max, y_max):
     """
     在渲染图上绘制 BBox 并返回结果 Tensor
     :param image: [3, H, W] 的 torch.Tensor, 范围 [0, 1]
@@ -553,8 +747,8 @@ def print_box_on_image(image, bbox):
         
         # 2. 坐标合法性裁剪，防止投影计算出屏导致的报错
         H, W = img_uint8.shape[1], img_uint8.shape[2]
-        x1, y1 = max(0, int(bbox.x_min)), max(0, int(bbox.y_min))
-        x2, y2 = min(W, int(bbox.x_max)), min(H, int(bbox.y_max))
+        x1, y1 = max(0, x_min), max(0, y_min)
+        x2, y2 = min(W, x_max), min(H, y_max)
         
         # 3. 如果有效区域太小或非法，直接返回原图
         if x2 <= x1 or y2 <= y1:
@@ -570,15 +764,47 @@ def print_box_on_image(image, bbox):
         # 6. 转回 float32 且范围回到 [0, 1] 并送回原始设备
         return res_uint8.to(image.device).float() / 255.0
     
+# 定义内部裁切函数：确保坐标是整数，并执行 clone 彻底断开与全屏大图的联系
+def get_patch(tensor, x_min, y_min, x_max, y_max):
+    """
+    tensor: [C,H,W] or [H,W]
+    bbox coords: float or int (screen space)
+    """
+
+    H, W = tensor.shape[-2], tensor.shape[-1]
+
+    # 1. 转 int + clamp（这是关键）
+    x1 = int(math.floor(x_min))
+    y1 = int(math.floor(y_min))
+    x2 = int(math.ceil(x_max))
+    y2 = int(math.ceil(y_max))
+
+    x1 = max(0, min(x1, W))
+    x2 = max(0, min(x2, W))
+    y1 = max(0, min(y1, H))
+    y2 = max(0, min(y2, H))
+
+    # 2. 空 patch 直接返回 None（防止后面炸）
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    # 3. 真正切片
+    if tensor.dim() == 3:  # [C,H,W]
+        return tensor[:, y1:y2, x1:x2].detach().clone()
+    else:  # [H,W]
+        return tensor[y1:y2, x1:x2].detach().clone()
 
 
 def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
-    all_renders = []
-    all_depths  = []
-    all_alphas  = []
-    all_viewspace_points = []
-    all_visibility_filter = []
-    all_radii = []
+    render_list = []
+    depth_list  = []
+    alphaLeft_list  = []
+
+    viewpoints_list = []
+    vis_filter_list = []
+    radii_list = []
+    bbox_list = []
+    
     img_name = viewpoint_cam.image_name
     save_dir = os.path.join("debug", f"{img_name}")
     os.makedirs(save_dir, exist_ok=True)
@@ -632,7 +858,7 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
         focal_x = viewpoint_cam.image_width / (2 * math.tan(viewpoint_cam.FoVx / 2))
         focal_y = viewpoint_cam.image_height / (2 * math.tan(viewpoint_cam.FoVy / 2))
         
-        bbox = get_block_screen_bbox_pre_render(xyz, scaling, proj_matrix, W, H, focal_x, focal_y)
+        x_min, y_min, x_max, y_max = get_block_screen_bbox_pre_render(xyz, scaling, proj_matrix, W, H, focal_x, focal_y)
 
 
         # 3. 渲染可见块
@@ -641,19 +867,37 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
         gaussians.end_subset()
         
         if config.PRINT_EVERYTHING:
-            block_img_with_box = print_box_on_image(out["render"], bbox)
+            block_img_with_box = print_box_on_image(out["render"], x_min, y_min, x_max, y_max)
             torchvision.utils.save_image(block_img_with_box, os.path.join(save_dir, f"{block_idx}.png"))
 
-        all_renders.append(out["render"].detach())
-        all_depths.append(out["depth"].detach())
-        all_alphas.append(out["alphaLeft"].detach())
-        all_viewspace_points.append(out["viewspace_points"].detach())
-        all_visibility_filter.append(out["visibility_filter"].detach())
-        all_radii.append(out["radii"].detach())
+        # 原始的
+        render_list.append(out["render"].detach())
+        depth_list.append(out["depth"].detach())
+        alphaLeft_list.append(out["alphaLeft"].detach())
+        
+
+
+        # 这里保持不动        
+        viewpoints_list.append(out["viewspace_points"].detach())
+        vis_filter_list.append(out["visibility_filter"].detach())
+        radii_list.append(out["radii"].detach())
+        
+        bbox_list.append((x_min, y_min, x_max, y_max))
+        
+        del out
         
     print(f"Rendered {len(visible_indices)} / {len(gaussians.block_masks)} blocks for view {img_name}")
     
-    cpu_merge_result = merge(all_renders, all_depths, all_alphas, all_viewspace_points, all_visibility_filter, all_radii)
+    cpu_merge_result = merge(render_list, depth_list, alphaLeft_list, viewpoints_list, vis_filter_list, radii_list)
+    
+
+    
+
+    # 取出并转换为 HWC 格式的张量
+    img1 = cpu_merge_result["final_rgb"].detach().cpu()
+
+
+    torchvision.utils.save_image(img1, os.path.join(save_dir, f"merge1.png"))
     
     rendered_image = cpu_merge_result["final_rgb"]
     screenspace_points = cpu_merge_result["final_viewspace_points"]
@@ -673,3 +917,120 @@ def render_and_merge(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torc
     return out
 
 
+def render_and_merge2(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
+
+    render_list2 = []
+    depth_list2  = []
+    alphaLeft_list2  = []
+    
+    viewpoints_list = []
+    vis_filter_list = []
+    radii_list = []
+    bbox_list = []
+    img_name = viewpoint_cam.image_name
+    save_dir = os.path.join("debug", f"{img_name}")
+    os.makedirs(save_dir, exist_ok=True)
+    visible_indices = []
+    # 1. 提取当前相机的视锥平面
+
+    # 设定一个合理的全局可见距离，根据你的场景大小调整（比如 50.0 或 100.0）
+    MAX_RENDER_DIST = 70.0
+    cam_center = viewpoint_cam.camera_center # 获取相机位置
+    proj_matrix = viewpoint_cam.full_proj_transform
+    planes = get_frustum_planes(proj_matrix)
+    
+    view_matrix=viewpoint_cam.world_view_transform
+    W = viewpoint_cam.image_width
+    H = viewpoint_cam.image_height
+    for block_idx in range(len(gaussians.block_masks)):
+        mask = gaussians.block_masks[block_idx]
+        blk = gaussians.blocks[block_idx]
+        
+        
+        # --- 第一层：距离粗筛 ---
+        # # 过滤掉那些在视锥内但离得太远、投影后几乎没像素的块
+        # if not is_block_within_dist(blk, cam_center, MAX_RENDER_DIST):
+        #     print(f"In {viewpoint_cam.image_name} Block {block_idx} skipped due to distance.")
+        #     continue
+        
+        # 2. 视锥剔除：如果块不在视野内，直接跳过
+        if not is_block_visible(blk, planes):
+            continue
+        
+
+        # --- 第二步：点级精筛 ---
+        # 此时只处理那些“部分可见”的块，剔除掉该块中在视野外的冗余点
+        original_count = len(mask)
+        fine_mask = get_visible_mask_in_block(mask, gaussians.get_xyz, planes)
+        culled_count = original_count - len(fine_mask)
+        
+        # 打印剔除情况
+        if culled_count > 0:
+            percent = (culled_count / original_count) * 100
+            print(f"  [Block {block_idx:2d}] Fine Culling: {original_count:7d} -> {len(fine_mask):7d} points (-{percent:.1f}%)")
+
+        if len(fine_mask) == 0:
+            print(f"  [Block {block_idx:2d}] Fully culled by point-level check.")
+            continue
+
+        visible_indices.append(block_idx)
+
+        xyz=gaussians.get_xyz[fine_mask]
+        scaling=gaussians.get_scaling[fine_mask]
+        focal_x = viewpoint_cam.image_width / (2 * math.tan(viewpoint_cam.FoVx / 2))
+        focal_y = viewpoint_cam.image_height / (2 * math.tan(viewpoint_cam.FoVy / 2))
+        
+        x_min, y_min, x_max, y_max = get_block_screen_bbox_pre_render(xyz, scaling, proj_matrix, W, H, focal_x, focal_y)
+
+
+        # 3. 渲染可见块
+        gaussians.start_subset(fine_mask)
+        out = render(viewpoint_cam, gaussians, pipe, bg,  scaling_modifier=scaling_modifier, separate_sh=separate_sh, override_color=override_color, use_trained_exp=use_trained_exp)
+        gaussians.end_subset()
+        
+        if config.PRINT_EVERYTHING:
+            block_img_with_box = print_box_on_image(out["render"], x_min, y_min, x_max, y_max)
+            torchvision.utils.save_image(block_img_with_box, os.path.join(save_dir, f"{block_idx}.png"))
+
+
+        
+        # 改进的
+        render_list2.append(get_patch(out["render"], x_min, y_min, x_max, y_max))
+        depth_list2.append(get_patch(out["depth"], x_min, y_min, x_max, y_max))
+        alphaLeft_list2.append(get_patch(out["alphaLeft"], x_min, y_min, x_max, y_max))
+
+        # 这里保持不动        
+        viewpoints_list.append(out["viewspace_points"].detach())
+        vis_filter_list.append(out["visibility_filter"].detach())
+        radii_list.append(out["radii"].detach())
+        
+        bbox_list.append((x_min, y_min, x_max, y_max))
+        
+        del out
+        
+    print(f"Rendered {len(visible_indices)} / {len(gaussians.block_masks)} blocks for view {img_name}")
+    
+    cpu_merge_result2 = merge2(render_list2, depth_list2, alphaLeft_list2, viewpoints_list, vis_filter_list, radii_list, eps=1e-10, bbox_list=bbox_list, H=H, W=W)
+    
+
+    img2 = cpu_merge_result2["final_rgb"].detach().cpu()
+
+
+    torchvision.utils.save_image(img2, os.path.join(save_dir, f"merge2.png"))
+    
+    rendered_image = cpu_merge_result2["final_rgb"]
+    screenspace_points = cpu_merge_result2["final_viewspace_points"]
+    radii = cpu_merge_result2["final_radii"]
+    depth_image = cpu_merge_result2["final_depth"]
+    alphaLeft = cpu_merge_result2["front_alphas"][-1]
+
+    out = {
+    "render": rendered_image,
+    "viewspace_points": screenspace_points,
+    "visibility_filter" : (radii > 0).nonzero(),
+    "radii": radii,
+    "depth" : depth_image,
+    "alphaLeft": alphaLeft
+    }
+    
+    return out
