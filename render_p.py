@@ -20,6 +20,10 @@ from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer_p import GaussianModel_p
+WANDB = True
+import wandb
+import time
+
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
@@ -34,8 +38,16 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
 
+    total_time = 0.0
+
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
+        t0 = time.perf_counter()
         rendering = render_and_merge2(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)["render"]
+        t1 = time.perf_counter()
+        dt = t1 - t0
+        total_time += dt
+
+        print(f"[View {idx}] render_and_merge time: {dt:.3f}s")
         gt = view.original_image[0:3, :, :]
 
         if args.train_test_exp:
@@ -44,7 +56,9 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         img_name = view.image_name
         torchvision.utils.save_image(rendering, os.path.join(render_path, img_name + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, img_name + ".png"))
-
+    print(f"Total time: {total_time:.3f}s")
+    print(f"Average per view: {total_time / len(views):.3f}s")
+    
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():
         gaussians = GaussianModel_p(dataset.sh_degree, max_block_size = 300000)
@@ -74,5 +88,14 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
+    scene_name = args.source_path.strip('/').split('/')[-1]
 
+    if WANDB:
+        wandb.login()
+        run = wandb.init(
+            project="party_rendering",
+            name = f"{scene_name}_{time.strftime('%Y%m%d_%H%M%S')}",
+            job_type="rendering",
+        )
+        wandb.define_metric("iteration")  # 
     render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, SPARSE_ADAM_AVAILABLE)
