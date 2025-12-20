@@ -28,6 +28,7 @@ from partition import generate_block_masks
 from logger import get_logger
 import torchvision
 import config
+from TimerManager import TimerManager
 WANDB = True
 LOGGER = None
 try:
@@ -105,39 +106,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # ============================================================
     #   Partitioned Training Loop (recommended full structure)
     # ============================================================
-
-    t_update_learning_rate = 0.0
-    t_getTrainCameras = 0.0
-    t_render = 0.0
-    t_unpack_render = 0.0
-    t_loss_cal = 0.0
-    t_backward = 0.0
-    t_exposure_optimizer = 0.0
-    t_update_gaussians_optimizer = 0.0
     
-    t_preparetion_render = 0.0
-    t_merge = 0.0
-    t_unpack_merged = 0.0
-    t_start_subset = 0.0
-    t_end_subset = 0.0
-    t_cal_image_local = 0.0
-    t_zero_grad_subset = 0.0
+    timer = TimerManager()
     
     for iteration in range(first_iter, opt.iterations + 1):
-        iter_start.record()
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
         # Pick a random Camera
-        t0 = time.perf_counter()
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-            viewpoint_indices = list(range(len(viewpoint_stack)))
-        rand_idx = randint(0, len(viewpoint_indices) - 1)
-        viewpoint_cam = viewpoint_stack.pop(rand_idx)
-        vind = viewpoint_indices.pop(rand_idx)
-        t_getTrainCameras += time.perf_counter() - t0
+        with timer.scope("getTrainCameras", "Pick a random Camera"):
+            if not viewpoint_stack:
+                viewpoint_stack = scene.getTrainCameras().copy()
+                viewpoint_indices = list(range(len(viewpoint_stack)))
+            rand_idx = randint(0, len(viewpoint_indices) - 1)
+            viewpoint_cam = viewpoint_stack.pop(rand_idx)
+            vind = viewpoint_indices.pop(rand_idx)
+
         
         img_name = viewpoint_cam.image_name
         # Render
@@ -174,10 +159,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 mask = gaussians.block_masks[block_idx]
                 if len(mask) == 0:
                     continue
+                
                 # 开启subset会导致高斯只能被访问到mask指定的部分(get()函数被mask限制) 所以渲染结果也就只包含这些高斯产生的RGB
-                gaussians.start_subset(mask)
-                out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                gaussians.end_subset()
+                with timer.scope("start_subset 1", "无梯度渲染的时候开启subset"):
+                    gaussians.start_subset(mask)
+                
+                
+                with timer.scope("render 1", "无梯度的时候 render"):
+                    out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                    
+                with timer.scope("start_subset 2", "无梯度渲染的时候关闭subset"):
+                    gaussians.end_subset()
 
 
                 if config.PRINT_EVERYTHING:
@@ -192,13 +184,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     all_visibility_filter.append(out["visibility_filter"].detach().cpu())
                     all_radii.append(out["radii"].detach().cpu())
                 else:
-                    all_renders.append(out["render"].detach())
-                    all_depths.append(out["depth"].detach())
-                    all_alphas.append(out["alphaLeft"].detach())
-                    all_viewspace_points.append(out["viewspace_points"].detach())
-                    all_visibility_filter.append(out["visibility_filter"].detach())
-                    all_radii.append(out["radii"].detach())
-        t_preparetion_render += time.perf_counter() - t0
+                    with timer.scope("detach", "无梯度渲染的时候 把所有从GPU detach"):
+                        all_renders.append(out["render"].detach())
+                        all_depths.append(out["depth"].detach())
+                        all_alphas.append(out["alphaLeft"].detach())
+                        all_viewspace_points.append(out["viewspace_points"].detach())
+                        all_visibility_filter.append(out["visibility_filter"].detach())
+                        all_radii.append(out["radii"].detach())
+                    
+                    
+                    
         
         # contribution_lists
         black_block_indices = []
@@ -222,45 +217,43 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         #     os.path.join(save_dir, "merge_inputs.pt")
         # )
 
-        t0 = time.perf_counter()
-        cpu_merge_result = merge(all_renders, all_depths, all_alphas, all_viewspace_points, all_visibility_filter, all_radii)
-        t_merge += time.perf_counter() - t0
+        with timer.scope("merge", "merge所有结果"):
+            cpu_merge_result = merge(all_renders, all_depths, all_alphas, all_viewspace_points, all_visibility_filter, all_radii)
         
-        t0 = time.perf_counter()
-        C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
-        T_sorted = cpu_merge_result["front_alphas"] # 每个 block 的透明度，已经按照正确的前后顺序排列好
-        prefix_T = cpu_merge_result["prefix_T"]
-        sort_idx = cpu_merge_result["sort_idx"]
-        block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
-        radii_cpu = cpu_merge_result["final_radii"].detach().cpu()
-        visibility_filter_cpu = cpu_merge_result["final_visibility_filter"].detach().cpu()
-        K, C, H, W = C_sorted.shape   # C应该=3
-        merge_res = cpu_merge_result["final_rgb"].detach().cpu()
+        with timer.scope("unpack_merged", "解压所有结果"):
+            C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
+            T_sorted = cpu_merge_result["front_alphas"] # 每个 block 的透明度，已经按照正确的前后顺序排列好
+            prefix_T = cpu_merge_result["prefix_T"]
+            sort_idx = cpu_merge_result["sort_idx"]
+            block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
+            radii_cpu = cpu_merge_result["final_radii"].detach().cpu()
+            visibility_filter_cpu = cpu_merge_result["final_visibility_filter"].detach().cpu()
+            K, C, H, W = C_sorted.shape   # C应该=3
+            merge_res = cpu_merge_result["final_rgb"].detach().cpu()
+            N_total = gaussians.get_xyz.shape[0]
+            full_viewspace_grad = torch.zeros((N_total, 3),dtype=torch.float32,device="cpu")
+            
         if config.PRINT_EVERYTHING:
             torchvision.utils.save_image(merge_res, os.path.join(save_dir, f"merge.png"))
-        # iteration 开始
-        N_total = gaussians.get_xyz.shape[0]
-        full_viewspace_grad = torch.zeros((N_total, 3),dtype=torch.float32,device="cpu")
-        t_unpack_merged += time.perf_counter() - t0
 
         gt_image = viewpoint_cam.original_image.cuda()
 
 
+
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
-            t0 = time.perf_counter()
             active_mask = gaussians.block_masks[block_id]
+            
             # 1. 打开subset模式 使GPU只能看到指定的高斯, 并且开启这部分高斯的梯度
-            gaussians.start_subset(active_mask, requires_grad=True) 
-            t_start_subset += time.perf_counter() - t0
+            with timer.scope("start_subset2", "正式渲染的时候开启subset"):
+                gaussians.start_subset(active_mask, requires_grad=True) 
             
             
             # 2. 渲染指定部分的高斯
-            t0 = time.perf_counter()
-            active_block_out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-            t_render += time.perf_counter() - t0
+            with timer.scope("render", "正式渲染的时候 render"):
+                active_block_out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             
-            if True:
+            with timer.scope("image_local", "本地img细算 排序"):
                 t0 = time.perf_counter()
                 viewspace_point_tensor = active_block_out["viewspace_points"]  # [N,3]，N是当前 subset 的高斯数
                 rank_map = block_rank[block_id]  # [H,W]，每个像素告诉你排序位置
@@ -289,7 +282,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 C_active = active_block_out["render"]      # [3,H,W], has grad
 
                 image = C_base_gpu + prefix_T_k_gpu * C_active
-                t_cal_image_local += time.perf_counter() - t0
                 
                 
             if viewpoint_cam.alpha_mask is not None:
@@ -297,51 +289,48 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 image *= alpha_mask
             
             # 5. 计算 loss（依赖于 active_out → 依赖于当前 subset 的高斯）
-            t0 = time.perf_counter()
-            Ll1 = l1_loss(image, gt_image)
-            if FUSED_SSIM_AVAILABLE:
-                ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-            else:
-                ssim_value = ssim(image, gt_image)
+            with timer.scope("loss", "loss计算"):
+                Ll1 = l1_loss(image, gt_image)
+                if FUSED_SSIM_AVAILABLE:
+                    ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+                else:
+                    ssim_value = ssim(image, gt_image)
 
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+                loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-            # Depth regularization
-            Ll1depth_pure = 0.0
-            if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
-                invDepth = final_depth # 这里需要全局depth
-                mono_invdepth = viewpoint_cam.invdepthmap.cuda()
-                depth_mask = viewpoint_cam.depth_mask.cuda()
+                # Depth regularization
+                Ll1depth_pure = 0.0
+                if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
+                    invDepth = final_depth # 这里需要全局depth
+                    mono_invdepth = viewpoint_cam.invdepthmap.cuda()
+                    depth_mask = viewpoint_cam.depth_mask.cuda()
 
-                Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
-                Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
-                loss += Ll1depth
-                Ll1depth = Ll1depth.item()
-            else:
-                Ll1depth = 0
-            t_loss_cal += time.perf_counter() - t0
+                    Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
+                    Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
+                    loss += Ll1depth
+                    Ll1depth = Ll1depth.item()
+                else:
+                    Ll1depth = 0
             
             
             # 6. 只清 subset 的 grad
-            t0 = time.perf_counter()
-            gaussians.zero_grad_subset()
-            t_zero_grad_subset += time.perf_counter() - t0
+            with timer.scope("zero_grad_subset", "清空 subset 的 grad"):
+                gaussians.zero_grad_subset()
+
             
-            t0 = time.perf_counter()
-            loss.backward()
-            t_backward += time.perf_counter() - t0
+            with timer.scope("backward", "反向传播"):
+                loss.backward()
             
-            full_viewspace_grad[active_mask] = viewspace_point_tensor.grad.detach().cpu() 
+            with timer.scope("full_viewspace_grad", "拿梯度"):
+                full_viewspace_grad[active_mask] = viewspace_point_tensor.grad.detach().cpu() 
             
             # 7. 在 GPU 上用 subset 优化器做 Adam 更新，并把参数 & state 写回 CPU
-            t0 = time.perf_counter()
-            gaussians.adam_step_subset()   
-            t_update_gaussians_optimizer += time.perf_counter() - t0
+            with timer.scope("adam_step_subset", "adam优化器执行"):
+                gaussians.adam_step_subset()   
                          
             # 9. 关闭subset模式 清空GPU
-            t0 = time.perf_counter()
-            gaussians.end_subset() 
-            t_end_subset += time.perf_counter() - t0
+            with timer.scope("end_subset", "正式渲染结束 关闭subset模式 清空GPU"):
+                gaussians.end_subset() 
             
         if config.PRINT_EVERYTHING:
             torchvision.utils.save_image(image, os.path.join(save_dir, f"reassemble.png"))
@@ -353,12 +342,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gaussians.adam_step += 1
         
         # 10. 更新学习率
-        t0 = time.perf_counter()
-        gaussians.update_learning_rate(iteration)
-        t_update_learning_rate += time.perf_counter() - t0
-        
-        iter_end.record()
-        
+        with timer.scope("update_learning_rate", "更新学习率"):
+            gaussians.update_learning_rate(iteration)
         
         with torch.no_grad():
             # Progress bar
@@ -401,10 +386,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Optimizer step
             if iteration < opt.iterations:
-                t0 = time.perf_counter()
-                gaussians.exposure_optimizer.step()
-                gaussians.exposure_optimizer.zero_grad(set_to_none = True)
-                t_exposure_optimizer += time.perf_counter() - t0
+                with timer.scope("exposure_optimizer", "exposure_optimizer 更新"):
+                    gaussians.exposure_optimizer.step()
+                    gaussians.exposure_optimizer.zero_grad(set_to_none = True)
                 #!几何参数的优化在上面的 per-block 循环里已经做完了，这里不要再 step 了
                 # if use_sparse_adam:
                 #     visible = radii_cpu > 0
@@ -418,35 +402,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
-    timing = {
-        "update_learning_rate": t_update_learning_rate,
-        "getTrainCameras":      t_getTrainCameras,
-        "render":               t_render,
-        "unpack_render":        t_unpack_render,
-        "loss_calculation":     t_loss_cal,
-        "backward":             t_backward,
-        "exposure_optimizer":   t_exposure_optimizer,
-        "gaussians_optimizer":  t_update_gaussians_optimizer,
-        "preparation_render":   t_preparetion_render,
-        "merge":                t_merge,
-        "unpack_merged":        t_unpack_merged,
-        "start_subset":         t_start_subset,
-        "end_subset":           t_end_subset,
-        "cal_image_local":      t_cal_image_local,
-        "zero_grad_subset":     t_zero_grad_subset,
-    }
 
-    timing_log = (
-        "Timing summary (ms):\n"
-        + "\n".join(
-            f"  {k:25s}: {v*1000:8.2f} ms"
-            for k, v in timing.items()
-        )+ "\n"
-    )
-
-
-    print(timing_log)
-    LOGGER.info(timing_log)
+    print(timer.summary())
+    LOGGER.info(timer.summary())
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
