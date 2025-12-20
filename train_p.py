@@ -77,7 +77,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel_p(dataset.sh_degree, opt.optimizer_type, max_block_size = 250_000, optimizing_strategy ="cpu")
+    gaussians = GaussianModel_p(dataset.sh_degree, opt.optimizer_type, max_block_size = 200_000, optimizing_strategy ="cpu")
     scene = Scene_p(dataset, gaussians)
     
     gaussians.training_setup_for_part(opt)
@@ -109,6 +109,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     
     timer = TimerManager()
     
+    with timer.scope("partition", "Partition Gaussians"):
+        gaussians.partition()     
+
     for iteration in range(first_iter, opt.iterations + 1):
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
@@ -135,7 +138,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # split into blocks (only when densified)
         # --------------------------
 
-        gaussians.partition()     
         
 
         all_renders = []

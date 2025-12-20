@@ -105,15 +105,11 @@ class GaussianModel_p:
         self.setup_functions()
         
     def partition(self):
-        # 刚刚增加过点数 & 总数超过限制
-        if self.just_densified and self._xyz.shape[0]>=self.max_block_size:
-            block_masks , blocks = generate_block_masks(self._xyz, max_size = self.max_block_size)
-            block_masks = [m for m in block_masks if len(m) > 0]
-            self.blocks = blocks
-            self.block_masks = block_masks
-        else:
-            self.block_masks = [torch.arange(self._xyz.shape[0])]
-        self.just_densified = False
+        block_masks , blocks = generate_block_masks(self._xyz, max_size = self.max_block_size)
+        block_masks = [m for m in block_masks if len(m) > 0]
+        self.blocks = blocks
+        self.block_masks = block_masks
+
             
 
     def partition_for_rendering(self):
