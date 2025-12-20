@@ -47,7 +47,7 @@ class GaussianModel_p:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree, optimizer_type="default", max_block_size = 300_000):
+    def __init__(self, sh_degree, optimizer_type="default", max_block_size = 300_000, optimizing_strategy="cpu"):
         self.active_sh_degree = 0
         self.optimizer_type = optimizer_type
         self.max_sh_degree = sh_degree  
@@ -86,8 +86,21 @@ class GaussianModel_p:
         self.blocks = None
         self.just_densified = False
 
+        self.PARAM_GROUPS = [
+            ("xyz",        "_xyz",        "_xyz_gpu",        "m_xyz",        "v_xyz"),
+            ("f_dc",       "_features_dc","_features_dc_gpu","m_f_dc",       "v_f_dc"),
+            ("f_rest",     "_features_rest","_features_rest_gpu","m_f_rest","v_f_rest"),
+            ("opacity",    "_opacity",    "_opacity_gpu",    "m_opacity",    "v_opacity"),
+            ("scaling",    "_scaling",    "_scaling_gpu",    "m_scaling",    "v_scaling"),
+            ("rotation",   "_rotation",   "_rotation_gpu",   "m_rotation",   "v_rotation"),
+        ]
+
+        # 到底在cpu上还是gpu上执行优化
+        self.optimizing_strategy = optimizing_strategy  # "cpu" or "gpu"
+
         # 标记 optimier state 是否已经为 partition 训练初始化
         self.partition_training_initialized = False
+
 
         self.setup_functions()
         
@@ -141,7 +154,7 @@ class GaussianModel_p:
         self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
 
         # --------------- 对应的 Adam 状态子集（不需要 grad） ---------------
-        if self.partition_training_initialized:
+        if self.optimizing_strategy == "gpu" and self.partition_training_initialized:
             self._m_xyz_gpu,      self._v_xyz_gpu      = send_subset_to_gpu(self.m_xyz),      send_subset_to_gpu(self.v_xyz)
             self._m_f_dc_gpu,     self._v_f_dc_gpu     = send_subset_to_gpu(self.m_f_dc),     send_subset_to_gpu(self.v_f_dc)
             self._m_f_rest_gpu,   self._v_f_rest_gpu   = send_subset_to_gpu(self.m_f_rest),   send_subset_to_gpu(self.v_f_rest)
@@ -170,7 +183,7 @@ class GaussianModel_p:
         self._features_dc_gpu = None
         self._features_rest_gpu = None
         
-        if self.partition_training_initialized:
+        if self.optimizing_strategy == "gpu" and self.partition_training_initialized:
             del self._m_xyz_gpu
             del self._v_xyz_gpu
             del self._m_f_dc_gpu
@@ -216,6 +229,21 @@ class GaussianModel_p:
                 t.grad.zero_()  
   
     def adam_step_subset(self):
+        if self.optimizing_strategy == "cpu":
+            self.adam_step_subset_cpu()
+        elif self.optimizing_strategy == "gpu":
+            self.adam_step_subset_gpu()
+        else:
+            raise NotImplementedError("device must be 'cpu' or 'gpu' : got {}".format(self.optimizing_strategy))
+  
+  
+
+
+  
+  
+  
+  
+    def adam_step_subset_gpu(self):
         if not hasattr(self, "subset_indices"):
             return
 
@@ -377,6 +405,51 @@ class GaussianModel_p:
         self._rotation.grad[mask] = self._rotation_gpu.grad.detach().cpu()
         self._features_dc.grad[mask] = self._features_dc_gpu.grad.detach().cpu()
         self._features_rest.grad[mask] = self._features_rest_gpu.grad.detach().cpu()
+        
+        
+    def _adam_update_cpu(self,param, grad, m, v, lr, b1, b2, eps, step):
+        bc1 = 1.0 - b1 ** step
+        bc2 = 1.0 - b2 ** step
+
+        m.mul_(b1).add_(grad, alpha=1 - b1)
+        v.mul_(b2).addcmul_(grad, grad, value=1 - b2)
+
+        param.addcdiv_(m / bc1, (v / bc2).sqrt().add_(eps), value=-lr)
+
+
+
+
+    def adam_step_subset_cpu(self):
+        if not hasattr(self, "subset_indices"):
+            return
+
+        idx = self.subset_indices
+        step = self.adam_step
+        b1, b2, eps = self.beta1, self.beta2, self.eps
+
+        for name, param_name, gpu_name, m_name, v_name in self.PARAM_GROUPS:
+            gpu_tensor = getattr(self, gpu_name, None)
+            if gpu_tensor is None or gpu_tensor.grad is None:
+                continue
+
+            grad_cpu = gpu_tensor.grad.detach().cpu()
+
+            param = getattr(self, param_name)
+            m = getattr(self, m_name)
+            v = getattr(self, v_name)
+            lr = self.adam_lrs[name]
+
+            self._adam_update_cpu(
+                param[idx],
+                grad_cpu,
+                m[idx],
+                v[idx],
+                lr,
+                b1, b2, eps,
+                step,
+            )
+
+        
         
     def capture(self):
         return (

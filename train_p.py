@@ -77,7 +77,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel_p(dataset.sh_degree, opt.optimizer_type, max_block_size = 250_000)
+    gaussians = GaussianModel_p(dataset.sh_degree, opt.optimizer_type, max_block_size = 250_000, optimizing_strategy ="cpu")
     scene = Scene_p(dataset, gaussians)
     
     gaussians.training_setup_for_part(opt)
@@ -245,7 +245,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             active_mask = gaussians.block_masks[block_id]
             
             # 1. 打开subset模式 使GPU只能看到指定的高斯, 并且开启这部分高斯的梯度
-            with timer.scope("start_subset2", "正式渲染的时候开启subset"):
+            with timer.scope("start_subset 2", "正式渲染的时候开启subset"):
                 gaussians.start_subset(active_mask, requires_grad=True) 
             
             
