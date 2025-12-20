@@ -155,7 +155,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         # 无渲染全部结果 为计算Loss做准备
         
-        t0 = time.perf_counter()
         with torch.no_grad():
             for block_idx in range(len(gaussians.block_masks)):
                 mask = gaussians.block_masks[block_idx]
@@ -200,6 +199,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # contribution_lists
         black_block_indices = []
         available_block_indices = []
+        
         for idx, r in enumerate(all_renders):
             # r 是 CPU tensor: [3,H,W]
             if r.abs().sum().item() == 0:  # 全黑
@@ -256,7 +256,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 active_block_out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             
             with timer.scope("image_local", "本地img细算 排序"):
-                t0 = time.perf_counter()
                 viewspace_point_tensor = active_block_out["viewspace_points"]  # [N,3]，N是当前 subset 的高斯数
                 rank_map = block_rank[block_id]  # [H,W]，每个像素告诉你排序位置
                 
