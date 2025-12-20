@@ -13,7 +13,7 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer_p import render, merge, network_gui
+from gaussian_renderer_p import get_frustum_planes, is_block_visible, render, merge, network_gui
 import sys
 from scene_p import Scene_p, GaussianModel_p
 from utils.general_utils import safe_state, get_expon_lr_func
@@ -146,25 +146,34 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         all_viewspace_points = []
         all_visibility_filter = []
         all_radii = []
-
+        in_frustum_block_ids = []
 
         # 1. 创建目录
         if config.PRINT_EVERYTHING:
             save_dir = os.path.join("debug", img_name)
             os.makedirs(save_dir, exist_ok=True)
         
-        # 无渲染全部结果 为计算Loss做准备
+        with timer.scope("get_frustum_planes", "计算视锥体平面"):
+            proj_matrix = viewpoint_cam.full_proj_transform
+            planes = get_frustum_planes(proj_matrix)
         
+        # 无渲染全部结果 为计算Loss做准备
         with torch.no_grad():
             for block_idx in range(len(gaussians.block_masks)):
                 mask = gaussians.block_masks[block_idx]
-                if len(mask) == 0:
-                    continue
+                blk = gaussians.blocks[block_idx]
+                
+                # 2. 视锥剔除：如果块不在视野内，直接跳过
+                with timer.scope("is_block_visible 1", "视锥剔除 判断块是否可见"):
+                    if not is_block_visible(blk, planes):
+                        print(f"[Block {block_idx}] skipped by frustum culling")
+                        continue
+                
+                in_frustum_block_ids.append(block_idx)
                 
                 # 开启subset会导致高斯只能被访问到mask指定的部分(get()函数被mask限制) 所以渲染结果也就只包含这些高斯产生的RGB
                 with timer.scope("start_subset 1", "无梯度渲染的时候开启subset"):
                     gaussians.start_subset(mask)
-                
                 
                 with timer.scope("render 1", "无梯度的时候 render"):
                     out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -203,9 +212,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         for idx, r in enumerate(all_renders):
             # r 是 CPU tensor: [3,H,W]
             if r.abs().sum().item() == 0:  # 全黑
-                black_block_indices.append(idx)
+                black_block_indices.append(in_frustum_block_ids[idx])
             else:
-                available_block_indices.append(idx)
+                available_block_indices.append(in_frustum_block_ids[idx])
 
         # torch.save(
         #     {
@@ -243,7 +252,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
 
         # 遍历所有block 轮流当active block
-        for block_id in available_block_indices:
+        for index, block_id in enumerate(in_frustum_block_ids):
             active_mask = gaussians.block_masks[block_id]
             
             # 1. 打开subset模式 使GPU只能看到指定的高斯, 并且开启这部分高斯的梯度
@@ -257,7 +266,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             with timer.scope("image_local", "本地img细算 排序"):
                 viewspace_point_tensor = active_block_out["viewspace_points"]  # [N,3]，N是当前 subset 的高斯数
-                rank_map = block_rank[block_id]  # [H,W]，每个像素告诉你排序位置
+                rank_map = block_rank[index]  # [H,W]，每个像素告诉你排序位置
                 
                 # 3. 取出对应的 prefix （透明度前缀）
                 prefix_T_k = prefix_T[:, 0].gather(dim=0, index=rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
