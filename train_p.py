@@ -13,7 +13,7 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer_p import get_frustum_planes, is_block_visible, render, merge, network_gui
+from gaussian_renderer_p import get_frustum_planes, is_block_visible, get_visible_mask_in_block, render, merge, network_gui
 import sys
 from scene_p import Scene_p, GaussianModel_p
 from utils.general_utils import safe_state, get_expon_lr_func
@@ -147,7 +147,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         all_visibility_filter = []
         all_radii = []
         in_frustum_block_ids = []
-
+        fine_mask_list = []
         # 1. 创建目录
         if config.PRINT_EVERYTHING:
             save_dir = os.path.join("debug", img_name)
@@ -164,16 +164,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 blk = gaussians.blocks[block_idx]
                 
                 # 2. 视锥剔除：如果块不在视野内，直接跳过
-                with timer.scope("is_block_visible 1", "视锥剔除 判断块是否可见"):
-                    if not is_block_visible(blk, planes):
-                        print(f"[Block {block_idx}] skipped by frustum culling")
-                        continue
+                # with timer.scope("is_block_visible 1", "视锥剔除 判断块是否可见"):
+                #     if not is_block_visible(blk, planes):
+                #         print(f"[Block {block_idx}] skipped by frustum culling")
+                #         continue
                 
+
+                
+                with timer.scope("get_visible_mask_in_block", "视锥剔除 点级别"):
+                    fine_mask = get_visible_mask_in_block(mask, gaussians.get_xyz, planes)
+                    
+                if fine_mask.sum().item() == 0:
+                    continue
+                fine_mask_list.append(fine_mask)
                 in_frustum_block_ids.append(block_idx)
+
                 
                 # 开启subset会导致高斯只能被访问到mask指定的部分(get()函数被mask限制) 所以渲染结果也就只包含这些高斯产生的RGB
                 with timer.scope("start_subset 1", "无梯度渲染的时候开启subset"):
-                    gaussians.start_subset(mask)
+                    gaussians.start_subset(fine_mask)
                 
                 with timer.scope("render 1", "无梯度的时候 render"):
                     out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -253,8 +262,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # 遍历所有block 轮流当active block
         for index, block_id in enumerate(in_frustum_block_ids):
-            active_mask = gaussians.block_masks[block_id]
-            
+            mask = gaussians.block_masks[block_id]
+            with timer.scope("get_visible_mask_in_block2", "视锥剔除 点级别"):
+                active_mask = get_visible_mask_in_block(mask, gaussians.get_xyz, planes)
+            if active_mask.sum().item() == 0:
+                continue
             # 1. 打开subset模式 使GPU只能看到指定的高斯, 并且开启这部分高斯的梯度
             with timer.scope("start_subset 2", "正式渲染的时候开启subset"):
                 gaussians.start_subset(active_mask, requires_grad=True) 
