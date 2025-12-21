@@ -176,6 +176,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     
                 if fine_mask.sum().item() == 0:
                     continue
+                
                 fine_mask_list.append(fine_mask)
                 in_frustum_block_ids.append(block_idx)
 
@@ -196,12 +197,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 # 存储所有信息(移动到CPU)
                 if config.CAL_RES_2_CPU:
-                    all_renders.append(out["render"].detach().cpu())
-                    all_depths.append(out["depth"].detach().cpu())
-                    all_alphas.append(out["alphaLeft"].detach().cpu())
-                    all_viewspace_points.append(out["viewspace_points"].detach().cpu())
-                    all_visibility_filter.append(out["visibility_filter"].detach().cpu())
-                    all_radii.append(out["radii"].detach().cpu())
+                    with timer.scope("detach + cpu", "无梯度渲染的时候 把所有从GPU detach并搬到CPU"):
+                        all_renders.append(out["render"].detach().cpu())
+                        all_depths.append(out["depth"].detach().cpu())
+                        all_alphas.append(out["alphaLeft"].detach().cpu())
+                        all_viewspace_points.append(out["viewspace_points"].detach().cpu())
+                        all_visibility_filter.append(out["visibility_filter"].detach().cpu())
+                        all_radii.append(out["radii"].detach().cpu())
                 else:
                     with timer.scope("detach", "无梯度渲染的时候 把所有从GPU detach"):
                         all_renders.append(out["render"].detach())
@@ -262,15 +264,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # 遍历所有block 轮流当active block
         for index, block_id in enumerate(in_frustum_block_ids):
-            mask = gaussians.block_masks[block_id]
-            with timer.scope("get_visible_mask_in_block2", "视锥剔除 点级别"):
-                active_mask = get_visible_mask_in_block(mask, gaussians.get_xyz, planes)
-            if active_mask.sum().item() == 0:
-                continue
+            
+            active_mask = fine_mask_list[index]
+            
             # 1. 打开subset模式 使GPU只能看到指定的高斯, 并且开启这部分高斯的梯度
             with timer.scope("start_subset 2", "正式渲染的时候开启subset"):
                 gaussians.start_subset(active_mask, requires_grad=True) 
-            
             
             # 2. 渲染指定部分的高斯
             with timer.scope("render", "正式渲染的时候 render"):
