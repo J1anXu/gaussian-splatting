@@ -208,9 +208,7 @@ class GaussianModel_p:
             
 
         
-        # 强制释放 GPU memory
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+
         
     def zero_grad_subset(self):
         for t in [
