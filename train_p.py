@@ -212,12 +212,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
             prefix_T = cpu_merge_result["prefix_T"]
             block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
+            
             radii_cpu = cpu_merge_result["final_radii"].detach().cpu()
             visibility_filter_cpu = cpu_merge_result["final_visibility_filter"].detach().cpu()
-            K, C, H, W = C_sorted.shape   # C应该=3
             merge_res = cpu_merge_result["final_rgb"].detach().cpu()
-            N_total = gaussians.get_xyz.shape[0]
-            full_viewspace_grad = torch.zeros((N_total, 3),dtype=torch.float32,device="cpu")
+            
+        K, C, H, W = C_sorted.shape   # C应该=3
+        N_total = gaussians.get_xyz.shape[0]
+        full_viewspace_grad = torch.zeros((N_total, 3),dtype=torch.float32,device="cpu")
             
         if config.PRINT_EVERYTHING:
             torchvision.utils.save_image(merge_res, os.path.join(save_dir, f"merge.png"))
