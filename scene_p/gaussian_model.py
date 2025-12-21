@@ -164,50 +164,6 @@ class GaussianModel_p:
         self.subset_mode = False
         self.subset_indices = None
 
-        # 删除 GPU 子集参数以释放显存
-        del self._xyz_gpu
-        del self._opacity_gpu
-        del self._scaling_gpu
-        del self._rotation_gpu
-        del self._features_dc_gpu
-        del self._features_rest_gpu
-        
-        self._xyz_gpu = None
-        self._opacity_gpu = None
-        self._scaling_gpu = None
-        self._rotation_gpu = None
-        self._features_dc_gpu = None
-        self._features_rest_gpu = None
-        
-        if self.optimizing_strategy == "gpu" and self.partition_training_initialized:
-            del self._m_xyz_gpu
-            del self._v_xyz_gpu
-            del self._m_f_dc_gpu
-            del self._v_f_dc_gpu
-            del self._m_f_rest_gpu
-            del self._v_f_rest_gpu
-            del self._m_opacity_gpu
-            del self._v_opacity_gpu
-            del self._m_scaling_gpu
-            del self._v_scaling_gpu
-            del self._m_rotation_gpu
-            del self._v_rotation_gpu
-        
-            self._m_xyz_gpu = None
-            self._v_xyz_gpu = None
-            self._m_f_dc_gpu = None
-            self._v_f_dc_gpu = None
-            self._m_f_rest_gpu = None
-            self._v_f_rest_gpu = None
-            self._m_opacity_gpu = None
-            self._v_opacity_gpu = None
-            self._m_scaling_gpu = None
-            self._v_scaling_gpu = None
-            self._m_rotation_gpu = None
-            self._v_rotation_gpu = None
-            
-
-        
 
         
     def zero_grad_subset(self):
