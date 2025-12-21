@@ -134,12 +134,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
-        # --------------------------
-        # split into blocks (only when densified)
-        # --------------------------
-
-        
-
         all_renders = []
         all_depths  = []
         all_alphas  = []
@@ -169,8 +163,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #         print(f"[Block {block_idx}] skipped by frustum culling")
                 #         continue
                 
-
-                
                 with timer.scope("get_visible_mask_in_block", "视锥剔除 点级别"):
                     fine_mask = get_visible_mask_in_block(mask, gaussians.get_xyz, planes)
                     
@@ -180,7 +172,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 fine_mask_list.append(fine_mask)
                 in_frustum_block_ids.append(block_idx)
 
-                
                 # 开启subset会导致高斯只能被访问到mask指定的部分(get()函数被mask限制) 所以渲染结果也就只包含这些高斯产生的RGB
                 with timer.scope("start_subset 1", "无梯度渲染的时候开启subset"):
                     gaussians.start_subset(fine_mask)
@@ -195,27 +186,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if config.PRINT_EVERYTHING:
                     torchvision.utils.save_image(out["render"].detach().cpu(), os.path.join(save_dir, f"block_{block_idx}.png"))
 
-                # 存储所有信息(移动到CPU)
-                if config.CAL_RES_2_CPU:
-                    with timer.scope("detach + cpu", "无梯度渲染的时候 把所有从GPU detach并搬到CPU"):
-                        all_renders.append(out["render"].detach().cpu())
-                        all_depths.append(out["depth"].detach().cpu())
-                        all_alphas.append(out["alphaLeft"].detach().cpu())
-                        all_viewspace_points.append(out["viewspace_points"].detach().cpu())
-                        all_visibility_filter.append(out["visibility_filter"].detach().cpu())
-                        all_radii.append(out["radii"].detach().cpu())
-                else:
-                    with timer.scope("detach", "无梯度渲染的时候 把所有从GPU detach"):
-                        all_renders.append(out["render"].detach())
-                        all_depths.append(out["depth"].detach())
-                        all_alphas.append(out["alphaLeft"].detach())
-                        all_viewspace_points.append(out["viewspace_points"].detach())
-                        all_visibility_filter.append(out["visibility_filter"].detach())
-                        all_radii.append(out["radii"].detach())
+                with timer.scope("detach", "无梯度渲染的时候 把所有从GPU detach"):
+                    all_renders.append(out["render"].detach())
+                    all_depths.append(out["depth"].detach())
+                    all_alphas.append(out["alphaLeft"].detach())
+                    all_viewspace_points.append(out["viewspace_points"].detach())
+                    all_visibility_filter.append(out["visibility_filter"].detach())
+                    all_radii.append(out["radii"].detach())
                     
-                    
-                    
-        
         # contribution_lists
         black_block_indices = []
         available_block_indices = []
@@ -227,26 +205,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             else:
                 available_block_indices.append(in_frustum_block_ids[idx])
 
-        # torch.save(
-        #     {
-        #         "all_renders": [x.detach().cpu() for x in all_renders],
-        #         "all_depths": [x.detach().cpu() for x in all_depths],
-        #         "all_alphas": [x.detach().cpu() for x in all_alphas],
-        #         "all_viewspace_points": [x.detach().cpu() for x in all_viewspace_points],
-        #         "all_visibility_filter": [x.detach().cpu() for x in all_visibility_filter],
-        #         "all_radii": [x.detach().cpu() for x in all_radii],
-        #     },
-        #     os.path.join(save_dir, "merge_inputs.pt")
-        # )
-
         with timer.scope("merge", "merge所有结果"):
             cpu_merge_result = merge(all_renders, all_depths, all_alphas, all_viewspace_points, all_visibility_filter, all_radii)
         
         with timer.scope("unpack_merged", "解压所有结果"):
             C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
-            T_sorted = cpu_merge_result["front_alphas"] # 每个 block 的透明度，已经按照正确的前后顺序排列好
             prefix_T = cpu_merge_result["prefix_T"]
-            sort_idx = cpu_merge_result["sort_idx"]
             block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
             radii_cpu = cpu_merge_result["final_radii"].detach().cpu()
             visibility_filter_cpu = cpu_merge_result["final_visibility_filter"].detach().cpu()
@@ -285,20 +249,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
                 idx = idx.expand(1, C, H, W)                 # [1,3,H,W]
                 
-                # 4. 取出对应的 C （颜色贡献）
-                # C_sorted 就是 “每个 block 在每个像素上实际贡献到最终图像中的颜色项”，并且它可以直接从像素上扣除。
+                # 4. 取出对应的 C （颜色贡献）C_sorted 就是 “每个 block 在每个像素上实际贡献到最终图像中的颜色项”，并且它可以直接从像素上扣除。
                 C_sorted_k = C_sorted.gather(dim=0,index=idx).squeeze(0)   # [3,H,W]
 
-                # C_base 是除了 active block 之外所有 block 的贡献的和（CPU）
-                # 或者说：从全量渲染的最终图像中扣除当前 block 的旧颜色贡献，得到由其他 block 单独形成的背景图
+                # C_base 是除了 active block 之外所有 block 的贡献的和（CPU）或者说：从全量渲染的最终图像中扣除当前 block 的旧颜色贡献，得到由其他 block 单独形成的背景图
                 C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k
 
                 # 把 CPU 的 prefix_T_k 和 C_base 搬到 GPU（很小，成本很低）
                 prefix_T_k_gpu = prefix_T_k.to("cuda")
                 C_base_gpu  = C_base.to("cuda")
 
-                # 合成 final image（GPU）
-                # 因为最终图像是所有 block 按透明度前缀系数的线性加权和
+                # 合成 final image（GPU）因为最终图像是所有 block 按透明度前缀系数的线性加权和
                 # 所以只需从全图中减去该 block 的旧贡献并加上重新渲染的新贡献，就能得到与全量渲染一致的结果
                 C_active = active_block_out["render"]      # [3,H,W], has grad
 
