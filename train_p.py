@@ -302,6 +302,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             with timer.scope("backward", "反向传播"):
                 loss.backward()
+                
+            with timer.scope("del", "清理变量节省内存"):
+                loss_item = loss.item()
+                del loss
+                del image
+                del C_active
+                del prefix_T_k_gpu
+                del C_base_gpu
+
             
             with timer.scope("full_viewspace_grad", "拿梯度"):
                 full_viewspace_grad[active_mask] = viewspace_point_tensor.grad.detach().cpu() 
@@ -329,7 +338,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         with torch.no_grad():
             # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            ema_loss_for_log = 0.4 * loss_item + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
             total_points = gaussians.get_xyz.shape[0]
 
