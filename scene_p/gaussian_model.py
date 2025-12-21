@@ -1047,7 +1047,6 @@ class GaussianModel_p:
         tmp_radii = self.tmp_radii
         self.tmp_radii = None
 
-        torch.cuda.empty_cache()
         self.just_densified = True
 
     def add_densification_stats(self, full_viewspace_grad, update_filter):
