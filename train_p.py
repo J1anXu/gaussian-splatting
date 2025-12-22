@@ -13,7 +13,7 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer_p import get_frustum_planes, is_block_visible, get_visible_mask_in_block, render, merge, network_gui
+from gaussian_renderer_p import get_frustum_planes, is_block_visible, get_visible_mask_in_block, render, merge, network_gui, merge_opt
 import sys
 from scene_p import Scene_p, GaussianModel_p
 from utils.general_utils import safe_state, get_expon_lr_func
@@ -206,7 +206,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 available_block_indices.append(in_frustum_block_ids[idx])
 
         with timer.scope("merge", "merge所有结果"):
-            cpu_merge_result = merge(all_renders, all_depths, all_alphas, all_viewspace_points, all_visibility_filter, all_radii)
+            cpu_merge_result = merge_opt(all_renders, all_depths, all_alphas, all_viewspace_points, all_visibility_filter, all_radii)
         
         with timer.scope("unpack_merged", "解压所有结果"):
             C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
