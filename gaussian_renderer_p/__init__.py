@@ -342,7 +342,7 @@ def merge_opt(
     vis_filter_list=None,
     radii_list=None,
     eps=1e-10,
-    chunk_size=64  # 新增参数：控制分块大小，越小越省显存，但太小会慢
+    chunk_size=32  # 新增参数：控制分块大小，越小越省显存，但太小会慢
 ):
     """
     Memory-efficient Multi-block compositing using Spatial Chunking.
