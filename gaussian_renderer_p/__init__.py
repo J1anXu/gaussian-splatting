@@ -983,7 +983,7 @@ def render_and_merge2(viewpoint_cam, gaussians : GaussianModel_p, pipe, bg : tor
         scaling=gaussians.get_scaling[fine_mask]
         focal_x = viewpoint_cam.image_width / (2 * math.tan(viewpoint_cam.FoVx / 2))
         focal_y = viewpoint_cam.image_height / (2 * math.tan(viewpoint_cam.FoVy / 2))
-        
+        # xyz:[N,3] scaling:[N,3] cpu;
         x_min, y_min, x_max, y_max = get_block_screen_bbox_pre_render(xyz, scaling, proj_matrix, W, H, focal_x, focal_y)
 
 
