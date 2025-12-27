@@ -193,9 +193,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.optimizer.step(visible, radii.shape[0])
                     gaussians.optimizer.zero_grad(set_to_none = True)
                 else:
+                    # xyz_before = gaussians._xyz.detach().cpu().clone()
+                    # gaussians.optimizer.step()
+                    # xyz_after = gaussians._xyz.detach().cpu()
+                    # delta = (xyz_after - xyz_before).abs().max().item()
+                    # print("max |Δxyz| =", delta)
+                    # gaussians.optimizer.zero_grad(set_to_none = True)
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
-
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
