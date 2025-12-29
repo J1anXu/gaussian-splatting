@@ -161,11 +161,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             total_points = gaussians.get_xyz.shape[0]
             
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "pts": total_points})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "pts_in_frustum": num_in_frustum, "pts": total_points})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
-            log = {"iter": iteration,"loss": ema_loss_for_log,"pts": total_points}
+            log = {"iter": iteration,"loss": ema_loss_for_log, "pts_in_frustum": num_in_frustum, "pts": total_points}
             LOGGER.info(log)
             if WANDB:
                 wandb.log(log, step=iteration)
