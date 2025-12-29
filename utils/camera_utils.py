@@ -14,6 +14,9 @@ import numpy as np
 from utils.graphics_utils import fov2focal
 from PIL import Image
 import cv2
+import torch
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 WARNED = False
 
@@ -95,3 +98,259 @@ def camera_to_JSON(id, camera : Camera):
         'fx' : fov2focal(camera.FovX, camera.width)
     }
     return camera_entry
+
+
+def downsample_points(xyz: torch.Tensor, factor=100):
+    return xyz[::factor]
+
+def get_frustum_corners_world(full_proj_transform: torch.Tensor):
+    """
+    full_proj_transform: [4,4], world -> clip
+    return: [8,3] frustum corners in world space
+    """
+    device = full_proj_transform.device
+    inv = torch.inverse(full_proj_transform)
+
+    # NDC space corners
+    corners_ndc = torch.tensor([
+        [-1, -1, -1, 1],
+        [ 1, -1, -1, 1],
+        [ 1,  1, -1, 1],
+        [-1,  1, -1, 1],
+        [-1, -1,  1, 1],
+        [ 1, -1,  1, 1],
+        [ 1,  1,  1, 1],
+        [-1,  1,  1, 1],
+    ], dtype=torch.float32, device=device)
+
+    corners_world = (inv @ corners_ndc.T).T
+    corners_world = corners_world[:, :3] / corners_world[:, 3:4]
+
+    return corners_world.cpu()
+
+
+
+
+def _compute_corners_from_inv(invM: torch.Tensor, z_mode: str, device=None):
+    # NDC corners: x,y in {-1,1}; z in {-1,1} (OpenGL) or {0,1} (D3D/OpenCV-like)
+    if z_mode == "neg1_pos1":
+        zs = [-1.0, 1.0]
+    elif z_mode == "0_1":
+        zs = [0.0, 1.0]
+    else:
+        raise ValueError("z_mode must be 'neg1_pos1' or '0_1'")
+
+    corners_ndc = torch.tensor([
+        [-1, -1, zs[0], 1],
+        [ 1, -1, zs[0], 1],
+        [ 1,  1, zs[0], 1],
+        [-1,  1, zs[0], 1],
+        [-1, -1, zs[1], 1],
+        [ 1, -1, zs[1], 1],
+        [ 1,  1, zs[1], 1],
+        [-1,  1, zs[1], 1],
+    ], dtype=torch.float32, device=invM.device)
+
+    w = (invM @ corners_ndc.T).T
+    xyz = w[:, :3] / w[:, 3:4]
+    return xyz  # [8,3]
+
+
+def _score_candidate(corners: torch.Tensor, cam_center: torch.Tensor, xyz_bbox: torch.Tensor):
+    # 选“合理”的解：角点必须 finite，且尺度和点云 bbox 同量级，且 near quad 离相机更近
+    if not torch.isfinite(corners).all():
+        return -1e30
+
+    # bbox 尺度
+    min_xyz = xyz_bbox.min(dim=0).values
+    max_xyz = xyz_bbox.max(dim=0).values
+    bbox_diag = torch.norm(max_xyz - min_xyz) + 1e-9
+
+    # frustum 尺度
+    fru_diag = torch.norm(corners.max(dim=0).values - corners.min(dim=0).values) + 1e-9
+
+    # near/far 平均距离（假设前4个是 near，后4个是 far）
+    d_near = torch.norm(corners[:4].mean(dim=0) - cam_center)
+    d_far  = torch.norm(corners[4:].mean(dim=0) - cam_center)
+
+    # 评分：尺度比接近、且 far > near
+    scale_ratio = fru_diag / bbox_diag
+    scale_score = -abs(torch.log(scale_ratio))  # 越接近 1 越好
+    depth_score = 1.0 if d_far > d_near else -1.0
+
+    # 额外：相机不应离 frustum 极端远
+    cam_to_fru = torch.norm(corners.mean(dim=0) - cam_center)
+    cam_score = - (cam_to_fru / bbox_diag) * 0.2
+
+    return scale_score + depth_score + cam_score
+
+
+
+def visualize_frustum(
+    xyz_any: torch.Tensor,                 # [N,3]
+    full_proj_transform_any: torch.Tensor, # [4,4]
+    camera_center_any: torch.Tensor,       # [3]
+    downsample_factor=100,
+    save_path="frustum_debug.png"
+):
+    # -------- 数据准备 --------
+    xyz = xyz_any.detach().cpu()[::downsample_factor]
+    M   = full_proj_transform_any.detach().cpu()
+    cam = camera_center_any.detach().cpu()
+
+    # -------- 自动判断矩阵约定 --------
+    candidates = []
+    for use_T in [False, True]:
+        A = M.T if use_T else M
+        invA = torch.inverse(A)
+        for z_mode in ["neg1_pos1", "0_1"]:
+            corners = _compute_corners_from_inv(invA, z_mode)
+            score = _score_candidate(corners, cam, xyz)
+            candidates.append((score, use_T, z_mode, corners))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    _, use_T, z_mode, corners = candidates[0]
+
+    A = M.T if use_T else M
+
+    # -------- clip-space 判定 inside / outside --------
+    xyz_h = torch.cat([xyz, torch.ones_like(xyz[:, :1])], dim=1)
+    clip = (A @ xyz_h.T).T
+    x, y, z, w = clip[:,0], clip[:,1], clip[:,2], clip[:,3]
+
+    if z_mode == "neg1_pos1":
+        inside = (x>=-w)&(x<=w)&(y>=-w)&(y<=w)&(z>=-w)&(z<=w)
+    else:
+        inside = (x>=-w)&(x<=w)&(y>=-w)&(y<=w)&(z>=0)&(z<=w)
+
+    xin  = xyz[inside]
+    xout = xyz[~inside]
+
+    # -------- 画图 --------
+    fig = plt.figure(figsize=(9, 9))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # 视锥外（非常透明）
+    if xout.numel() > 0:
+        ax.scatter(
+            xout[:,0], xout[:,1], xout[:,2],
+            c="gray", s=1, alpha=0.05,
+            label="Outside frustum"
+        )
+
+    # 视锥内（醒目）
+    if xin.numel() > 0:
+        ax.scatter(
+            xin[:,0], xin[:,1], xin[:,2],
+            c="red", s=3, alpha=0.9,
+            label="Inside frustum"
+        )
+
+    # 相机（大圆）
+    ax.scatter(
+        cam[0], cam[1], cam[2],
+        s=100, c="blue", marker="o",
+        edgecolors="k", linewidths=2,
+        label="Camera"
+    )
+
+    # 视锥线框（椎体）
+    edges = [
+        (0,1),(1,2),(2,3),(3,0),
+        (4,5),(5,6),(6,7),(7,4),
+        (0,4),(1,5),(2,6),(3,7)
+    ]
+    for i,j in edges:
+        ax.plot(
+            [corners[i,0], corners[j,0]],
+            [corners[i,1], corners[j,1]],
+            [corners[i,2], corners[j,2]],
+            linewidth=2.5, color="black"
+        )
+
+    # 坐标比例
+    all_pts = torch.cat([xyz, corners, cam[None]], dim=0)
+    mn = all_pts.min(0).values
+    mx = all_pts.max(0).values
+    ctr = (mn + mx) / 2
+    rad = (mx - mn).max() / 2
+
+    ax.set_xlim(ctr[0]-rad, ctr[0]+rad)
+    ax.set_ylim(ctr[1]-rad, ctr[1]+rad)
+    ax.set_zlim(ctr[2]-rad, ctr[2]+rad)
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.legend()
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close(fig)
+
+    print(f"[OK] saved to {save_path} | use_T={use_T}, z_mode={z_mode}")
+    
+    
+
+def frustum_culling(
+    xyz: torch.Tensor,                  # [N,3]
+    full_proj_transform: torch.Tensor,   # [4,4]
+    assume_opengl: bool = False    # None = 自动；True = z∈[-1,1]; False = z∈[0,1]
+) -> torch.BoolTensor:
+    """
+    Returns:
+        mask: BoolTensor [N], True means inside frustum
+    """
+
+    # -------- 安全处理 --------
+    xyz_ = xyz.detach()
+    M = full_proj_transform.detach()
+
+    device = xyz_.device
+    dtype = xyz_.dtype
+
+    # -------- 齐次坐标 --------
+    ones = torch.ones((xyz_.shape[0], 1), device=device, dtype=dtype)
+    xyz_h = torch.cat([xyz_, ones], dim=1)  # [N,4]
+
+    # -------- 尝试两种矩阵乘法约定 --------
+    # 1) clip = M @ x
+    clip1 = (M @ xyz_h.T).T
+    # 2) clip = M.T @ x
+    clip2 = (M.T @ xyz_h.T).T
+
+    def inside_clip(clip, opengl: bool):
+        x, y, z, w = clip[:,0], clip[:,1], clip[:,2], clip[:,3]
+        if opengl:
+            return (
+                (x >= -w) & (x <= w) &
+                (y >= -w) & (y <= w) &
+                (z >= -w) & (z <= w)
+            )
+        else:
+            return (
+                (x >= -w) & (x <= w) &
+                (y >= -w) & (y <= w) &
+                (z >= 0)  & (z <= w)
+            )
+
+    # -------- 自动 / 手动 z 约定 --------
+    if assume_opengl is None:
+        # 自动：哪个结果“合理”（inside 点更多）就用哪个
+        mask1_gl = inside_clip(clip1, True)
+        mask1_dx = inside_clip(clip1, False)
+        mask2_gl = inside_clip(clip2, True)
+        mask2_dx = inside_clip(clip2, False)
+
+        candidates = [
+            mask1_gl, mask1_dx,
+            mask2_gl, mask2_dx
+        ]
+        mask = max(candidates, key=lambda m: int(m.sum()))
+    else:
+        if assume_opengl:
+            mask = inside_clip(clip1, True) | inside_clip(clip2, True)
+        else:
+            mask = inside_clip(clip1, False) | inside_clip(clip2, False)
+
+    return mask
