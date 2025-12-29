@@ -150,8 +150,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = 0
 
         loss.backward()
+        
         gaussians.clear_subset()
-
         iter_end.record()
 
         with torch.no_grad():
@@ -177,18 +177,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 scene.save(iteration)
 
             # Densification
-            if iteration < opt.densify_until_iter:
-                
-                radii_in_frustum = radii.detach().cpu()
-
+            if iteration < opt.densify_until_iter:#opt.densify_until_iter
+                radii_in_frustum = radii
+                frustum_visibility_filter = visibility_filter
+                gs_in_frustum = frustum_culling_mask.nonzero(as_tuple=False).squeeze(1)
+                global_visibility_filter = gs_in_frustum[frustum_visibility_filter]         
+                N_total = frustum_culling_mask.shape[0]
+                global_radii = torch.zeros(N_total, dtype=radii_in_frustum.dtype, device=radii_in_frustum.device)
+                global_radii[gs_in_frustum] = radii_in_frustum
                 
                 # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                gaussians.max_radii2D[global_visibility_filter] = torch.max(gaussians.max_radii2D[global_visibility_filter], radii_in_frustum[frustum_visibility_filter])
+                gaussians.add_densification_stats(viewspace_point_tensor, global_visibility_filter, frustum_visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, global_radii)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
