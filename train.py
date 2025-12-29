@@ -118,7 +118,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         frustum_culling_mask = frustum_culling(gaussians._xyz, viewpoint_cam.full_proj_transform)
         num_in_frustum = frustum_culling_mask.sum().item()
         gaussians.set_subset(frustum_culling_mask)
-        
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
@@ -151,6 +150,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = 0
 
         loss.backward()
+        gaussians.clear_subset()
 
         iter_end.record()
 
@@ -178,6 +178,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Densification
             if iteration < opt.densify_until_iter:
+                
+                radii_in_frustum = radii.detach().cpu()
+
+                
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
