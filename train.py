@@ -20,6 +20,7 @@ from utils.general_utils import safe_state, get_expon_lr_func
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
+from utils.camera_utils import frustum_culling
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
@@ -113,7 +114,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             pipe.debug = True
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
-
+        
+        frustum_culling_mask = frustum_culling(gaussians._xyz, viewpoint_cam.full_proj_transform)
+        num_in_frustum = frustum_culling_mask.sum().item()
+        gaussians.set_subset(frustum_culling_mask)
+        
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
