@@ -319,20 +319,27 @@ def frustum_culling(
     # 2) clip = M.T @ x
     clip2 = (M.T @ xyz_h.T).T
 
-    def inside_clip(clip, opengl: bool):
-        x, y, z, w = clip[:,0], clip[:,1], clip[:,2], clip[:,3]
+    def inside_clip(clip, opengl: bool, inflate_ratio=0.3):
+        x, y, z, w = clip.unbind(dim=1)
+
+        valid_w = w > 0
+        inflate = inflate_ratio * w
+
         if opengl:
-            return (
-                (x >= -w) & (x <= w) &
-                (y >= -w) & (y <= w) &
-                (z >= -w) & (z <= w)
+            inside = (
+                (x >= -w - inflate) & (x <= w + inflate) &
+                (y >= -w - inflate) & (y <= w + inflate) &
+                (z >= -w - inflate) & (z <= w + inflate)
             )
         else:
-            return (
-                (x >= -w) & (x <= w) &
-                (y >= -w) & (y <= w) &
-                (z >= 0)  & (z <= w)
+            inside = (
+                (x >= -w - inflate) & (x <= w + inflate) &
+                (y >= -w - inflate) & (y <= w + inflate) &
+                (z >= 0) & (z <= w + inflate)   # ❗只放 far
             )
+
+        return inside & valid_w
+
 
     # -------- 自动 / 手动 z 约定 --------
     if assume_opengl is None:
