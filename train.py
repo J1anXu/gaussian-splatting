@@ -28,6 +28,7 @@ import time
 from logger import get_logger
 SCENE_NAME = "unknown_scene"
 BRANCH = "unknown_branch"
+DEBUG_MODE = False
 
 WANDB = True
 LOGGER = None
@@ -49,6 +50,7 @@ try:
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
+
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
@@ -302,7 +304,9 @@ if __name__ == "__main__":
     
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
     
-    if WANDB:
+    DEBUG_MODE = sys.gettrace() is not None
+    
+    if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init( project="3dgs_baseline", name = f"{BRANCH}_{SCENE_NAME}_{time.strftime('%m%d%H%M')}", job_type="train", config=vars(op.extract(args)) )
         wandb.define_metric("iteration")  # 
