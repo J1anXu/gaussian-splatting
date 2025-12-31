@@ -26,6 +26,9 @@ from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
 import time
 from logger import get_logger
+SCENE_NAME = "unknown_scene"
+BRANCH = "unknown_branch"
+
 WANDB = True
 LOGGER = None
 
@@ -293,17 +296,18 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
-    scene_name = args.source_path.strip('/').split('/')[-1]
-    branch_name = get_git_branch()
+    SCENE_NAME = args.source_path.strip('/').split('/')[-1]
+    BRANCH = get_git_branch()
     
-    LOGGER = get_logger(scene_name, os.path.join("./logs", "train", branch_name, scene_name))
+    
+    LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
     
     if WANDB:
         wandb.login()
-        run = wandb.init( project="3dgs_baseline", name = f"{branch_name}_{scene_name}_{time.strftime('%m%d%H%M')}", job_type="train", config=vars(op.extract(args)) )
+        run = wandb.init( project="3dgs_baseline", name = f"{BRANCH}_{SCENE_NAME}_{time.strftime('%m%d%H%M')}", job_type="train", config=vars(op.extract(args)) )
         wandb.define_metric("iteration")  # 
         
-
+    torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done
