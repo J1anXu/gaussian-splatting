@@ -145,7 +145,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Densification
             if iteration < opt.densify_until_iter:#opt.densify_until_iter
-
+                # !!! watch out that here radii and visibility_filter are from subset gaussians only
+                
                 # the index of gaussians that are available in this frustum
                 global_id_of_masked = available_mask.nonzero(as_tuple=False).squeeze(1)
                 
