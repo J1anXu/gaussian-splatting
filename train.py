@@ -16,7 +16,7 @@ from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
-from utils.general_utils import safe_state, get_expon_lr_func
+from utils.general_utils import get_git_branch, safe_state, get_expon_lr_func
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -115,11 +115,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         
-        frustum_culling_mask = frustum_culling(gaussians._xyz, viewpoint_cam.full_proj_transform)
-        num_in_frustum = frustum_culling_mask.sum().item()
-        gaussians.set_subset(frustum_culling_mask)
+        available_mask = frustum_culling(gaussians._xyz, viewpoint_cam.full_proj_transform)
+        available_num = available_mask.sum().item()
+        
+        gaussians.set_subset(available_mask)
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        
+        image = render_pkg["render"]
+        viewspace_point_tensor = render_pkg["viewspace_points"]
+        visibility_filter = render_pkg["visibility_filter"]
+        radii = render_pkg["radii"]
 
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
@@ -128,26 +133,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
-        if FUSED_SSIM_AVAILABLE:
-            ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-        else:
-            ssim_value = ssim(image, gt_image)
-
+        ssim_value = ssim(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
         # Depth regularization
-        Ll1depth_pure = 0.0
-        if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
-            invDepth = render_pkg["depth"]
-            mono_invdepth = viewpoint_cam.invdepthmap.cuda()
-            depth_mask = viewpoint_cam.depth_mask.cuda()
-
-            Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
-            Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
-            loss += Ll1depth
-            Ll1depth = Ll1depth.item()
-        else:
-            Ll1depth = 0
+        Ll1depth = 0
 
         loss.backward()
         
@@ -161,11 +151,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             total_points = gaussians.get_xyz.shape[0]
             
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "pts_in_frustum": num_in_frustum, "pts": total_points})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "pts_in_frustum": available_num, "pts": total_points})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
-            log = {"iter": iteration,"loss": ema_loss_for_log, "pts_in_frustum": num_in_frustum, "pts": total_points}
+            log = {"iter": iteration,"loss": ema_loss_for_log, "pts_in_frustum": available_num, "pts": total_points}
             LOGGER.info(log)
             if WANDB:
                 wandb.log(log, step=iteration)
@@ -180,9 +170,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration < opt.densify_until_iter:#opt.densify_until_iter
                 radii_in_frustum = radii
                 frustum_visibility_filter = visibility_filter
-                gs_in_frustum = frustum_culling_mask.nonzero(as_tuple=False).squeeze(1)
+                gs_in_frustum = available_mask.nonzero(as_tuple=False).squeeze(1)
                 global_visibility_filter = gs_in_frustum[frustum_visibility_filter]         
-                N_total = frustum_culling_mask.shape[0]
+                N_total = available_mask.shape[0]
                 global_radii = torch.zeros(N_total, dtype=radii_in_frustum.dtype, device=radii_in_frustum.device)
                 global_radii[gs_in_frustum] = radii_in_frustum
                 
@@ -304,20 +294,16 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
     scene_name = args.source_path.strip('/').split('/')[-1]
-    LOGGER = get_logger(scene_name, os.path.join("./logs", "train_p", scene_name))
+    branch_name = get_git_branch()
+    
+    LOGGER = get_logger(scene_name, os.path.join("./logs", "train", branch_name, scene_name))
+    
     if WANDB:
         wandb.login()
-        run = wandb.init(
-            project="3dgs_baseline",
-            name = f"{scene_name}_{time.strftime('%Y%m%d_%H%M%S')}",
-            job_type="train",
-            config=vars(op.extract(args))
-        )
+        run = wandb.init( project="3dgs_baseline", name = f"{branch_name}_{scene_name}_{time.strftime('%m%d%H%M')}", job_type="train", config=vars(op.extract(args)) )
         wandb.define_metric("iteration")  # 
-    # Start GUI server, configure and run training
-    if not args.disable_viewer:
-        network_gui.init(args.ip, args.port)
-    torch.autograd.set_detect_anomaly(args.detect_anomaly)
+        
+
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done
