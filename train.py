@@ -100,8 +100,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         image = render_pkg["render"]
         viewspace_point_tensor = render_pkg["viewspace_points"]
-        masked_visibility_filter = render_pkg["visibility_filter"]
-        masked_radii = render_pkg["radii"]
+        visibility_filter = render_pkg["visibility_filter"]
+        radii = render_pkg["radii"]
 
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
@@ -150,15 +150,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 global_id_of_masked = available_mask.nonzero(as_tuple=False).squeeze(1)
                 
                 # the index of gaussians that are visibled 
-                global_visibility_filter = global_id_of_masked[masked_visibility_filter]      
+                global_visibility_filter = global_id_of_masked[visibility_filter]      
                    
                 N_total = available_mask.shape[0]
-                global_radii = torch.zeros(N_total, dtype=masked_radii.dtype, device=masked_radii.device)
-                global_radii[global_id_of_masked] = masked_radii
+                global_radii = torch.zeros(N_total, dtype=radii.dtype, device=radii.device)
+                global_radii[global_id_of_masked] = radii
                 
                 # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[global_visibility_filter] = torch.max(gaussians.max_radii2D[global_visibility_filter], masked_radii[masked_visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, global_visibility_filter, masked_visibility_filter)
+                gaussians.max_radii2D[global_visibility_filter] = torch.max(gaussians.max_radii2D[global_visibility_filter], radii[visibility_filter])
+                gaussians.add_densification_stats(viewspace_point_tensor, global_visibility_filter, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
@@ -172,8 +172,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.exposure_optimizer.step()
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
                 if use_sparse_adam:
-                    visible = masked_radii > 0
-                    gaussians.optimizer.step(visible, masked_radii.shape[0])
+                    visible = radii > 0
+                    gaussians.optimizer.step(visible, radii.shape[0])
                     gaussians.optimizer.zero_grad(set_to_none = True)
                 else:
                     # xyz_before = gaussians._xyz.detach().cpu().clone()
