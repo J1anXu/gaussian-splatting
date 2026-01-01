@@ -16,7 +16,7 @@ from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
-from utils.general_utils import safe_state, get_expon_lr_func
+from utils.general_utils import safe_state, get_expon_lr_func, get_git_branch
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -25,6 +25,9 @@ from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
 import time
 from logger import get_logger
+SCENE_NAME = "unknown_scene"
+BRANCH = "unknown_branch"
+DEBUG_MODE = False
 WANDB = True
 LOGGER = None
 
@@ -287,19 +290,15 @@ if __name__ == "__main__":
     args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
+    BRANCH = get_git_branch()
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
     scene_name = args.source_path.strip('/').split('/')[-1]
-    LOGGER = get_logger(scene_name, os.path.join("./logs", "train_p", scene_name))
-    if WANDB:
+    LOGGER = get_logger(scene_name, os.path.join("./logs", "train", BRANCH, scene_name))
+    if WANDB and not DEBUG_MODE:
         wandb.login()
-        run = wandb.init(
-            project="3dgs_baseline",
-            name = f"{scene_name}_{time.strftime('%Y%m%d_%H%M%S')}",
-            job_type="train",
-            config=vars(op.extract(args))
-        )
+        run = wandb.init( project="3dgs_baseline", name = f"{BRANCH}_{SCENE_NAME}_{time.strftime('%m%d%H%M')}", job_type="train", config=vars(op.extract(args)) )
         wandb.define_metric("iteration")  # 
     # Start GUI server, configure and run training
     if not args.disable_viewer:
