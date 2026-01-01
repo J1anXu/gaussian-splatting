@@ -13,7 +13,7 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer import render, network_gui
+from gaussian_renderer import render, merge_opt
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import get_git_branch, safe_state, get_expon_lr_func
@@ -63,8 +63,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    iter_start = torch.cuda.Event(enable_timing = True)
-    iter_end = torch.cuda.Event(enable_timing = True)
+
 
     use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
 
@@ -75,8 +74,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    
+    gaussians.partition() 
+    gaussians.visualize_blocks()
+
+    
     for iteration in range(first_iter, opt.iterations + 1):
-        iter_start.record()
 
         gaussians.update_learning_rate(iteration)
 
@@ -99,15 +102,35 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         
         available_mask = frustum_culling(gaussians._xyz, viewpoint_cam.full_proj_transform)
-        available_num = available_mask.sum().item()
+        available_indices = torch.nonzero(available_mask, as_tuple=True)[0]
         
-        gaussians.set_subset(available_mask)
-        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        rendered_list, depth_list, alpha_list = [], [], []
+        viewspace_points_list, visibility_filter_list, radii_list = [], [], []
+        visible_indices_list = []
+        for idx in range(len(gaussians.block_indices)):
+            block_indice = gaussians.block_indices[idx]
+            visible_mask_in_block = available_mask[block_indice]
+            visible_indices = block_indice[visible_mask_in_block]
+            if visible_indices.shape[0] == 0:
+                continue
+            
+            gaussians.set_subset(visible_indices)
+            render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            image, viewspace_point_tensor, visibility_filter, radii, alphaLeft = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["alphaLeft"]
+            
+            rendered_list.append(image)
+            depth_list.append(render_pkg["depth"])
+            alpha_list.append(alphaLeft)
+            viewspace_points_list.append(viewspace_point_tensor)
+            visibility_filter_list.append(visibility_filter)
+            radii_list.append(radii)
+            visible_indices_list.append(visible_indices)
+            gaussians.clear_subset()
+
+        N_total = gaussians._xyz.shape[0]       
+        merge_res = merge_opt(N_total, rendered_list, depth_list, alpha_list, visibility_filter_list, radii_list, visible_indices_list)   
         
-        image = render_pkg["render"]
-        viewspace_point_tensor = render_pkg["viewspace_points"]
-        visibility_filter = render_pkg["visibility_filter"]
-        radii = render_pkg["radii"]
+        image, visibility_filter, radii = merge_res["final_rgb"], merge_res["global_visibility_filter"], merge_res["global_radii"]
 
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
@@ -123,9 +146,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1depth = 0
 
         loss.backward()
+
+        global_viewspace_points_grad = torch.zeros( N_total, 3, device="cuda", requires_grad=False )
+        for viewspace_points, sub_set_mask in zip(viewspace_points_list, mask_list):
+            global_viewspace_points_grad[sub_set_mask] = viewspace_points.grad
         
-        gaussians.clear_subset()
-        iter_end.record()
 
         with torch.no_grad():
             # Progress bar
@@ -150,26 +175,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 scene.save(iteration, BRANCH)
 
             # Densification
-            if iteration < opt.densify_until_iter:#opt.densify_until_iter
-                # !!! watch out that here radii and visibility_filter are from subset gaussians only
-                
-                # the index of gaussians that are available in this frustum
-                global_id_of_masked = available_mask.nonzero(as_tuple=False).squeeze(1)
-                
-                # the index of gaussians that are visibled 
-                global_visibility_filter = global_id_of_masked[visibility_filter]      
-                   
-                N_total = available_mask.shape[0]
-                global_radii = torch.zeros(N_total, dtype=radii.dtype, device=radii.device)
-                global_radii[global_id_of_masked] = radii
-                
+            if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[global_visibility_filter] = torch.max(gaussians.max_radii2D[global_visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, global_visibility_filter, visibility_filter)
+                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                gaussians.add_densification_stats2(global_viewspace_points_grad, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, global_radii)
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                    gaussians.repartition()
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
@@ -191,9 +205,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # gaussians.optimizer.zero_grad(set_to_none = True)
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
+                    
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
 def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):

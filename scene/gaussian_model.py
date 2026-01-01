@@ -21,7 +21,9 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-
+from partition import generate_octant_blocks
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
 except:
@@ -63,8 +65,14 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
-        self.mask = None
+        # visible_indices should keep None unless set by set_subset
+        self.visible_indices = None
+        self.block_bounds = []
+        self.block_indices = []
+        
         self.setup_functions()
+        
+
 
     def capture(self):
         return (
@@ -102,27 +110,27 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        if self.mask is not None:
-            return self.scaling_activation(self._scaling[self.mask])
+        if self.visible_indices is not None:
+            return self.scaling_activation(self._scaling[self.visible_indices])
         return self.scaling_activation(self._scaling)
     
     @property
     def get_rotation(self):
-        if self.mask is not None:
-            return self.rotation_activation(self._rotation[self.mask])
+        if self.visible_indices is not None:
+            return self.rotation_activation(self._rotation[self.visible_indices])
         return self.rotation_activation(self._rotation)
     
     @property
     def get_xyz(self):
-        if self.mask is not None:
-            return self._xyz[self.mask]
+        if self.visible_indices is not None:
+            return self._xyz[self.visible_indices]
         return self._xyz
     
     @property
     def get_features(self):
-        if self.mask is not None:
-            features_dc = self._features_dc[self.mask]
-            features_rest = self._features_rest[self.mask]
+        if self.visible_indices is not None:
+            features_dc = self._features_dc[self.visible_indices]
+            features_rest = self._features_rest[self.visible_indices]
             return torch.cat((features_dc, features_rest), dim=1)
         features_dc = self._features_dc
         features_rest = self._features_rest
@@ -130,20 +138,20 @@ class GaussianModel:
     
     @property
     def get_features_dc(self):
-        if self.mask is not None:
-            return self._features_dc[self.mask]
+        if self.visible_indices is not None:
+            return self._features_dc[self.visible_indices]
         return self._features_dc
     
     @property
     def get_features_rest(self):
-        if self.mask is not None:
-            return self._features_rest[self.mask]
+        if self.visible_indices is not None:
+            return self._features_rest[self.visible_indices]
         return self._features_rest
     
     @property
     def get_opacity(self):
-        if self.mask is not None:
-            return self.opacity_activation(self._opacity[self.mask])
+        if self.visible_indices is not None:
+            return self.opacity_activation(self._opacity[self.visible_indices])
         return self.opacity_activation(self._opacity)
     
     @property
@@ -157,8 +165,8 @@ class GaussianModel:
             return self.pretrained_exposures[image_name]
     
     def get_covariance(self, scaling_modifier = 1):
-        if self.mask is not None:
-            return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation[self.mask])
+        if self.visible_indices is not None:
+            return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation[self.visible_indices])
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
     def oneupSHdegree(self):
@@ -491,8 +499,152 @@ class GaussianModel:
         self.xyz_gradient_accum[global_visibility_filter] += torch.norm(viewspace_point_tensor.grad[frustum_visibility_filter,:2], dim=-1, keepdim=True)
         self.denom[global_visibility_filter] += 1
 
-    def set_subset(self, mask):
-        self.mask = mask
+    def add_densification_stats2(self, viewspace_point_tensor_grad, update_filter):
+        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor_grad[update_filter,:2], dim=-1, keepdim=True)
+        self.denom[update_filter] += 1
+
+    def set_subset(self, visible_indices):
+        self.visible_indices = visible_indices
         
     def clear_subset(self):
-        self.mask = None    
+        self.visible_indices = None    
+        
+        
+    def partition(self):
+        block_bounds, block_indices = generate_octant_blocks(self._xyz)
+        self.block_bounds = block_bounds
+        self.block_indices = block_indices
+    
+    def visualize_blocks(self, point_alpha=0.02, box_alpha=0.15, save_path="boxxes.png"):
+        xyz = self._xyz.detach().cpu()
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111, projection="3d")
+        def random_subsample(xyz, max_points=100_000):
+            N = xyz.shape[0]
+            if N <= max_points:
+                return xyz
+            idx = torch.randperm(N, device=xyz.device)[:max_points]
+            return xyz[idx]
+        # ---------- 1. 画点云 ----------
+        xyz_vis = random_subsample(xyz, max_points=50_000)
+
+        ax.scatter(
+            xyz_vis[:, 0].cpu(),
+            xyz_vis[:, 1].cpu(),
+            xyz_vis[:, 2].cpu(),
+            s=1,
+            c="gray",
+            alpha=point_alpha,
+        )
+
+
+        # ---------- 2. 给 block 上不同颜色 ----------
+        colors = plt.cm.tab10.colors
+
+        # ---------- 3. 画每个 block 的盒子 ----------
+        for i, (mn, mx) in enumerate(self.block_bounds):
+            mn = mn.cpu()
+            mx = mx.cpu()
+
+            # 8 个顶点
+            v = [
+                [mn[0], mn[1], mn[2]],
+                [mx[0], mn[1], mn[2]],
+                [mx[0], mx[1], mn[2]],
+                [mn[0], mx[1], mn[2]],
+                [mn[0], mn[1], mx[2]],
+                [mx[0], mn[1], mx[2]],
+                [mx[0], mx[1], mx[2]],
+                [mn[0], mx[1], mx[2]],
+            ]
+
+            # 6 个面（每个面 4 个点）
+            faces = [
+                [v[0], v[1], v[2], v[3]],  # bottom
+                [v[4], v[5], v[6], v[7]],  # top
+                [v[0], v[1], v[5], v[4]],
+                [v[2], v[3], v[7], v[6]],
+                [v[1], v[2], v[6], v[5]],
+                [v[0], v[3], v[7], v[4]],
+            ]
+
+            box = Poly3DCollection(
+                faces,
+                alpha=box_alpha,
+                facecolor=colors[i % len(colors)],
+                edgecolor="k",
+                linewidths=1.0
+            )
+            ax.add_collection3d(box)
+
+            # ---------- 4. 可选：标注 block ----------
+            if self.block_indices is not None:
+                idx = self.block_indices[i]
+                if idx.numel() > 0:
+                    center = (mn + mx) * 0.5
+                    ax.text(
+                        center[0], center[1], center[2],
+                        f"B{i}\n{idx.numel()}",
+                        color="black",
+                        fontsize=10,
+                        ha="center"
+                    )
+
+        # ---------- 5. 坐标等比例 ----------
+        all_pts = xyz
+        mn = all_pts.min(0).values
+        mx = all_pts.max(0).values
+        ctr = (mn + mx) / 2
+        rad = (mx - mn).max() / 2
+
+        ax.set_xlim(ctr[0]-rad, ctr[0]+rad)
+        ax.set_ylim(ctr[1]-rad, ctr[1]+rad)
+        ax.set_zlim(ctr[2]-rad, ctr[2]+rad)
+
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        ax.set_title("Octant Blocks Visualization")
+
+        plt.tight_layout()
+        if save_path is not None:
+            plt.savefig(save_path, dpi=200)
+            print(f"[OK] saved to {save_path}")
+        plt.show()
+        
+    def repartition(self):
+        """
+        根据固定的 block_bounds，
+        用当前 self._xyz 重新生成 block_indices
+        """
+
+        assert hasattr(self, "block_bounds"), "block_bounds not initialized. Call partition() first."
+
+        xyz = self._xyz
+        device = xyz.device
+        dtype = xyz.dtype
+        N = xyz.shape[0]
+
+        all_idx = torch.arange(N, device=device)
+
+        new_block_indices = []
+
+        # ---------- 遍历每个 block ----------
+        for i, (mn, mx) in enumerate(self.block_bounds):
+            # 确保在同一 device
+            mn = mn.to(device)
+            mx = mx.to(device)
+
+            mask = (
+                (xyz[:, 0] >= mn[0]) & (xyz[:, 0] < mx[0]) &
+                (xyz[:, 1] >= mn[1]) & (xyz[:, 1] < mx[1]) &
+                (xyz[:, 2] >= mn[2]) & (xyz[:, 2] < mx[2])
+            )
+
+            idx = all_idx[mask]
+            new_block_indices.append(idx)
+
+            # debug 用
+            # print(f"[repartition] Block {i:2d}: {idx.numel():7d} points")
+
+        self.block_indices = new_block_indices
