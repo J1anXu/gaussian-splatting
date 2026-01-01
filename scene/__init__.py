@@ -17,7 +17,9 @@ from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+from utils.general_utils import get_git_branch
 
+BRANCH = "unknown"
 class Scene:
 
     gaussians : GaussianModel
@@ -30,9 +32,11 @@ class Scene:
         self.loaded_iter = None
         self.gaussians = gaussians
         os.makedirs(self.model_path, exist_ok=True)
+        BRANCH = get_git_branch()
+
         if load_iteration:
             if load_iteration == -1:
-                self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
+                self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud", BRANCH))
             else:
                 self.loaded_iter = load_iteration
             print("Loading trained model at iteration {}".format(self.loaded_iter))
@@ -77,6 +81,7 @@ class Scene:
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
+                                                           BRANCH,
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"), args.train_test_exp)
         else:
