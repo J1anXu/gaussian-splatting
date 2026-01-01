@@ -14,6 +14,7 @@ import sys
 from datetime import datetime
 import numpy as np
 import random
+import subprocess
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -131,3 +132,15 @@ def safe_state(silent):
     np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
+
+
+
+
+def get_git_branch():
+    try:
+        return subprocess.check_output(
+            ["git", "branch", "--show-current"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        return "unknown"
