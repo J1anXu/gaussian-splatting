@@ -18,7 +18,6 @@ from gaussian_renderer import render
 import torchvision
 from utils.general_utils import safe_state
 from utils.camera_utils import frustum_culling
-
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
@@ -39,7 +38,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         frustum_culling_mask = frustum_culling(gaussians._xyz, view.full_proj_transform)
         num_in_frustum = frustum_culling_mask.sum().item()
-        # gaussians.set_subset(frustum_culling_mask)
+        gaussians.set_subset(frustum_culling_mask)
         rendering = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)["render"]
         gaussians.clear_subset()
         gt = view.original_image[0:3, :, :]
