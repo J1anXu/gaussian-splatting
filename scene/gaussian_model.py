@@ -434,6 +434,7 @@ class GaussianModel:
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+        # 梯度大 + 尺度已经很大的 Gaussian → 不该再 clone，而是必须 split（拆分）: 沿 Gaussian 自身尺度与朝向，在空间上强制生成 N 个彼此分离的子 Gaussian
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -461,6 +462,7 @@ class GaussianModel:
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
         # Extract points that satisfy the gradient condition
+        # 只克隆那些"梯度大、但尺度还不算大"的高斯点 → 克隆, 让它们变得更密集 (原地复制)
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
