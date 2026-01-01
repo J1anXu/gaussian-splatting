@@ -294,8 +294,8 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
-    scene_name = args.source_path.strip('/').split('/')[-1]
-    LOGGER = get_logger(scene_name, os.path.join("./logs", "train", BRANCH, scene_name))
+    SCENE_NAME = args.source_path.strip('/').split('/')[-1]
+    LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init( project="3dgs_baseline", name = f"{BRANCH}_{SCENE_NAME}_{time.strftime('%m%d%H%M')}", job_type="train", config=vars(op.extract(args)) )
