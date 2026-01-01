@@ -20,7 +20,9 @@ import json
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser
+from utils.general_utils import safe_state, get_git_branch
 
+BRANCH = "unknown_branch"
 def readImages(renders_dir, gt_dir):
     renders = []
     gts = []
@@ -48,8 +50,8 @@ def evaluate(model_paths):
             per_view_dict[scene_dir] = {}
             full_dict_polytopeonly[scene_dir] = {}
             per_view_dict_polytopeonly[scene_dir] = {}
-
-            test_dir = Path(scene_dir) / "test"
+            BRANCH = get_git_branch()
+            test_dir = Path(scene_dir)/ BRANCH / "test"
 
             for method in os.listdir(test_dir):
                 print("Method:", method)
