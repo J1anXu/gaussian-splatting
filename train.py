@@ -107,13 +107,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         rendered_list, depth_list, alpha_list = [], [], []
         viewspace_points_list, visibility_filter_list, radii_list = [], [], []
         visible_indices_list = []
+        available_num = 0
         for idx in range(len(gaussians.block_indices)):
             block_indice = gaussians.block_indices[idx]
             visible_mask_in_block = available_mask[block_indice]
             visible_indices = block_indice[visible_mask_in_block]
             if visible_indices.shape[0] == 0:
                 continue
-            
+            available_num += visible_indices.shape[0]
             gaussians.set_subset(visible_indices)
             render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             image, viewspace_point_tensor, visibility_filter, radii, alphaLeft = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["alphaLeft"]
@@ -148,7 +149,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss.backward()
 
         global_viewspace_points_grad = torch.zeros( N_total, 3, device="cuda", requires_grad=False )
-        for viewspace_points, sub_set_mask in zip(viewspace_points_list, mask_list):
+        for viewspace_points, sub_set_mask in zip(viewspace_points_list, visible_indices_list):
             global_viewspace_points_grad[sub_set_mask] = viewspace_points.grad
         
 
