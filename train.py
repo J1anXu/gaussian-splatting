@@ -106,6 +106,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if gaussians._xyz.shape[0] > 300_000:
                 gaussians.partition() 
                 gaussians.partitioned = True
+                LOGGER.info(f"Partitioned Gaussians at iteration {iteration}, total gaussians: {gaussians._xyz.shape[0]}, num partitions: {len(gaussians.block_indices)}")
             else:
                 gaussians.block_indices = [available_indices]
         
@@ -168,7 +169,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             total_points = gaussians.get_xyz.shape[0]
             
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "pts_in_frustum": available_num, "pts": total_points})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": available_num, "blocks": len(gaussians.block_indices), "pts": total_points})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
