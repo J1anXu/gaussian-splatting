@@ -69,7 +69,7 @@ class GaussianModel:
         self.visible_indices = None
         self.block_bounds = []
         self.block_indices = []
-        
+        self.partitioned = False
         self.setup_functions()
         
 

@@ -75,8 +75,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     
-    gaussians.partition() 
-    gaussians.visualize_blocks()
 
     
     for iteration in range(first_iter, opt.iterations + 1):
@@ -104,10 +102,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         available_mask = frustum_culling(gaussians._xyz, viewpoint_cam.full_proj_transform)
         available_indices = torch.nonzero(available_mask, as_tuple=True)[0]
         
+        if not gaussians.partitioned:
+            if gaussians._xyz.shape[0] > 300_000:
+                gaussians.partition() 
+                gaussians.partitioned = True
+            else:
+                gaussians.block_indices = [available_indices]
+        
         rendered_list, depth_list, alpha_list = [], [], []
         viewspace_points_list, visibility_filter_list, radii_list = [], [], []
         visible_indices_list = []
         available_num = 0
+        
+        
+        
         for idx in range(len(gaussians.block_indices)):
             block_indice = gaussians.block_indices[idx]
             visible_mask_in_block = available_mask[block_indice]
@@ -184,7 +192,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
-                    gaussians.repartition()
+                    if gaussians.partitioned:
+                        gaussians.repartition()
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
