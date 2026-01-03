@@ -21,7 +21,7 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-from partition import generate_octant_blocks, generate_octant_blocks_kdtree
+from partition import generate_octant_blocks, generate_octant_blocks_kdtree, generate_space_kdtree_blocks
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 try:
@@ -513,7 +513,7 @@ class GaussianModel:
         
         
     def partition(self):
-        block_bounds, block_indices = generate_octant_blocks_kdtree(self._xyz)
+        block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz)
         self.block_bounds = block_bounds
         self.block_indices = block_indices
     
