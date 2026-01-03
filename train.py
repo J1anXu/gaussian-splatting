@@ -105,7 +105,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if not gaussians.partitioned:
             if gaussians._xyz.shape[0] > 300_000:
                 gaussians.partition() 
-                gaussians.visualize_blocks()
+                gaussians.visualize_blocks(save_path = f"{BRANCH}_bbox")
                 gaussians.partitioned = True
                 LOGGER.info(f"Partitioned Gaussians at iteration {iteration}, total gaussians: {gaussians._xyz.shape[0]}, num partitions: {len(gaussians.block_indices)}")
             else:
