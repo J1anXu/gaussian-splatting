@@ -178,7 +178,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             LOGGER.info(log)
             
-            if WANDB:
+            if WANDB and not DEBUG_MODE:
                 wandb.log(log, step=iteration)
             
             if (iteration in saving_iterations):

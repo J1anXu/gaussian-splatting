@@ -127,6 +127,76 @@ def generate_octant_blocks_kdtree(xyz: torch.Tensor, inflate_ratio: float = 0.05
 
 
 
+def generate_space_kdtree_blocks(
+    xyz: torch.Tensor,
+    inflate_ratio: float = 0.05,
+    depth: int = 3,   
+):
+    """
+    Space-filling KD-tree (binary split)
+    输出：
+      block_bounds : List[(min_xyz, max_xyz)]
+      block_indices: List[LongTensor]
+    """
+    device = xyz.device
+    dtype  = xyz.dtype
+    N = xyz.shape[0]
+
+    # ---------- 1. 固定整体 AABB ----------
+    mins = xyz.min(dim=0).values
+    maxs = xyz.max(dim=0).values
+
+    center = (mins + maxs) * 0.5
+    extent = (maxs - mins) * 0.5
+    extent = extent * (1.0 + inflate_ratio)
+
+    world_min = center - extent
+    world_max = center + extent
+
+    # ---------- 2. 构建 space-filling KD-tree ----------
+    block_bounds = []
+
+    def split(bounds_min, bounds_max, d):
+        if d == depth:
+            block_bounds.append((bounds_min, bounds_max))
+            return
+
+        axis = d % 3
+        mid = (bounds_min[axis] + bounds_max[axis]) * 0.5
+
+        # left child
+        l_min = bounds_min.clone()
+        l_max = bounds_max.clone()
+        l_max[axis] = mid
+
+        # right child
+        r_min = bounds_min.clone()
+        r_max = bounds_max.clone()
+        r_min[axis] = mid
+
+        split(l_min, l_max, d + 1)
+        split(r_min, r_max, d + 1)
+
+    split(world_min, world_max, 0)
+
+    # ---------- 3. 给每个空间 block 分配点 ----------
+    all_idx = torch.arange(N, device=device)
+    block_indices = []
+
+    for i, (bmin, bmax) in enumerate(block_bounds):
+        mask = (
+            (xyz[:, 0] >= bmin[0]) & (xyz[:, 0] < bmax[0]) &
+            (xyz[:, 1] >= bmin[1]) & (xyz[:, 1] < bmax[1]) &
+            (xyz[:, 2] >= bmin[2]) & (xyz[:, 2] < bmax[2])
+        )
+        idx = all_idx[mask]
+        block_indices.append(idx)
+
+        print(f"Block {i:2d}: {idx.numel():7d} points")
+
+    return block_bounds, block_indices
+
+
 def generate_octant_blocks( xyz: torch.Tensor, inflate_ratio: float = 0.05 ):
     device = xyz.device
     dtype  = xyz.dtype
