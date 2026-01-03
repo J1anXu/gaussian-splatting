@@ -127,74 +127,73 @@ def generate_octant_blocks_kdtree(xyz: torch.Tensor, inflate_ratio: float = 0.05
 
 
 
-def generate_space_kdtree_blocks(
-    xyz: torch.Tensor,
-    inflate_ratio: float = 0.05,
-    depth: int = 3,   
-):
-    """
-    Space-filling KD-tree (binary split)
-    输出：
-      block_bounds : List[(min_xyz, max_xyz)]
-      block_indices: List[LongTensor]
-    """
+
+def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05):
     device = xyz.device
     dtype  = xyz.dtype
     N = xyz.shape[0]
 
-    # ---------- 1. 固定整体 AABB ----------
+    all_idx = torch.arange(N, device=device)
+
+    # ---------- 1) 根 AABB（可 inflate 防漏） ----------
     mins = xyz.min(dim=0).values
     maxs = xyz.max(dim=0).values
-
     center = (mins + maxs) * 0.5
     extent = (maxs - mins) * 0.5
     extent = extent * (1.0 + inflate_ratio)
+    root_min = center - extent
+    root_max = center + extent
 
-    world_min = center - extent
-    world_max = center + extent
-
-    # ---------- 2. 构建 space-filling KD-tree ----------
-    block_bounds = []
-
-    def split(bounds_min, bounds_max, d):
-        if d == depth:
-            block_bounds.append((bounds_min, bounds_max))
-            return
-
-        axis = d % 3
-        mid = (bounds_min[axis] + bounds_max[axis]) * 0.5
-
-        # left child
-        l_min = bounds_min.clone()
-        l_max = bounds_max.clone()
-        l_max[axis] = mid
-
-        # right child
-        r_min = bounds_min.clone()
-        r_max = bounds_max.clone()
-        r_min[axis] = mid
-
-        split(l_min, l_max, d + 1)
-        split(r_min, r_max, d + 1)
-
-    split(world_min, world_max, 0)
-
-    # ---------- 3. 给每个空间 block 分配点 ----------
-    all_idx = torch.arange(N, device=device)
+    block_bounds  = []
     block_indices = []
 
-    for i, (bmin, bmax) in enumerate(block_bounds):
-        mask = (
-            (xyz[:, 0] >= bmin[0]) & (xyz[:, 0] < bmax[0]) &
-            (xyz[:, 1] >= bmin[1]) & (xyz[:, 1] < bmax[1]) &
-            (xyz[:, 2] >= bmin[2]) & (xyz[:, 2] < bmax[2])
-        )
-        idx = all_idx[mask]
-        block_indices.append(idx)
+    # ---------- 2) KD-tree recursion: 3 levels => 8 leaves ----------
+    def recurse(idx: torch.Tensor, bmin: torch.Tensor, bmax: torch.Tensor, depth: int):
+        if depth == 3:
+            # 叶子：bounds 必须是 “由 split 平面传下来的” bmin/bmax，保证不重叠
+            # 为了和你原 octant 一样“不会进 autograd / 可视化安全”，这里用 torch.tensor 重建
+            min_xyz = torch.tensor([bmin[0], bmin[1], bmin[2]], device=device, dtype=dtype)
+            max_xyz = torch.tensor([bmax[0], bmax[1], bmax[2]], device=device, dtype=dtype)
+            block_bounds.append((min_xyz, max_xyz))
+            block_indices.append(idx)
+            return
 
+        axis = depth % 3
+
+        # 按该轴排序，按点数对半分（严格均分靠这里）
+        coords = xyz[idx, axis]
+        _, order = torch.sort(coords)
+        sorted_idx = idx[order]
+        mid = sorted_idx.numel() // 2
+
+        left_idx  = sorted_idx[:mid]
+        right_idx = sorted_idx[mid:]
+
+        # split plane 取“切分值”
+        # 用排序后的中位坐标作为分割面（左: < split, 右: >= split 的空间意义）
+        split_val = xyz[sorted_idx[mid], axis] if sorted_idx.numel() > 0 else (bmin[axis] + bmax[axis]) * 0.5
+
+        # 构造非重叠 bounds（核心：由 split 平面更新父 bounds）
+        left_min = bmin
+        left_max = bmax.clone()
+        left_max[axis] = split_val
+
+        right_min = bmin.clone()
+        right_min[axis] = split_val
+        right_max = bmax
+
+        recurse(left_idx,  left_min,  left_max,  depth + 1)
+        recurse(right_idx, right_min, right_max, depth + 1)
+
+    recurse(all_idx, root_min, root_max, depth=0)
+
+    # ---------- 3) 打印统计 ----------
+    for i, idx in enumerate(block_indices):
         print(f"Block {i:2d}: {idx.numel():7d} points")
 
     return block_bounds, block_indices
+
+
 
 
 def generate_octant_blocks( xyz: torch.Tensor, inflate_ratio: float = 0.05 ):
