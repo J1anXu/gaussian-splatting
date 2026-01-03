@@ -630,6 +630,7 @@ class GaussianModel:
         all_idx = torch.arange(N, device=device)
 
         new_block_indices = []
+        covered = torch.zeros(N, device=device, dtype=torch.bool)  # 记录是否被某个 block 覆盖
 
         # ---------- 遍历每个 block ----------
         for i, (mn, mx) in enumerate(self.block_bounds):
@@ -645,8 +646,10 @@ class GaussianModel:
 
             idx = all_idx[mask]
             new_block_indices.append(idx)
+            covered[idx] = True  # 标记被覆盖
 
             # debug 用
             # print(f"[repartition] Block {i:2d}: {idx.numel():7d} points")
-
+        uncovered_idx = all_idx[~covered]
         self.block_indices = new_block_indices
+        print(f"[repartition] Uncovered points: {uncovered_idx.numel()}")
