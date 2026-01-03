@@ -105,7 +105,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if not gaussians.partitioned:
             if gaussians._xyz.shape[0] > 300_000:
                 gaussians.partition() 
-                gaussians.visualize_blocks(save_path = f"{BRANCH}_bbox")
+                gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
                 gaussians.partitioned = True
                 LOGGER.info(f"Partitioned Gaussians at iteration {iteration}, total gaussians: {gaussians._xyz.shape[0]}, num partitions: {len(gaussians.block_indices)}")
             else:
@@ -195,8 +195,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
                     if gaussians.partitioned:
-                        for idx, block in enumerate(gaussians.block_indices):
-                            wandb.log({f"block/{idx}_size": len(block)})
+                        wandb.log(
+                            {
+                                f"block/{idx}_size": len(block)
+                                for idx, block in enumerate(gaussians.block_indices)
+                            },
+                            step=iteration
+                        )
+
                         gaussians.repartition()
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
