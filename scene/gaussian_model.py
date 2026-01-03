@@ -263,6 +263,37 @@ class GaussianModel:
             l.append('rot_{}'.format(i))
         return l
 
+    def build_block_id(self):
+        N = self._xyz.shape[0]
+        block_id = np.full(N, -1, dtype=np.int32)
+
+        for b, idx in enumerate(self.block_indices):
+            idx = idx.detach().cpu().numpy()
+            block_id[idx] = b
+
+        if (block_id < 0).any():
+            bad = np.where(block_id < 0)[0][:10]
+            raise RuntimeError(f"Some points have no block_id, e.g. {bad}")
+
+        return block_id
+
+    def build_block_elements(self):
+        B = len(self.block_bounds)
+
+        dtype = [
+            ("xmin", "f4"), ("ymin", "f4"), ("zmin", "f4"),
+            ("xmax", "f4"), ("ymax", "f4"), ("zmax", "f4"),
+        ]
+
+        blocks = np.empty(B, dtype=dtype)
+
+        for i, (mn, mx) in enumerate(self.block_bounds):
+            mn = mn.detach().cpu().numpy()
+            mx = mx.detach().cpu().numpy()
+            blocks[i] = (*mn, *mx)
+
+        return PlyElement.describe(blocks, "block")
+
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
 
@@ -273,14 +304,26 @@ class GaussianModel:
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
+        # ---------- 新增：block_id ----------
+        block_id = self.build_block_id()[:, None]  # [N,1]
+        # ---------- dtype：多一个 block_id ----------
+        dtype_full = (
+            [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+            + [('block_id', 'i4')]
+        )
 
-        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        # ---------- attributes：拼上 block_id ----------
+        attributes = np.concatenate(
+            (xyz, normals, f_dc, f_rest, opacities, scale, rotation, block_id),
+            axis=1
+        )
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
-        PlyData([el]).write(path)
+        # ---------- 新增：block_bounds element ----------
+        el_block = self.build_block_elements()
+        PlyData([el, el_block]).write(path)
 
     def reset_opacity(self):
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
