@@ -103,8 +103,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         available_indices = torch.nonzero(available_mask, as_tuple=True)[0]
         
         if not gaussians.partitioned:
-            if gaussians._xyz.shape[0] > 300_000:
+            if gaussians._xyz.shape[0] > 1:
                 gaussians.partition() 
+                gaussians.visualize_blocks()
                 gaussians.partitioned = True
                 LOGGER.info(f"Partitioned Gaussians at iteration {iteration}, total gaussians: {gaussians._xyz.shape[0]}, num partitions: {len(gaussians.block_indices)}")
             else:
