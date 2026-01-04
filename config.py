@@ -7,4 +7,4 @@ DEBUG_MODE = True
 
 CAL_RES_2_CPU = False  #把计算结果移动到CPU节省内存 (能节省内存但是移动非常慢)
 
-DRAW_BLOCK = False  # 是否在渲染图上绘制 block 投影轮廓
+DRAW_BLOCK = True  # 是否在渲染图上绘制 block 投影轮廓
