@@ -175,6 +175,24 @@ def project_points(xyz, full_proj, H, W):
 
     return torch.stack([x, y], dim=1)
 
+def draw_blocks(image, available_mask, view, gaussians, rendering, img_name, debug_path):
+    H, W = image.shape[1:]
+    frustum_mask_cpu = available_mask.detach().cpu()
+    for block_id, (mn, mx) in enumerate(gaussians.block_bounds):
+        if not frustum_mask_cpu[gaussians.block_indices[block_id]].any():
+            continue
+        corners = aabb_corners(mn.cpu(), mx.cpu())
+        pts_2d = project_points( corners, view.full_proj_transform.cpu(), H, W )
+        rect = projected_bbox(pts_2d, H, W)
+        if rect is None:
+            continue
+
+        # 稳定颜色（0~1）
+        random.seed(block_id)
+        color = [random.random() for _ in range(3)]
+        overlay = overlay_projected_polygon(rendering, pts_2d,  color=color, alpha=0.35)
+        out_path = os.path.join( debug_path, f"{img_name}_block_{block_id}.png" )
+        torchvision.utils.save_image(overlay, out_path)
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, train_test_exp, separate_sh):
     BRANCH = get_git_branch()
@@ -192,16 +210,17 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         rendered_list, depth_list, alpha_list = [], [], []
         viewspace_points_list, visibility_filter_list, radii_list = [], [], []
         visible_indices_list = []
+        visible_block_idxs = []
         available_num = 0
         
         
-        
-        for idx in range(len(gaussians.block_indices)):
-            block_indice = gaussians.block_indices[idx].to("cuda")
+        for block_idx in range(len(gaussians.block_indices)):
+            block_indice = gaussians.block_indices[block_idx].to("cuda")
             visible_mask_in_block = available_mask[block_indice]
             visible_indices = block_indice[visible_mask_in_block]
             if visible_indices.shape[0] == 0:
                 continue
+            visible_block_idxs.append(block_idx)
             available_num += visible_indices.shape[0]
             gaussians.set_subset(visible_indices)
             render_pkg = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -230,46 +249,24 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
             rendering = image[..., image.shape[-1] // 2:]
             gt = gt[..., gt.shape[-1] // 2:]
         img_name = view.image_name
-        torchvision.utils.save_image(image, os.path.join(render_path, img_name + ".png"))
-        torchvision.utils.save_image(gt, os.path.join(gts_path, img_name + ".png"))
+
         
+        if config.BLOCK_WIRE_SAVE:
+            debug_img_path = os.path.join(debug_path, img_name)
+            os.makedirs(debug_img_path, exist_ok=True)
+            for rendered, block_id in zip(rendered_list, visible_block_idxs):
+                block_wire_path = os.path.join(debug_img_path, f"block_{block_id}.png")
+                torchvision.utils.save_image(rendered, block_wire_path)
+            torchvision.utils.save_image(image, os.path.join(debug_img_path, img_name + ".png"))
+        else:
+            torchvision.utils.save_image(image, os.path.join(render_path, img_name + ".png"))
+            
+            
+        torchvision.utils.save_image(gt, os.path.join(gts_path, img_name + ".png"))
+
         if config.DRAW_BLOCK:
-            H, W = image.shape[1:]
-            frustum_mask_cpu = available_mask.detach().cpu()
-            for block_id, (mn, mx) in enumerate(gaussians.block_bounds):
-                
-                # 跳过 frustum 外 block
-                if not frustum_mask_cpu[gaussians.block_indices[block_id]].any():
-                    continue
+            draw_blocks(image, available_mask, view, gaussians, rendering, img_name, debug_path)
 
-                corners = aabb_corners(mn.cpu(), mx.cpu())
-                pts_2d = project_points(
-                    corners,
-                    view.full_proj_transform.cpu(),
-                    H, W
-                )
-
-                rect = projected_bbox(pts_2d, H, W)
-                if rect is None:
-                    continue
-
-                # 稳定颜色（0~1）
-                random.seed(block_id)
-                color = [random.random() for _ in range(3)]
-
-                overlay = overlay_projected_polygon(
-                    rendering,
-                    pts_2d,        # ← 必须是 [8,2] 的投影点
-                    color=color,
-                    alpha=0.35
-                )
-
-
-                out_path = os.path.join(
-                    debug_path,
-                    f"{img_name}_block_{block_id}.png"
-                )
-                torchvision.utils.save_image(overlay, out_path)
 
 
 
