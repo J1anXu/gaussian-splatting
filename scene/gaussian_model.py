@@ -304,9 +304,9 @@ class GaussianModel:
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
-        # ---------- 新增：block_id ----------
+        # 新增：block_id 
         block_id = self.build_block_id()[:, None]  # [N,1]
-        # ---------- dtype：多一个 block_id ----------
+        # dtype：多一个 block_id
         dtype_full = (
             [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
             + [('block_id', 'i4')]
@@ -314,15 +314,17 @@ class GaussianModel:
 
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        # ---------- attributes：拼上 block_id ----------
+        # attributes：拼上 block_id 
         attributes = np.concatenate(
             (xyz, normals, f_dc, f_rest, opacities, scale, rotation, block_id),
             axis=1
         )
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
-        # ---------- 新增：block_bounds element ----------
+        
+        # 新增：block_bounds element
         el_block = self.build_block_elements()
+        
         PlyData([el, el_block]).write(path)
 
     def reset_opacity(self):
@@ -382,6 +384,51 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree
+        
+        has_block = "block" in plydata
+        
+        if has_block:
+            block_elem = plydata["block"].data  # structured array, shape (B,)
+
+            block_bounds = []
+            for b in block_elem:
+                mn = torch.tensor(
+                    [b["xmin"], b["ymin"], b["zmin"]],
+                    dtype=torch.float32
+                )
+                mx = torch.tensor(
+                    [b["xmax"], b["ymax"], b["zmax"]],
+                    dtype=torch.float32
+                )
+                block_bounds.append((mn, mx))
+
+            self.block_bounds = block_bounds
+        else:
+            self.block_bounds = None
+            
+        if self.block_bounds is not None:
+            xyz_cpu = self._xyz.detach().cpu()  # [N,3]
+
+            block_indices = []
+
+            for mn, mx in self.block_bounds:
+                mn = mn.cpu()
+                mx = mx.cpu()
+
+                inside = (
+                    (xyz_cpu[:, 0] >= mn[0]) & (xyz_cpu[:, 0] <= mx[0]) &
+                    (xyz_cpu[:, 1] >= mn[1]) & (xyz_cpu[:, 1] <= mx[1]) &
+                    (xyz_cpu[:, 2] >= mn[2]) & (xyz_cpu[:, 2] <= mx[2])
+                )
+
+                idx = torch.nonzero(inside, as_tuple=False).squeeze(1)
+                block_indices.append(idx)
+
+                self.block_indices = block_indices
+        else:
+            self.block_indices = None
+
+        
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
