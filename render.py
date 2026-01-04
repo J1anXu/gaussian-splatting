@@ -21,7 +21,7 @@ from utils.camera_utils import frustum_culling
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
-
+import config
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
@@ -199,43 +199,44 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         img_name = view.image_name
         torchvision.utils.save_image(rendering, os.path.join(render_path, img_name + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, img_name + ".png"))
-            
-        H, W = rendering.shape[1:]
-        frustum_mask_cpu = frustum_culling_mask.detach().cpu()
-        for block_id, (mn, mx) in enumerate(gaussians.block_bounds):
-            
-            # 跳过 frustum 外 block
-            if not frustum_mask_cpu[gaussians.block_indices[block_id]].any():
-                continue
+        
+        if config.DRAW_BLOCK:
+            H, W = rendering.shape[1:]
+            frustum_mask_cpu = frustum_culling_mask.detach().cpu()
+            for block_id, (mn, mx) in enumerate(gaussians.block_bounds):
+                
+                # 跳过 frustum 外 block
+                if not frustum_mask_cpu[gaussians.block_indices[block_id]].any():
+                    continue
 
-            corners = aabb_corners(mn.cpu(), mx.cpu())
-            pts_2d = project_points(
-                corners,
-                view.full_proj_transform.cpu(),
-                H, W
-            )
+                corners = aabb_corners(mn.cpu(), mx.cpu())
+                pts_2d = project_points(
+                    corners,
+                    view.full_proj_transform.cpu(),
+                    H, W
+                )
 
-            rect = projected_bbox(pts_2d, H, W)
-            if rect is None:
-                continue
+                rect = projected_bbox(pts_2d, H, W)
+                if rect is None:
+                    continue
 
-            # 稳定颜色（0~1）
-            random.seed(block_id)
-            color = [random.random() for _ in range(3)]
+                # 稳定颜色（0~1）
+                random.seed(block_id)
+                color = [random.random() for _ in range(3)]
 
-            overlay = overlay_projected_polygon(
-                rendering,
-                pts_2d,        # ← 必须是 [8,2] 的投影点
-                color=color,
-                alpha=0.35
-            )
+                overlay = overlay_projected_polygon(
+                    rendering,
+                    pts_2d,        # ← 必须是 [8,2] 的投影点
+                    color=color,
+                    alpha=0.35
+                )
 
 
-            out_path = os.path.join(
-                debug_path,
-                f"{img_name}_block_{block_id}.png"
-            )
-            torchvision.utils.save_image(overlay, out_path)
+                out_path = os.path.join(
+                    debug_path,
+                    f"{img_name}_block_{block_id}.png"
+                )
+                torchvision.utils.save_image(overlay, out_path)
 
 
 
