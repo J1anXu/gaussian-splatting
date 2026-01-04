@@ -742,6 +742,5 @@ class GaussianModel:
             # debug 用
             # print(f"[repartition] Block {i:2d}: {idx.numel():7d} points")
         uncovered_idx = all_idx[~covered_mask]
-        self.prune_points(~covered_mask)
         self.block_indices = new_block_indices
         print(f"[repartition] Uncovered points ({uncovered_idx.numel()}): {uncovered_idx.tolist()}")
