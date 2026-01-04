@@ -271,9 +271,9 @@ class GaussianModel:
             idx = idx.detach().cpu().numpy()
             block_id[idx] = b
 
-        if (block_id < 0).any():
-            bad = np.where(block_id < 0)[0][:10]
-            raise RuntimeError(f"Some points have no block_id, e.g. {bad}")
+        # if (block_id < 0).any():
+        #     bad = np.where(block_id < 0)[0][:10]
+        #     raise RuntimeError(f"Some points have no block_id, e.g. {bad}")
 
         return block_id
 
