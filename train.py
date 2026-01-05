@@ -12,7 +12,9 @@
 import os
 import torch
 from random import randint
-from utils.debug_utils import save_block_img, save_depth_list, save_iteration_render, save_rgb_layers, save_layer_contribution
+
+import torchvision
+from utils.debug_utils import save_block_img, save_depth_list, save_rgb_layers, save_layer_contribution
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, merge_opt
 import sys
@@ -77,7 +79,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     
-
+    debug_image_name = "_DSC8680.JPG"
+    img_path_in_debug = os.path.join("debug", BRANCH, debug_image_name)
+    os.makedirs(img_path_in_debug, exist_ok=True)
     
     for iteration in range(first_iter, opt.iterations + 1):
 
@@ -150,20 +154,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
         
-        debug_image_name = "_DSC8680.JPG"
         if viewpoint_cam.image_name == debug_image_name:
-            img_path_in_debug = os.path.join("debug", BRANCH, debug_image_name, f"iter_{iteration}")
-            os.makedirs(img_path_in_debug, exist_ok=True)
+            iteration_path = os.path.join(img_path_in_debug, f"iter_{iteration}")
+            os.makedirs(iteration_path, exist_ok=True)
             front_rgbs = merge_res["front_rgbs"]
             prefix_T = merge_res["prefix_T"]
             # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
             block_rank = merge_res["block_rank"] # [K, H, W]
-            save_rgb_layers(img_path_in_debug, front_rgbs)
-            save_layer_contribution(img_path_in_debug, block_rank, front_rgbs, prefix_T, visible_block_idxs)
-            save_depth_list(img_path_in_debug, depth_list, visible_block_idxs)
-            save_iteration_render(img_path_in_debug, image, iteration)
+            save_rgb_layers(iteration_path, front_rgbs)
+            save_layer_contribution(iteration_path, block_rank, front_rgbs, prefix_T, visible_block_idxs)
+            save_depth_list(iteration_path, depth_list, visible_block_idxs)
+            
+            torchvision.utils.save_image(image, os.path.join(iteration_path, f"{iter}.png"))
+
             if gaussians.partitioned:
-                save_block_img(img_path_in_debug, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
+                save_block_img(iteration_path, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
             LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
 
         # Loss
