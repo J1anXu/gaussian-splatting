@@ -17,7 +17,7 @@ from os import makedirs
 from gaussian_renderer import render,merge_opt
 import torchvision
 from utils.general_utils import safe_state, get_git_branch
-from utils.camera_utils import frustum_culling, print_box_on_image, rebuild_aabb_2d
+from utils.camera_utils import frustum_culling, print_box_on_image, rebuild_block_bound_aabb_2d, rebuild_pointcloud_aabb_2d
 
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
@@ -41,8 +41,12 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
     makedirs(gts_path, exist_ok=True)
     debug_path = os.path.join("debug", BRANCH)
     os.makedirs(debug_path, exist_ok=True)
+    
+    gaussians.partition()
+    gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
+    
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        available_mask = frustum_culling(gaussians._xyz, view.full_proj_transform)
+        frustum_culling_available_mask = frustum_culling(gaussians._xyz, view.full_proj_transform)
         
         rendered_list, depth_list, alpha_list = [], [], []
         viewspace_points_list, visibility_filter_list, radii_list = [], [], []
@@ -53,7 +57,7 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
         
         for block_idx in range(len(gaussians.block_indices)):
             block_indice = gaussians.block_indices[block_idx].to("cuda")
-            visible_mask_in_block = available_mask[block_indice]
+            visible_mask_in_block = frustum_culling_available_mask[block_indice]
             visible_indices = block_indice[visible_mask_in_block]
             if visible_indices.shape[0] == 0:
                 continue
@@ -97,9 +101,16 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
                 # bmin = (xmin, ymin, zmin); bmax = (xmax, ymax, zmax)
                 # 因为一个轴对齐包围盒（AABB）在 3D 空间里， 只需要两个点：最小角 bmin 和最大角 bmax， 这两个点就唯一确定了一个长方体，而这个长方体天然有 8 个角点。
                 bmin, bmax = gaussians.block_bounds[block_id]
-                x_min, y_min, x_max, y_max = rebuild_aabb_2d(rendered, view, bmin, bmax)
+                W, H = rendered.shape[2], rendered.shape[1]
+                proj_matrix = view.full_proj_transform
+                
+                x_min, y_min, x_max, y_max = rebuild_block_bound_aabb_2d(rendered, view, bmin, bmax, W, H)
+                block_img_with_box = print_box_on_image(rendered, x_min, y_min, x_max, y_max, colors="red", width=4)
 
-                block_img_with_box = print_box_on_image(rendered, x_min, y_min, x_max, y_max)
+                x_min, y_min, x_max, y_max = rebuild_pointcloud_aabb_2d(gaussians._xyz[gaussians.block_indices[block_id]], proj_matrix, W, H)
+                block_img_with_box = print_box_on_image(block_img_with_box, x_min, y_min, x_max, y_max, colors="green")
+
+                
                 torchvision.utils.save_image(block_img_with_box, block_wire_path)
             torchvision.utils.save_image(image, os.path.join(debug_img_path, img_name + ".png"))
         else:
