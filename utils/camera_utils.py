@@ -17,6 +17,7 @@ import cv2
 import torch
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from torchvision.utils import draw_bounding_boxes
 
 WARNED = False
 
@@ -292,11 +293,7 @@ def visualize_frustum(
     
     
 
-def frustum_culling(
-    xyz: torch.Tensor,                  # [N,3]
-    full_proj_transform: torch.Tensor,   # [4,4]
-    assume_opengl: bool = False    # None = 自动；True = z∈[-1,1]; False = z∈[0,1]
-) -> torch.BoolTensor:
+def frustum_culling( xyz: torch.Tensor, full_proj_transform: torch.Tensor, assume_opengl: bool = False ) -> torch.BoolTensor:
     """
     Returns:
         mask: BoolTensor [N], True means inside frustum
@@ -363,75 +360,76 @@ def frustum_culling(
     return mask
 
 
-def overlay_block_aabb_edges(img, block_idx, block_bounds, view, alpha=0.35):
-    device = img.device
-    H, W = img.shape[1:]
+def print_box_on_image(image, x_min, y_min, x_max, y_max):
+    """
+    在渲染图上绘制 BBox 并返回结果 Tensor
+    :param image: [3, H, W] 的 torch.Tensor, 范围 [0, 1]
+    :param x_min, y_min, x_max, y_max: 像素坐标 (int)
+    :return: [3, H, W] 的 torch.Tensor, 范围 [0, 1]
+    """
+    with torch.no_grad():
+        # 1. 转换到 uint8 格式 (draw_bounding_boxes 的标准要求)
+        # clamp 保证 [0, 1] 范围，避免溢出
+        img_uint8 = (image.detach().clamp(0, 1) * 255).to(torch.uint8).cpu()
+        
+        # 2. 坐标合法性裁剪，防止投影计算出屏导致的报错
+        H, W = img_uint8.shape[1], img_uint8.shape[2]
+        x1, y1 = max(0, int(x_min)), max(0, int(y_min))
+        x2, y2 = min(W, int(x_max)), min(H, int(y_max))
+        
+        # 3. 如果有效区域太小或非法，直接返回原图
+        if x2 <= x1 or y2 <= y1:
+            return image
+        
+        # 4. 构造 boxes [N, 4] 格式为 [xmin, ymin, xmax, ymax]
+        boxes = torch.tensor([[x1, y1, x2, y2]], dtype=torch.float)
+        
+        # 5. 绘制框：颜色红色，宽度可调
+        # 注意：这里返回的也是 uint8 Tensor
+        res_uint8 = draw_bounding_boxes(img_uint8, boxes, colors="red", width=3)
+        
+        # 6. 转回 float32 且范围回到 [0, 1] 并送回原始设备
+        return res_uint8.to(image.device).float() / 255.0
+    
+def aabb_8_corners(bmin: torch.Tensor, bmax: torch.Tensor):
+    x0, y0, z0 = bmin
+    x1, y1, z1 = bmax
 
-    mn, mx = block_bounds[block_idx]
-
-    # corners: [8,3]
     corners = torch.stack([
-        torch.stack([mn[0], mn[1], mn[2]]),
-        torch.stack([mx[0], mn[1], mn[2]]),
-        torch.stack([mx[0], mx[1], mn[2]]),
-        torch.stack([mn[0], mx[1], mn[2]]),
-        torch.stack([mn[0], mn[1], mx[2]]),
-        torch.stack([mx[0], mn[1], mx[2]]),
-        torch.stack([mx[0], mx[1], mx[2]]),
-        torch.stack([mn[0], mx[1], mx[2]]),
-    ], dim=0).to(device=device, dtype=img.dtype)
+        torch.tensor([x0, y0, z0], device=bmin.device, dtype=bmin.dtype),
+        torch.tensor([x1, y0, z0], device=bmin.device, dtype=bmin.dtype),
+        torch.tensor([x0, y1, z0], device=bmin.device, dtype=bmin.dtype),
+        torch.tensor([x1, y1, z0], device=bmin.device, dtype=bmin.dtype),
+        torch.tensor([x0, y0, z1], device=bmin.device, dtype=bmin.dtype),
+        torch.tensor([x1, y0, z1], device=bmin.device, dtype=bmin.dtype),
+        torch.tensor([x0, y1, z1], device=bmin.device, dtype=bmin.dtype),
+        torch.tensor([x1, y1, z1], device=bmin.device, dtype=bmin.dtype),
+    ], dim=0)
 
-    ones = torch.ones((8, 1), device=device, dtype=img.dtype)
+    return corners
+
+def rebuild_aabb_2d(rendered, view, bmin, bmax):
+    corners = aabb_8_corners(bmin, bmax).to(rendered.device)  # [8,3]
+
+    # 2. 投影到屏幕
+    H, W = rendered.shape[1:]
+    ones = torch.ones((8, 1), device=rendered.device, dtype=rendered.dtype)
     corners_h = torch.cat([corners, ones], dim=1)  # [8,4]
+    clip = (view.full_proj_transform.to(rendered.device) @ corners_h.T).T
+    # 3. NDC
+    w = clip[:, 3:4]
+    valid = w.abs() > 1e-6
+    ndc = clip[:, :3] / w
+    ndc = ndc[valid.squeeze(1)]
 
-    M = view.full_proj_transform.to(device)
+    # 4. NDC → pixel
+    xs = (ndc[:, 0] * 0.5 + 0.5) * W
+    ys = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * H
 
-    clip_a = (M @ corners_h.T).T      # option A
-    clip_b = corners_h @ M            # option B
-
-    def ndc_from_clip(clip):
-        w = clip[:, 3:4]
-        good = w.abs() > 1e-6
-        ndc = torch.zeros_like(clip[:, :3])
-        m = good.squeeze(1)
-        ndc[m] = clip[m, :3] / w[m]
-        return ndc, m
-
-    ndc_a, good_a = ndc_from_clip(clip_a)
-    ndc_b, good_b = ndc_from_clip(clip_b)
-
-    score_a = ((ndc_a[:, 0].abs() <= 1) & (ndc_a[:, 1].abs() <= 1) & good_a).sum().item()
-    score_b = ((ndc_b[:, 0].abs() <= 1) & (ndc_b[:, 1].abs() <= 1) & good_b).sum().item()
-
-    if score_b >= score_a:
-        ndc, good = ndc_b, good_b
-    else:
-        ndc, good = ndc_a, good_a
-
-    # 只用有效点（避免 w<=0 / inf 把 min/max 搞炸）
-    valid = good & torch.isfinite(ndc).all(dim=1)
-    ndc = ndc[valid]
-    if ndc.shape[0] < 2:
-        return img
-
-    pts_2d = torch.empty((ndc.shape[0], 2), device=device, dtype=img.dtype)
-    pts_2d[:, 0] = (ndc[:, 0] * 0.5 + 0.5) * W
-    pts_2d[:, 1] = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * H
-
-    xmin = int(torch.clamp(pts_2d[:, 0].min(), 0, W - 1))
-    xmax = int(torch.clamp(pts_2d[:, 0].max(), 0, W - 1))
-    ymin = int(torch.clamp(pts_2d[:, 1].min(), 0, H - 1))
-    ymax = int(torch.clamp(pts_2d[:, 1].max(), 0, H - 1))
-
-    if xmin >= xmax or ymin >= ymax:
-        return img
-
-    overlay = img.clone()
-
-    # 稳定颜色（别用 manual_seed 影响全局随机：用 Generator 更干净）
-    g = torch.Generator(device=device)
-    g.manual_seed(int(block_idx))
-    color = torch.rand((3, 1, 1), device=device, dtype=img.dtype, generator=g)
-
-    overlay[:, ymin:ymax, xmin:xmax] = (1 - alpha) * overlay[:, ymin:ymax, xmin:xmax] + alpha * color
-    return overlay
+    # 5. screen-space rectangle
+    x_min = int(xs.min().clamp(0, W - 1))
+    x_max = int(xs.max().clamp(0, W - 1))
+    y_min = int(ys.min().clamp(0, H - 1))
+    y_max = int(ys.max().clamp(0, H - 1))
+        
+    return x_min, y_min, x_max, y_max

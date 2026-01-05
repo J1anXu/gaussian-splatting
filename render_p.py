@@ -17,7 +17,7 @@ from os import makedirs
 from gaussian_renderer import render,merge_opt
 import torchvision
 from utils.general_utils import safe_state, get_git_branch
-from utils.camera_utils import frustum_culling, overlay_block_aabb_edges
+from utils.camera_utils import frustum_culling, print_box_on_image, rebuild_aabb_2d
 
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
@@ -41,7 +41,6 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
     makedirs(gts_path, exist_ok=True)
     debug_path = os.path.join("debug", BRANCH)
     os.makedirs(debug_path, exist_ok=True)
-    gaussians.partition()
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         available_mask = frustum_culling(gaussians._xyz, view.full_proj_transform)
         
@@ -95,9 +94,13 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
             os.makedirs(debug_img_path, exist_ok=True)
             for rendered, block_id in zip(rendered_list, visible_block_idxs):
                 block_wire_path = os.path.join(debug_img_path, f"block_{block_id}.png")
-                # 将block画出来
-                rendered = overlay_block_aabb_edges( rendered, block_id, gaussians.block_bounds, view)
-                torchvision.utils.save_image(rendered, block_wire_path)
+                # bmin = (xmin, ymin, zmin); bmax = (xmax, ymax, zmax)
+                # 因为一个轴对齐包围盒（AABB）在 3D 空间里， 只需要两个点：最小角 bmin 和最大角 bmax， 这两个点就唯一确定了一个长方体，而这个长方体天然有 8 个角点。
+                bmin, bmax = gaussians.block_bounds[block_id]
+                x_min, y_min, x_max, y_max = rebuild_aabb_2d(rendered, view, bmin, bmax)
+
+                block_img_with_box = print_box_on_image(rendered, x_min, y_min, x_max, y_max)
+                torchvision.utils.save_image(block_img_with_box, block_wire_path)
             torchvision.utils.save_image(image, os.path.join(debug_img_path, img_name + ".png"))
         else:
             torchvision.utils.save_image(image, os.path.join(render_path, img_name + ".png"))
