@@ -189,15 +189,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": available_num, "blocks": len(gaussians.block_indices), "pts": total_points})
                 progress_bar.update(10)
+                log = {"iter": iteration,"loss": ema_loss_for_log, "pts_in_frustum": available_num, "pts": total_points} 
+                LOGGER.info(log)
+                if WANDB and not DEBUG_MODE:
+                    wandb.log(log, step=iteration)
             if iteration == opt.iterations:
                 progress_bar.close()
-            log = {"iter": iteration,"loss": ema_loss_for_log, "pts_in_frustum": available_num, "pts": total_points}
-            
-            LOGGER.info(log)
-            
-            if WANDB and not DEBUG_MODE:
-                wandb.log(log, step=iteration)
-            
+
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration, BRANCH)
