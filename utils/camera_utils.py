@@ -360,7 +360,7 @@ def frustum_culling( xyz: torch.Tensor, full_proj_transform: torch.Tensor, assum
     return mask
 
 
-def print_box_on_image(image, x_min, y_min, x_max, y_max, colors, width=2):
+def draw_box(image, x_min, y_min, x_max, y_max, colors, width=2):
     """
     在渲染图上绘制 BBox 并返回结果 Tensor
     :param image: [3, H, W] 的 torch.Tensor, 范围 [0, 1]
