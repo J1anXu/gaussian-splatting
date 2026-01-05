@@ -42,8 +42,8 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
     debug_path = os.path.join("debug", BRANCH)
     os.makedirs(debug_path, exist_ok=True)
     
-    gaussians.partition()
-    gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
+    # gaussians.partition()
+    # gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
     
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         frustum_culling_available_mask = frustum_culling(gaussians._xyz, view.full_proj_transform)
