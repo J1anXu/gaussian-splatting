@@ -102,9 +102,10 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
         if config.SAVE_RGB_LAYERS:
             rgb_layers_path = os.path.join(img_path_in_debug, "rgb_layers")
             os.makedirs(rgb_layers_path, exist_ok=True)
-            for layer_idx in range(front_rgbs.shape[0]):
-                layer_img = front_rgbs[layer_idx]
-                torchvision.utils.save_image(layer_img, os.path.join(rgb_layers_path, f"layer_{layer_idx}.png"))
+            for idx in range(front_rgbs.shape[0]):
+                layer_img = front_rgbs[idx]
+                block_idx = visible_block_idxs[idx]
+                torchvision.utils.save_image(layer_img, os.path.join(rgb_layers_path, f"layer_{block_idx}.png"))
             
         if config.SAVE_LAYERS_CONTRIBUTION:
             # 看看每个block在每个图层贡献了什么
@@ -118,7 +119,25 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
                         continue
                     save_path = os.path.join( layer_contri_path, f"layer_{layer}_block_{block_id}_contribution.png" )
                     torchvision.utils.save_image(rgb.clamp(0, 1), save_path)
-
+                    
+        if config.SAVE_DEPTH_LIST:
+            depth_list_path = os.path.join(img_path_in_debug, "depth_list")
+            os.makedirs(depth_list_path, exist_ok=True)
+            for idx, block_id in enumerate(visible_block_idxs):
+                layer_depth = depth_list[idx]   # [1, H, W]
+                depth = layer_depth.squeeze(0)       # [H, W]
+                valid = torch.isfinite(depth)
+                if not valid.any():
+                    continue
+                d_min = depth[valid].min()
+                d_max = depth[valid].max()
+                if (d_max - d_min) < 1e-6:
+                    depth_norm = torch.zeros_like(depth)
+                else:
+                    depth_norm = (depth - d_min) / (d_max - d_min)
+                torchvision.utils.save_image(depth_norm.unsqueeze(0), os.path.join( depth_list_path, f"block_{block_id}_depth_map.png" ))
+                
+        
         if config.SAVE_BLOCK_IMG:
             block_img_path = os.path.join(img_path_in_debug, "block_images")
             os.makedirs(block_img_path, exist_ok=True)
