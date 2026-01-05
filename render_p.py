@@ -81,6 +81,7 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
         merge_res = merge_opt(N_total, rendered_list, depth_list, alpha_list, visibility_filter_list, radii_list, visible_indices_list)   
         
         image, visibility_filter, radii = merge_res["final_rgb"], merge_res["global_visibility_filter"], merge_res["global_radii"]
+        rgb_layer = merge_res["front_rgbs"]
 
         if view.alpha_mask is not None:
             alpha_mask = view.alpha_mask.cuda()
@@ -92,12 +93,18 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
             gt = gt[..., gt.shape[-1] // 2:]
         img_name = view.image_name
 
+
+        img_path_in_debug = os.path.join(debug_path, img_name)
+        os.makedirs(img_path_in_debug, exist_ok=True)
+        
+        if config.SAVE_RGB_LAYERS:
+            for layer_idx in range(rgb_layer.shape[0]):
+                layer_img = rgb_layer[layer_idx]
+                torchvision.utils.save_image(layer_img, os.path.join(img_path_in_debug, f"layer_{layer_idx}.png"))
         
         if config.SAVE_BLOCK_IMG:
-            debug_img_path = os.path.join(debug_path, img_name)
-            os.makedirs(debug_img_path, exist_ok=True)
             for block_img, block_id in zip(rendered_list, visible_block_idxs):
-                block_img_path = os.path.join(debug_img_path, f"block_{block_id}.png")
+                
                 # bmin = (xmin, ymin, zmin); bmax = (xmax, ymax, zmax)
                 # 因为一个轴对齐包围盒（AABB）在 3D 空间里， 只需要两个点：最小角 bmin 和最大角 bmax， 这两个点就唯一确定了一个长方体，而这个长方体天然有 8 个角点。
                 bmin, bmax = gaussians.block_bounds[block_id]
@@ -109,8 +116,9 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
                     block_img = draw_box(block_img, x_min, y_min, x_max, y_max, colors="red", width=4)
                     x_min, y_min, x_max, y_max = rebuild_pointcloud_aabb_2d(gaussians._xyz[gaussians.block_indices[block_id]], proj_matrix, W, H)
                     block_img = draw_box(block_img, x_min, y_min, x_max, y_max, colors="green")
-                    torchvision.utils.save_image(block_img, block_img_path)
-                torchvision.utils.save_image(image, os.path.join(block_img_path, img_name + ".png"))   
+                    
+                torchvision.utils.save_image(block_img, os.path.join(img_path_in_debug, f"_block_{block_id}.png"))  
+
                 
         torchvision.utils.save_image(image, os.path.join(render_path, img_name + ".png"))            
         torchvision.utils.save_image(gt, os.path.join(gts_path, img_name + ".png"))
