@@ -311,6 +311,7 @@ if __name__ == "__main__":
         wandb.define_metric("iteration")  # 
         
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
+    os.makedirs("debug", exist_ok=True)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done
