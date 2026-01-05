@@ -360,7 +360,7 @@ def frustum_culling( xyz: torch.Tensor, full_proj_transform: torch.Tensor, assum
     return mask
 
 
-def print_box_on_image(image, x_min, y_min, x_max, y_max):
+def print_box_on_image(image, x_min, y_min, x_max, y_max, colors, width=2):
     """
     在渲染图上绘制 BBox 并返回结果 Tensor
     :param image: [3, H, W] 的 torch.Tensor, 范围 [0, 1]
@@ -386,7 +386,7 @@ def print_box_on_image(image, x_min, y_min, x_max, y_max):
         
         # 5. 绘制框：颜色红色，宽度可调
         # 注意：这里返回的也是 uint8 Tensor
-        res_uint8 = draw_bounding_boxes(img_uint8, boxes, colors="red", width=3)
+        res_uint8 = draw_bounding_boxes(img_uint8, boxes, colors=colors, width=width)
         
         # 6. 转回 float32 且范围回到 [0, 1] 并送回原始设备
         return res_uint8.to(image.device).float() / 255.0
@@ -408,28 +408,96 @@ def aabb_8_corners(bmin: torch.Tensor, bmax: torch.Tensor):
 
     return corners
 
-def rebuild_aabb_2d(rendered, view, bmin, bmax):
-    corners = aabb_8_corners(bmin, bmax).to(rendered.device)  # [8,3]
+def rebuild_block_bound_aabb_2d(rendered, view, bmin, bmax, W, H):
+    """
+    rendered: [3, H, W] 渲染结果（只用于 device / dtype）
+    view: camera view (contains full_proj_transform)
+    bmin, bmax: block AABB in world space
+    W, H: image width / height
+    """
+    device = rendered.device
+    dtype = rendered.dtype
 
-    # 2. 投影到屏幕
-    H, W = rendered.shape[1:]
-    ones = torch.ones((8, 1), device=rendered.device, dtype=rendered.dtype)
-    corners_h = torch.cat([corners, ones], dim=1)  # [8,4]
-    clip = (view.full_proj_transform.to(rendered.device) @ corners_h.T).T
-    # 3. NDC
-    w = clip[:, 3:4]
-    valid = w.abs() > 1e-6
-    ndc = clip[:, :3] / w
-    ndc = ndc[valid.squeeze(1)]
+    # 1. AABB 的 8 个角点（world space）
+    corners = aabb_8_corners(bmin, bmax).to(device=device, dtype=dtype)  # [8,3]
 
-    # 4. NDC → pixel
-    xs = (ndc[:, 0] * 0.5 + 0.5) * W
-    ys = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * H
+    # 2. 齐次坐标（行向量语义，和点云版本一致）
+    corners_h = torch.cat(
+        [corners, torch.ones((8, 1), device=device, dtype=dtype)],
+        dim=1
+    )  # [8,4]
 
-    # 5. screen-space rectangle
-    x_min = int(xs.min().clamp(0, W - 1))
-    x_max = int(xs.max().clamp(0, W - 1))
-    y_min = int(ys.min().clamp(0, H - 1))
-    y_max = int(ys.max().clamp(0, H - 1))
-        
+    # 3. 投影（关键：p @ M）
+    full_proj_transform = view.full_proj_transform.to(device=device, dtype=dtype)
+    clip = corners_h @ full_proj_transform  # [8,4]
+
+    # 4. 只保留在相机前方的角点（和点云一致）
+    w = clip[:, 3]
+    mask = w > 0.05
+
+    if not mask.any():
+        # block 完全在相机后 / 不可见
+        return 0, 0, 0, 0
+
+    valid_clip = clip[mask]
+    valid_w = w[mask]
+
+    # 5. 透视除法 → NDC（只用 x,y，和点云一致）
+    ndc = (valid_clip[:, :2] / valid_w.unsqueeze(1)).reshape(-1, 2)
+
+    # 6. NDC → 像素坐标（和点云版本完全一致）
+    screen_x = (ndc[:, 0] + 1.0) * W / 2.0
+    screen_y = (ndc[:, 1] + 1.0) * H / 2.0
+
+    # 7. screen-space AABB（与点云版本一致的 clamp 逻辑）
+    x_min = max(0, int(screen_x.min().item()))
+    y_min = max(0, int(screen_y.min().item()))
+    x_max = min(W, int(screen_x.max().item()))
+    y_max = min(H, int(screen_y.max().item()))
+
+    return x_min, y_min, x_max, y_max
+
+
+def rebuild_pointcloud_aabb_2d(xyz, full_proj_transform, W, H):
+    """
+    xyz: [N, 3] 高斯点坐标 (GPU)
+    full_proj_transform: viewpoint_cam.full_proj_transform
+    W, H: 图像宽高
+    """
+    device = xyz.device
+    # 1. 确保矩阵在 GPU 上且类型匹配
+    full_proj_transform = full_proj_transform.to(device=device, dtype=xyz.dtype)
+
+    # 2. 构造齐次坐标
+    p_homo = torch.cat([xyz, torch.ones((xyz.shape[0], 1), device=device, dtype=xyz.dtype)], dim=-1)
+    
+    # 3. 投影变换
+    p_clip = p_homo @ full_proj_transform
+    
+    # 4. 关键：剔除 w <= 0.05 的点（相机背后的点）
+    w = p_clip[:, 3:4]
+    mask = (w > 0.05).squeeze() 
+    
+    # 容错：如果没有点在相机前方
+    if not mask.any():
+        return 0, 0, 0, 0
+    
+    # 5. 提取有效点并进行透视除法
+    valid_p_clip = p_clip[mask]
+    valid_w = w[mask]
+    
+    # 这里的关键：即使只有一个点，也通过 reshape 确保 ndc 是 [N, 2]
+    # 避免 [2] 这种一维向量导致 ndc[:, 1] 报错
+    ndc = (valid_p_clip[:, :2] / valid_w).reshape(-1, 2)
+    
+    # 6. 映射到像素空间 (保持你验证正确的 +1.0 逻辑)
+    screen_x = (ndc[:, 0] + 1.0) * W / 2.0
+    screen_y = (ndc[:, 1] + 1.0) * H / 2.0
+    
+    # 7. 取得边界并转为整数，增加简单的边界溢出保护
+    x_min = max(0, int(screen_x.min().item()))
+    y_min = max(0, int(screen_y.min().item()))
+    x_max = min(W, int(screen_x.max().item()))
+    y_max = min(H, int(screen_y.max().item()))
+    
     return x_min, y_min, x_max, y_max
