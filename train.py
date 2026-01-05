@@ -151,7 +151,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             image *= alpha_mask
         
         debug_image_name = "_DSC8681.JPG"
-        if viewpoint_cam.image_name is debug_image_name:
+        if viewpoint_cam.image_name == debug_image_name:
             img_path_in_debug = os.path.join("debug", BRANCH, debug_image_name, f"iter_{iteration}")
             os.makedirs(img_path_in_debug, exist_ok=True)
             front_rgbs = merge_res["front_rgbs"]
