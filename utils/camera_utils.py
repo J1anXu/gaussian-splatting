@@ -363,65 +363,75 @@ def frustum_culling(
     return mask
 
 
-def overlay_block_aabb_edges(
-    img,
-    block_idx,
-    block_bounds,
-    view,
-    line_width=2,
-    alpha=0.35,
-):
-    """
-    Project block AABB to screen-space axis-aligned rectangle
-    and overlay it as a semi-transparent box.
-    """
+def overlay_block_aabb_edges(img, block_idx, block_bounds, view, alpha=0.35):
     device = img.device
     H, W = img.shape[1:]
 
-    # 1. block AABB (world space)
     mn, mx = block_bounds[block_idx]
 
-    corners = torch.tensor([
-        [mn[0], mn[1], mn[2]],
-        [mx[0], mn[1], mn[2]],
-        [mx[0], mx[1], mn[2]],
-        [mn[0], mx[1], mn[2]],
-        [mn[0], mn[1], mx[2]],
-        [mx[0], mn[1], mx[2]],
-        [mx[0], mx[1], mx[2]],
-        [mn[0], mx[1], mx[2]],
-    ], device=device, dtype=img.dtype)  # [8,3]
+    # corners: [8,3]
+    corners = torch.stack([
+        torch.stack([mn[0], mn[1], mn[2]]),
+        torch.stack([mx[0], mn[1], mn[2]]),
+        torch.stack([mx[0], mx[1], mn[2]]),
+        torch.stack([mn[0], mx[1], mn[2]]),
+        torch.stack([mn[0], mn[1], mx[2]]),
+        torch.stack([mx[0], mn[1], mx[2]]),
+        torch.stack([mx[0], mx[1], mx[2]]),
+        torch.stack([mn[0], mx[1], mx[2]]),
+    ], dim=0).to(device=device, dtype=img.dtype)
 
-    # 2. project to screen
     ones = torch.ones((8, 1), device=device, dtype=img.dtype)
-    corners_h = torch.cat([corners, ones], dim=1)
+    corners_h = torch.cat([corners, ones], dim=1)  # [8,4]
 
-    clip = (view.full_proj_transform.to(device) @ corners_h.T).T
-    ndc = clip[:, :3] / clip[:, 3:4]
+    M = view.full_proj_transform.to(device)
 
-    pts_2d = torch.zeros((8, 2), device=device, dtype=img.dtype)
+    clip_a = (M @ corners_h.T).T      # option A
+    clip_b = corners_h @ M            # option B
+
+    def ndc_from_clip(clip):
+        w = clip[:, 3:4]
+        good = w.abs() > 1e-6
+        ndc = torch.zeros_like(clip[:, :3])
+        m = good.squeeze(1)
+        ndc[m] = clip[m, :3] / w[m]
+        return ndc, m
+
+    ndc_a, good_a = ndc_from_clip(clip_a)
+    ndc_b, good_b = ndc_from_clip(clip_b)
+
+    score_a = ((ndc_a[:, 0].abs() <= 1) & (ndc_a[:, 1].abs() <= 1) & good_a).sum().item()
+    score_b = ((ndc_b[:, 0].abs() <= 1) & (ndc_b[:, 1].abs() <= 1) & good_b).sum().item()
+
+    if score_b >= score_a:
+        ndc, good = ndc_b, good_b
+    else:
+        ndc, good = ndc_a, good_a
+
+    # 只用有效点（避免 w<=0 / inf 把 min/max 搞炸）
+    valid = good & torch.isfinite(ndc).all(dim=1)
+    ndc = ndc[valid]
+    if ndc.shape[0] < 2:
+        return img
+
+    pts_2d = torch.empty((ndc.shape[0], 2), device=device, dtype=img.dtype)
     pts_2d[:, 0] = (ndc[:, 0] * 0.5 + 0.5) * W
     pts_2d[:, 1] = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * H
 
-    # 3. screen-space bounding rectangle
     xmin = int(torch.clamp(pts_2d[:, 0].min(), 0, W - 1))
     xmax = int(torch.clamp(pts_2d[:, 0].max(), 0, W - 1))
     ymin = int(torch.clamp(pts_2d[:, 1].min(), 0, H - 1))
     ymax = int(torch.clamp(pts_2d[:, 1].max(), 0, H - 1))
 
     if xmin >= xmax or ymin >= ymax:
-        return img  # nothing visible
+        return img
 
-    # 4. overlay rectangle (semi-transparent)
     overlay = img.clone()
 
-    # stable color per block
-    torch.manual_seed(block_idx)
-    color = torch.rand(3, device=device, dtype=img.dtype).view(3, 1, 1)
+    # 稳定颜色（别用 manual_seed 影响全局随机：用 Generator 更干净）
+    g = torch.Generator(device=device)
+    g.manual_seed(int(block_idx))
+    color = torch.rand((3, 1, 1), device=device, dtype=img.dtype, generator=g)
 
-    overlay[:, ymin:ymax, xmin:xmax] = (
-        (1 - alpha) * overlay[:, ymin:ymax, xmin:xmax]
-        + alpha * color
-    )
-
+    overlay[:, ymin:ymax, xmin:xmax] = (1 - alpha) * overlay[:, ymin:ymax, xmin:xmax] + alpha * color
     return overlay

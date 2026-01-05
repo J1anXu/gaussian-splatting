@@ -30,8 +30,8 @@ except:
     SPARSE_ADAM_AVAILABLE = False
 BRANCH = "unknown_branch"
 
-    
-def render_set(model_path, name, iteration, views, gaussians, pipeline, background, train_test_exp, separate_sh):
+
+def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pipeline, background, train_test_exp, separate_sh):
     BRANCH = get_git_branch()
 
     render_path = os.path.join(model_path, BRANCH, name, "ours_{}".format(iteration), "renders")
@@ -41,6 +41,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     makedirs(gts_path, exist_ok=True)
     debug_path = os.path.join("debug", BRANCH)
     os.makedirs(debug_path, exist_ok=True)
+    gaussians.partition()
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         available_mask = frustum_culling(gaussians._xyz, view.full_proj_transform)
         
