@@ -161,7 +161,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             save_rgb_layers(img_path_in_debug, front_rgbs)
             save_layer_contribution(img_path_in_debug, block_rank, front_rgbs, prefix_T, visible_block_idxs)
             save_depth_list(img_path_in_debug, depth_list, visible_block_idxs)
-            save_block_img(img_path_in_debug, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
+            if gaussians.partitioned:
+                save_block_img(img_path_in_debug, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
             LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
 
         # Loss
