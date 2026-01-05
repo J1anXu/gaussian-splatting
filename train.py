@@ -164,8 +164,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             save_rgb_layers(iteration_path, front_rgbs)
             save_layer_contribution(iteration_path, block_rank, front_rgbs, prefix_T, visible_block_idxs)
             save_depth_list(iteration_path, depth_list, visible_block_idxs)
-            
-            torchvision.utils.save_image(image, os.path.join(iteration_path, f"{iter}.png"))
+
+            torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}.png"))
 
             if gaussians.partitioned:
                 save_block_img(iteration_path, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
