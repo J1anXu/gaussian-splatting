@@ -104,8 +104,7 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
             os.makedirs(rgb_layers_path, exist_ok=True)
             for idx in range(front_rgbs.shape[0]):
                 layer_img = front_rgbs[idx]
-                block_idx = visible_block_idxs[idx]
-                torchvision.utils.save_image(layer_img, os.path.join(rgb_layers_path, f"layer_{block_idx}.png"))
+                torchvision.utils.save_image(layer_img, os.path.join(rgb_layers_path, f"layer_{idx}.png"))
             
         if config.SAVE_LAYERS_CONTRIBUTION:
             # 看看每个block在每个图层贡献了什么
