@@ -244,3 +244,8 @@ def save_block_img(img_path_in_debug, rendered_list, visible_block_idxs, gaussia
             
         torchvision.utils.save_image(block_img, os.path.join(block_img_path, f"_block_{block_id}.png"))  
     torchvision.utils.save_image(image, os.path.join(block_img_path, view.image_name + ".png"))    
+
+def save_iteration_render(img_path_in_debug, image, iter):
+    render_path = os.path.join(img_path_in_debug, "iteration_render")
+    os.makedirs(render_path, exist_ok=True)
+    torchvision.utils.save_image(image, os.path.join(render_path, f"{iter}.png"))
