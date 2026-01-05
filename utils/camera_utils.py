@@ -501,3 +501,39 @@ def rebuild_pointcloud_aabb_2d(xyz, full_proj_transform, W, H):
     y_max = min(H, int(screen_y.max().item()))
     
     return x_min, y_min, x_max, y_max
+
+
+def extract_block_layer_contribution(
+    block_rank,          # [K, H, W]
+    front_rgbs,          # [K, 3, H, W]
+    prefix_T,            # [K, 1, H, W]
+    visible_block_idxs,  # list of block_id, length K
+):
+    """
+    Returns:
+        contrib[layer][block_id] -> RGB tensor [3, H, W]
+    """
+    K, H, W = block_rank.shape
+    device = front_rgbs.device
+    dtype = front_rgbs.dtype
+
+    # 1. 真实的 layer-wise RGB 贡献
+    layer_rgb = prefix_T * front_rgbs        # [K, 3, H, W]
+
+    # 2. 初始化结果容器
+    contrib = {
+        layer: {
+            block_id: torch.zeros((3, H, W), device=device, dtype=dtype)
+            for block_id in visible_block_idxs
+        }
+        for layer in range(K)
+    }
+
+    # 3. 按 layer + block 拆分
+    for layer in range(K):
+        for block_pos, block_id in enumerate(visible_block_idxs):
+            mask = (block_rank[block_pos] == layer)   # [H, W]
+            if mask.any():
+                contrib[layer][block_id][:, mask] = layer_rgb[layer][:, mask]
+
+    return contrib

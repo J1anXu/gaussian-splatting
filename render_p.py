@@ -17,7 +17,7 @@ from os import makedirs
 from gaussian_renderer import render,merge_opt
 import torchvision
 from utils.general_utils import safe_state, get_git_branch
-from utils.camera_utils import frustum_culling, draw_box, rebuild_block_bound_aabb_2d, rebuild_pointcloud_aabb_2d
+from utils.camera_utils import frustum_culling, draw_box, rebuild_block_bound_aabb_2d, rebuild_pointcloud_aabb_2d, extract_block_layer_contribution
 
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
@@ -81,8 +81,11 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
         merge_res = merge_opt(N_total, rendered_list, depth_list, alpha_list, visibility_filter_list, radii_list, visible_indices_list)   
         
         image, visibility_filter, radii = merge_res["final_rgb"], merge_res["global_visibility_filter"], merge_res["global_radii"]
-        rgb_layer = merge_res["front_rgbs"]
-
+        front_rgbs = merge_res["front_rgbs"]
+        prefix_T = merge_res["prefix_T"]
+        # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
+        block_rank = merge_res["block_rank"] # [K, H, W]
+        
         if view.alpha_mask is not None:
             alpha_mask = view.alpha_mask.cuda()
             image *= alpha_mask
@@ -95,14 +98,31 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
 
 
         img_path_in_debug = os.path.join(debug_path, img_name)
-        os.makedirs(img_path_in_debug, exist_ok=True)
         
         if config.SAVE_RGB_LAYERS:
-            for layer_idx in range(rgb_layer.shape[0]):
-                layer_img = rgb_layer[layer_idx]
-                torchvision.utils.save_image(layer_img, os.path.join(img_path_in_debug, f"layer_{layer_idx}.png"))
-        
+            rgb_layers_path = os.path.join(img_path_in_debug, "rgb_layers")
+            os.makedirs(rgb_layers_path, exist_ok=True)
+            for layer_idx in range(front_rgbs.shape[0]):
+                layer_img = front_rgbs[layer_idx]
+                torchvision.utils.save_image(layer_img, os.path.join(rgb_layers_path, f"layer_{layer_idx}.png"))
+            
+        if config.SAVE_LAYERS_CONTRIBUTION:
+            # 看看每个block在每个图层贡献了什么
+            layer_contri_path = os.path.join(img_path_in_debug, "layer_contribution")
+            os.makedirs(layer_contri_path, exist_ok=True)
+            contribution = extract_block_layer_contribution(block_rank, front_rgbs, prefix_T, visible_block_idxs)
+
+            for layer, blocks in contribution.items():
+                for block_id, rgb in blocks.items():
+                    if rgb.abs().sum() == 0:
+                        continue
+                    save_path = os.path.join( layer_contri_path, f"layer_{layer}_block_{block_id}_contribution.png" )
+                    torchvision.utils.save_image(rgb.clamp(0, 1), save_path)
+
         if config.SAVE_BLOCK_IMG:
+            block_img_path = os.path.join(img_path_in_debug, "block_images")
+            os.makedirs(block_img_path, exist_ok=True)
+            
             for block_img, block_id in zip(rendered_list, visible_block_idxs):
                 
                 # bmin = (xmin, ymin, zmin); bmax = (xmax, ymax, zmax)
@@ -117,7 +137,8 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
                     x_min, y_min, x_max, y_max = rebuild_pointcloud_aabb_2d(gaussians._xyz[gaussians.block_indices[block_id]], proj_matrix, W, H)
                     block_img = draw_box(block_img, x_min, y_min, x_max, y_max, colors="green")
                     
-                torchvision.utils.save_image(block_img, os.path.join(img_path_in_debug, f"_block_{block_id}.png"))  
+                torchvision.utils.save_image(block_img, os.path.join(block_img_path, f"_block_{block_id}.png"))  
+            torchvision.utils.save_image(image, os.path.join(block_img_path, img_name + ".png"))            
 
                 
         torchvision.utils.save_image(image, os.path.join(render_path, img_name + ".png"))            
