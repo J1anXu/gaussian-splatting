@@ -12,6 +12,7 @@
 import os
 import torch
 from random import randint
+from utils.debug_utils import save_block_img, save_depth_list, save_rgb_layers, save_layer_contribution
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, merge_opt
 import sys
@@ -26,6 +27,7 @@ from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
 import time
 from logger import get_logger
+import config
 SCENE_NAME = "unknown_scene"
 BRANCH = "unknown_branch"
 DEBUG_MODE = False
@@ -115,7 +117,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         viewspace_points_list, visibility_filter_list, radii_list = [], [], []
         visible_indices_list = []
         available_num = 0
-        
+        visible_block_idxs = []
         
         
         for idx in range(len(gaussians.block_indices)):
@@ -124,6 +126,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             visible_indices = block_indice[visible_mask_in_block]
             if visible_indices.shape[0] == 0:
                 continue
+            visible_block_idxs.append(idx)
             available_num += visible_indices.shape[0]
             gaussians.set_subset(visible_indices)
             render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -146,6 +149,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
+        
+        debug_image_name = "_DSC8680"
+        if viewpoint_cam.image_name is debug_image_name:
+            img_path_in_debug = os.path.join("debug", BRANCH, debug_image_name, f"iter_{iteration}")
+            os.makedirs(img_path_in_debug, exist_ok=True)
+            front_rgbs = merge_res["front_rgbs"]
+            prefix_T = merge_res["prefix_T"]
+            # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
+            block_rank = merge_res["block_rank"] # [K, H, W]
+            save_rgb_layers(img_path_in_debug, front_rgbs)
+            save_layer_contribution(img_path_in_debug, block_rank, front_rgbs, prefix_T, visible_block_idxs)
+            save_depth_list(img_path_in_debug, depth_list, visible_block_idxs)
+            save_block_img(img_path_in_debug, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
+
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
