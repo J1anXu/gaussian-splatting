@@ -12,6 +12,8 @@
 import os
 import torch
 from random import randint
+
+import torchvision
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
@@ -123,6 +125,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
+
+        debug_image_name = "_DSC8680.JPG"
+        if viewpoint_cam.image_name == debug_image_name:
+            img_path_in_debug = os.path.join("debug", BRANCH, debug_image_name, f"iter_{iteration}")
+            os.makedirs(img_path_in_debug, exist_ok=True)
+
+            # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
+            torchvision.utils.save_image(image, os.path.join(img_path_in_debug, viewpoint_cam.image_name + ".png"))
+            LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
+
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
