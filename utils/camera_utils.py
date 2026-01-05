@@ -361,3 +361,67 @@ def frustum_culling(
             mask = inside_clip(clip1, False) | inside_clip(clip2, False)
 
     return mask
+
+
+def overlay_block_aabb_edges(
+    img,
+    block_idx,
+    block_bounds,
+    view,
+    line_width=2,
+    alpha=0.35,
+):
+    """
+    Project block AABB to screen-space axis-aligned rectangle
+    and overlay it as a semi-transparent box.
+    """
+    device = img.device
+    H, W = img.shape[1:]
+
+    # 1. block AABB (world space)
+    mn, mx = block_bounds[block_idx]
+
+    corners = torch.tensor([
+        [mn[0], mn[1], mn[2]],
+        [mx[0], mn[1], mn[2]],
+        [mx[0], mx[1], mn[2]],
+        [mn[0], mx[1], mn[2]],
+        [mn[0], mn[1], mx[2]],
+        [mx[0], mn[1], mx[2]],
+        [mx[0], mx[1], mx[2]],
+        [mn[0], mx[1], mx[2]],
+    ], device=device, dtype=img.dtype)  # [8,3]
+
+    # 2. project to screen
+    ones = torch.ones((8, 1), device=device, dtype=img.dtype)
+    corners_h = torch.cat([corners, ones], dim=1)
+
+    clip = (view.full_proj_transform.to(device) @ corners_h.T).T
+    ndc = clip[:, :3] / clip[:, 3:4]
+
+    pts_2d = torch.zeros((8, 2), device=device, dtype=img.dtype)
+    pts_2d[:, 0] = (ndc[:, 0] * 0.5 + 0.5) * W
+    pts_2d[:, 1] = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * H
+
+    # 3. screen-space bounding rectangle
+    xmin = int(torch.clamp(pts_2d[:, 0].min(), 0, W - 1))
+    xmax = int(torch.clamp(pts_2d[:, 0].max(), 0, W - 1))
+    ymin = int(torch.clamp(pts_2d[:, 1].min(), 0, H - 1))
+    ymax = int(torch.clamp(pts_2d[:, 1].max(), 0, H - 1))
+
+    if xmin >= xmax or ymin >= ymax:
+        return img  # nothing visible
+
+    # 4. overlay rectangle (semi-transparent)
+    overlay = img.clone()
+
+    # stable color per block
+    torch.manual_seed(block_idx)
+    color = torch.rand(3, device=device, dtype=img.dtype).view(3, 1, 1)
+
+    overlay[:, ymin:ymax, xmin:xmax] = (
+        (1 - alpha) * overlay[:, ymin:ymax, xmin:xmax]
+        + alpha * color
+    )
+
+    return overlay
