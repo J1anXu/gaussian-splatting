@@ -154,22 +154,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
         
-        # if viewpoint_cam.image_name == debug_image_name:
-        #     iteration_path = os.path.join(img_path_in_debug, f"iter_{iteration}")
-        #     os.makedirs(iteration_path, exist_ok=True)
-        #     front_rgbs = merge_res["front_rgbs"]
-        #     prefix_T = merge_res["prefix_T"]
-        #     # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
-        #     block_rank = merge_res["block_rank"] # [K, H, W]
-        #     save_rgb_layers(iteration_path, front_rgbs)
-        #     save_layer_contribution(iteration_path, block_rank, front_rgbs, prefix_T, visible_block_idxs)
-        #     save_depth_list(iteration_path, depth_list, visible_block_idxs)
+        if viewpoint_cam.image_name == debug_image_name:
+            iteration_path = os.path.join(img_path_in_debug, f"iter_{iteration}")
+            os.makedirs(iteration_path, exist_ok=True)
+            front_rgbs = merge_res["front_rgbs"]
+            prefix_T = merge_res["prefix_T"]
+            # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
+            block_rank = merge_res["block_rank"] # [K, H, W]
+            save_rgb_layers(iteration_path, front_rgbs)
+            save_layer_contribution(iteration_path, block_rank, front_rgbs, prefix_T, visible_block_idxs)
+            save_depth_list(iteration_path, depth_list, visible_block_idxs)
 
-        #     torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}.png"))
+            torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}.png"))
 
-        #     if gaussians.partitioned:
-        #         save_block_img(iteration_path, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
-        #     LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
+            if gaussians.partitioned:
+                save_block_img(iteration_path, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
+            LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -203,7 +203,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            if (iteration in saving_iterations):
+            if (iteration > 1500 and iteration % 100 == 0) or iteration in saving_iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration, BRANCH)
 
@@ -285,7 +285,8 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 15_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1000,1500,1600,1700,1800,1900,2000,2100,2200,2300,2400,2500,2600,2700,2800,2900,3000,3100,3200,3300,3400,3500,3600,3700,3800,3900,4000])
+
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 15_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 30_000])
