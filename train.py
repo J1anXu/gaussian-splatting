@@ -295,7 +295,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 15_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 15_000, 30_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -309,7 +309,13 @@ if __name__ == "__main__":
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
     if WANDB and not DEBUG_MODE:
         wandb.login()
-        run = wandb.init( project="3dgs_baseline", name = f"{BRANCH}_{SCENE_NAME}_{time.strftime('%m%d%H%M')}", job_type="train", config=vars(op.extract(args)) )
+        run = wandb.init(
+            project = "3dgs_baseline", 
+            name = f"{BRANCH}_{time.strftime('%m%d%H%M')}", 
+            job_type = "train", 
+            group = SCENE_NAME,
+            config = vars(op.extract(args)) 
+        )
         wandb.define_metric("iteration")  # 
     # Start GUI server, configure and run training
     if not args.disable_viewer:
