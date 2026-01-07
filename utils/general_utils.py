@@ -15,6 +15,7 @@ from datetime import datetime
 import numpy as np
 import random
 import subprocess
+import subprocess
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))

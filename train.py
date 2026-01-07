@@ -19,7 +19,7 @@ from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, merge_opt
 import sys
 from scene import Scene, GaussianModel
-from utils.general_utils import get_git_branch, safe_state, get_expon_lr_func
+from utils.general_utils import get_git_branch, safe_state, get_expon_lr_func, get_git_branch
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -75,7 +75,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
-
+    debug_image_name = "_DSC8680.JPG"
+    img_path_in_debug = os.path.join("debug", BRANCH, debug_image_name)
+    os.makedirs(img_path_in_debug, exist_ok=True)
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     
@@ -170,6 +172,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if gaussians.partitioned:
                 save_block_img(iteration_path, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
             LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
+
+
+        if viewpoint_cam.image_name == debug_image_name:
+            # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
+            torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}" + ".png"))
+            LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
+
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -288,12 +297,13 @@ if __name__ == "__main__":
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 15_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 15_000, 30_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
+    BRANCH = get_git_branch()
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
@@ -307,7 +317,13 @@ if __name__ == "__main__":
     
     if WANDB and not DEBUG_MODE:
         wandb.login()
-        run = wandb.init( project="3dgs_baseline", name = f"{BRANCH}_{SCENE_NAME}_{time.strftime('%m%d%H%M')}", job_type="train", config=vars(op.extract(args)) )
+        run = wandb.init(
+            project = "3dgs_baseline", 
+            name = f"{BRANCH}_{time.strftime('%m%d%H%M')}", 
+            job_type = "train", 
+            group = SCENE_NAME,
+            config = vars(op.extract(args)) 
+        )
         wandb.define_metric("iteration")  # 
         
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
