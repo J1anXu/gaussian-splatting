@@ -121,7 +121,12 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         # rebuild_block: The point cloud file already includes block partition metadata
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, rebuild_block = True)
+        REBUILD_BLOCK = False
+        if REBUILD_BLOCK:
+            scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, rebuild_block = True)
+        else:
+            scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, rebuild_block = False)
+            gaussians.partition()
 
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
