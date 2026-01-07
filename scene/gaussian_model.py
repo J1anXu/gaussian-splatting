@@ -332,7 +332,7 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
-    def load_ply(self, path, use_train_test_exp = False):
+    def load_ply(self, path, use_train_test_exp = False, rebuild_block = False):
         plydata = PlyData.read(path)
         if use_train_test_exp:
             exposure_file = os.path.join(os.path.dirname(path), os.pardir, os.pardir, "exposure.json")
@@ -385,48 +385,43 @@ class GaussianModel:
 
         self.active_sh_degree = self.max_sh_degree
         
-        has_block = "block" in plydata
-        
-        if has_block:
-            block_elem = plydata["block"].data  # structured array, shape (B,)
+        # The point cloud file already includes block partition metadata, and we rely on it to recover the original partitioning scheme.
+        if rebuild_block:
+            has_block = "block" in plydata
+            if has_block:
+                block_elem = plydata["block"].data  # structured array, shape (B,)
 
-            block_bounds = []
-            for b in block_elem:
-                mn = torch.tensor(
-                    [b["xmin"], b["ymin"], b["zmin"]],
-                    dtype=torch.float32
-                )
-                mx = torch.tensor(
-                    [b["xmax"], b["ymax"], b["zmax"]],
-                    dtype=torch.float32
-                )
-                block_bounds.append((mn, mx))
+                block_bounds = []
+                for b in block_elem:
+                    mn = torch.tensor(
+                        [b["xmin"], b["ymin"], b["zmin"]],
+                        dtype=torch.float32
+                    )
+                    mx = torch.tensor(
+                        [b["xmax"], b["ymax"], b["zmax"]],
+                        dtype=torch.float32
+                    )
+                    block_bounds.append((mn, mx))
 
-            self.block_bounds = block_bounds
-        else:
-            self.block_bounds = None
-            
-        if self.block_bounds is not None:
-            xyz_cpu = self._xyz.detach().cpu()  # [N,3]
-
-            block_indices = []
-
-            for mn, mx in self.block_bounds:
-                mn = mn.cpu()
-                mx = mx.cpu()
-
-                inside = (
-                    (xyz_cpu[:, 0] >= mn[0]) & (xyz_cpu[:, 0] <= mx[0]) &
-                    (xyz_cpu[:, 1] >= mn[1]) & (xyz_cpu[:, 1] <= mx[1]) &
-                    (xyz_cpu[:, 2] >= mn[2]) & (xyz_cpu[:, 2] <= mx[2])
-                )
-
-                idx = torch.nonzero(inside, as_tuple=False).squeeze(1)
-                block_indices.append(idx)
-
-                self.block_indices = block_indices
-        else:
-            self.block_indices = None
+                self.block_bounds = block_bounds
+            else:
+                self.block_bounds = None
+            if self.block_bounds is not None:
+                xyz_cpu = self._xyz.detach().cpu()  # [N,3]
+                block_indices = []
+                for mn, mx in self.block_bounds:
+                    mn = mn.cpu()
+                    mx = mx.cpu()
+                    inside = (
+                        (xyz_cpu[:, 0] >= mn[0]) & (xyz_cpu[:, 0] <= mx[0]) &
+                        (xyz_cpu[:, 1] >= mn[1]) & (xyz_cpu[:, 1] <= mx[1]) &
+                        (xyz_cpu[:, 2] >= mn[2]) & (xyz_cpu[:, 2] <= mx[2])
+                    )
+                    idx = torch.nonzero(inside, as_tuple=False).squeeze(1)
+                    block_indices.append(idx)
+                    self.block_indices = block_indices
+            else:
+                self.block_indices = None
 
         
 

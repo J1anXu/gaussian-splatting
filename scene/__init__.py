@@ -24,7 +24,7 @@ class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0], rebuild_block = False):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -83,7 +83,7 @@ class Scene:
                                                            "point_cloud",
                                                            BRANCH,
                                                            "iteration_" + str(self.loaded_iter),
-                                                           "point_cloud.ply"), args.train_test_exp)
+                                                           "point_cloud.ply"), args.train_test_exp, rebuild_block)
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
 
