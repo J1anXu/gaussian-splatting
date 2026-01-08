@@ -224,7 +224,6 @@ def save_depth_list(img_path_in_debug, depth_list, visible_block_idxs):
             depth_norm = (depth - d_min) / (d_max - d_min)
         torchvision.utils.save_image(depth_norm.unsqueeze(0), os.path.join( depth_list_path, f"block_{block_id}_depth_map.png" ))
         
-def save_block_img(img_path_in_debug, rendered_list):
 
         
 
