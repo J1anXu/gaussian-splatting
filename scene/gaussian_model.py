@@ -602,7 +602,7 @@ class GaussianModel:
         block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz)
         self.block_bounds = block_bounds
         self.block_indices = block_indices
-    
+        
     def visualize_blocks(self, point_alpha=0.02, box_alpha=0.15, save_path="boxxes.png"):
         xyz = self._xyz.detach().cpu()
         fig = plt.figure(figsize=(10, 10))
