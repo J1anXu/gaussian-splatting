@@ -143,12 +143,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             os.makedirs(iteration_path, exist_ok=True)
             torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}.png"))
             
-            block_img_path = os.path.join(img_path_in_debug, "block_images")
-            os.makedirs(block_img_path, exist_ok=True)
+            # block_img_path = os.path.join(img_path_in_debug, "block_images")
+            # os.makedirs(block_img_path, exist_ok=True)
             
-            for block_id, block_img in enumerate(rendered_list):
-                torchvision.utils.save_image(block_img,os.path.join(block_img_path, f"_block_{block_id}.png"))
-            torchvision.utils.save_image(image, os.path.join(block_img_path, view.image_name + ".png"))   
+            # for block_id, block_img in enumerate(rendered_list):
+            #     torchvision.utils.save_image(block_img,os.path.join(block_img_path, f"_block_{block_id}.png"))
+            # torchvision.utils.save_image(image, os.path.join(block_img_path, viewpoint_cam.image_name + ".png"))   
              
             LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
 
