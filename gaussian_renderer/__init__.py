@@ -130,176 +130,65 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     return out
 
 
-def merge_opt( N_total, render_list, depth_list, alphaLeft_list, vis_filter_list=None, radii_list=None, visible_indices_list=None, eps=1e-10, chunk_size=32 ):
+def merge(render_list, depth_list, alphaLeft_list, eps=1e-10):
     """
-    Memory-efficient Multi-block compositing using Spatial Chunking.
+    Fast full-image RGB compositing.
+    Only computes final RGB, no chunking, no extra outputs.
     
-    Logic is mathematically identical to the original implementation but 
-    processes the image in horizontal strips to minimize peak VRAM usage.
+    Inputs:
+        render_list: list of [3, H, W]
+        depth_list:  list of [1, H, W] or [H, W]
+        alphaLeft_list: list of [1, H, W] or [H, W]
+    Returns:
+        final_rgb: [3, H, W]
     """
-    
     K = len(render_list)
-    assert K > 0, "render_list is empty"
+    assert K > 0
 
-    # 获取基本信息
     device = render_list[0].device
-    dtype  = render_list[0].dtype
-    _, H, W = render_list[0].shape  # assuming [3, H, W]
 
-    # ==========================================
-    # Part 1: 非图像数据的合并 (Global Merge)
-    # 这部分数据量小，直接全局合并即可，无需分块
-    # ==========================================
+    # --------------------------------------------------
+    # Stack
+    # --------------------------------------------------
+    # [K, 3, H, W]
+    renders = torch.stack(render_list, dim=0)
 
-    # 1.1 radii
-    global_radii = torch.zeros(N_total, device=device)
-    for radii, visible_indice in zip(radii_list, visible_indices_list):
-        radii_trans = radii.view(-1).to(global_radii.dtype)
-        global_radii.scatter_reduce_(dim=0, index=visible_indice, src=radii_trans, reduce="amax", include_self=True)
+    # [K, 1, H, W]
+    depths = torch.stack([
+        d.unsqueeze(0) if d.dim() == 2 else d
+        for d in depth_list
+    ], dim=0)
 
-    # 1.3 visibility_filter
-    # 相当于再过一遍细筛, vis_filter表示当前送去的高斯哪些是有效的(实际参与了渲染的)
-    global_visibility_filter = torch.unique(
-        torch.cat(
-            [
-                visible_indices[vis_filter]
-                for visible_indices, vis_filter
-                in zip(visible_indices_list, vis_filter_list)
-            ]
-        ),
-        sorted=True,
+    alphas = torch.stack([
+        a.unsqueeze(0) if a.dim() == 2 else a
+        for a in alphaLeft_list
+    ], dim=0)
+
+    # --------------------------------------------------
+    # Sort by depth (front-to-back)
+    # --------------------------------------------------
+    # [K, H, W]
+    sort_idx = torch.argsort(depths.squeeze(1), dim=0, descending=True)
+
+    # --------------------------------------------------
+    # Gather
+    # --------------------------------------------------
+    idx_rgb = sort_idx.unsqueeze(1).expand(-1, 3, -1, -1)
+    front_rgbs = torch.gather(renders, 0, idx_rgb)
+
+    idx_alpha = sort_idx.unsqueeze(1)
+    front_alphas = torch.gather(alphas, 0, idx_alpha)
+
+    # --------------------------------------------------
+    # Compositing
+    # --------------------------------------------------
+    # cumprod over alpha
+    cumT = torch.cumprod(front_alphas.clamp(min=eps), dim=0)
+    prefix_T = torch.cat(
+        [torch.ones_like(cumT[:1]), cumT[:-1]],
+        dim=0
     )
 
-    
-    # ==========================================
-    # Part 2: 图像数据的分块合并 (Chunked Merge)
-    # 核心优化：避免创建 [K, C, H, W] 的全图张量
-    # ==========================================
-    
-    # 用于收集分块结果的容器
-    out_final_rgb = []
-    out_bg_rgb = []
-    out_final_depth = []
-    out_sort_idx = []
-    out_front_rgbs = []
-    out_front_alphas = []
-    out_prefix_T = []
-    out_block_rank = []
+    final_rgb = (prefix_T * front_rgbs).sum(dim=0).clamp(0, 1)
 
-    # 按行进行分块循环
-    for i in range(0, H, chunk_size):
-        # 确定当前块的结束行
-        end = min(i + chunk_size, H)
-        h_chunk = end - i
-        
-        # -------------------------------------------------
-        # 2.1 局部 Stack (仅针对当前 chunk 的区域)
-        # -------------------------------------------------
-        # Render: [K, 3, h_chunk, W]
-        renders_chunk = torch.stack([r[:, i:end, :] for r in render_list], dim=0)
-        
-        # Depth: [K, 1, h_chunk, W]
-        depth_tensors = []
-        for d in depth_list:
-            # 处理 slice
-            d_slice = d[:, i:end, :] if d.dim() == 3 else d[i:end, :]
-            if d_slice.dim() == 2: d_slice = d_slice.unsqueeze(0)
-            depth_tensors.append(d_slice)
-        depths_chunk = torch.stack(depth_tensors, dim=0)
-
-        # Alpha: [K, 1, h_chunk, W]
-        alpha_tensors = []
-        for a in alphaLeft_list:
-            # 处理 slice
-            a_slice = a[:, i:end, :] if a.dim() == 3 else a[i:end, :]
-            if a_slice.dim() == 2: a_slice = a_slice.unsqueeze(0)
-            alpha_tensors.append(a_slice)
-        alphas_chunk = torch.stack(alpha_tensors, dim=0)
-        
-        # -------------------------------------------------
-        # 2.2 局部 Sort & Gather (原版逻辑)
-        # -------------------------------------------------
-        # Sort along depth
-        sort_idx_chunk = torch.argsort(depths_chunk.squeeze(1), dim=0, descending=True) # [K, h, W]
-        
-        # Gather RGB
-        idx_rgb = sort_idx_chunk.unsqueeze(1).expand(-1, 3, -1, -1)
-        front_rgbs_chunk = torch.gather(renders_chunk, 0, idx_rgb)
-        
-        # Gather Alpha
-        idx_alpha = sort_idx_chunk.unsqueeze(1)
-        front_alphas_chunk = torch.gather(alphas_chunk, 0, idx_alpha)
-        
-        # Gather Depth
-        front_depths_chunk = torch.gather(depths_chunk, 0, idx_alpha)
-
-        # -------------------------------------------------
-        # 2.3 Forward Compositing (原版逻辑)
-        # -------------------------------------------------
-        cumT = torch.cumprod(front_alphas_chunk, dim=0)
-        prefix_T_chunk = torch.cat([torch.ones_like(cumT[:1]), cumT[:-1]], dim=0)
-
-        final_rgb_chunk = (prefix_T_chunk * front_rgbs_chunk).sum(dim=0).clamp(0, 1) # [3, h, W]
-        final_depth_chunk = (prefix_T_chunk * front_depths_chunk).sum(dim=0)         # [1, h, W]
-
-        # -------------------------------------------------
-        # 2.4 Background Color (原版逻辑)
-        # -------------------------------------------------
-        log_front_Ts = torch.log(front_alphas_chunk.clamp(min=eps))
-        log_post_prod_inc = torch.cumsum(log_front_Ts.flip(0), dim=0).flip(0)
-        log_post_prod_shift = torch.cat(
-            [log_post_prod_inc[1:], torch.zeros_like(log_post_prod_inc[:1])], dim=0
-        )
-        
-        inv_scale = torch.exp(-log_post_prod_inc).clamp(max=1e6)
-        C_scaled = front_rgbs_chunk * inv_scale
-        suffix_sum_C = torch.cumsum(C_scaled.flip(0), dim=0).flip(0) - C_scaled
-        scale = torch.exp(log_post_prod_shift)
-        suffix_color = scale * suffix_sum_C
-        bg_rgb_chunk = suffix_color[0] # [3, h, W]
-
-        # -------------------------------------------------
-        # 2.5 Block Rank Calculation (局部计算)
-        # -------------------------------------------------
-        # sort_idx_chunk: [K, h, W]
-        flat = sort_idx_chunk.reshape(K, -1)
-        br_chunk = torch.empty_like(flat)
-        cols = torch.arange(flat.shape[1], device=device)
-        
-        for k in range(K):
-            br_chunk[flat[k], cols] = k
-        
-        block_rank_chunk = br_chunk.reshape(K, h_chunk, W)
-
-        # -------------------------------------------------
-        # 2.6 收集结果
-        # -------------------------------------------------
-        out_final_rgb.append(final_rgb_chunk)
-        out_bg_rgb.append(bg_rgb_chunk)
-        out_final_depth.append(final_depth_chunk)
-        
-        # 如果下游任务需要由于backward，这些中间变量也需要保存
-        # 虽然保存了，但避免了在创建时峰值过高
-        out_sort_idx.append(sort_idx_chunk)
-        out_front_rgbs.append(front_rgbs_chunk)
-        out_front_alphas.append(front_alphas_chunk)
-        out_prefix_T.append(prefix_T_chunk)
-        out_block_rank.append(block_rank_chunk)
-
-    # ==========================================
-    # Part 3: 拼接最终结果
-    # ==========================================
-    return {
-        "final_rgb": torch.cat(out_final_rgb, dim=1),            # [3, H, W]
-        "bg_rgb": torch.cat(out_bg_rgb, dim=1),                  # [3, H, W]
-        "final_depth": torch.cat(out_final_depth, dim=1),        # [1, H, W]
-        
-        "global_visibility_filter": global_visibility_filter,
-        "global_radii": global_radii,
-        
-        "sort_idx": torch.cat(out_sort_idx, dim=1),              # [K, H, W]
-        "front_rgbs": torch.cat(out_front_rgbs, dim=2),          # [K, 3, H, W] 注意dim=2因为是H轴
-        "front_alphas": torch.cat(out_front_alphas, dim=2),      # [K, 1, H, W]
-        "prefix_T": torch.cat(out_prefix_T, dim=2),              # [K, 1, H, W]
-        "block_rank": torch.cat(out_block_rank, dim=1)           # [K, H, W]
-    }
+    return final_rgb
