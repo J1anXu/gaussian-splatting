@@ -14,7 +14,7 @@ import torch
 from random import randint
 
 import torchvision
-from utils.debug_utils import save_block_img, save_depth_list, save_rgb_layers, save_layer_contribution
+from utils.debug_utils import save_depth_list, save_rgb_layers, save_layer_contribution
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, merge
 import sys
@@ -75,8 +75,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-
-
     use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
 
     viewpoint_stack = scene.getTrainCameras().copy()
@@ -117,14 +115,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # available_mask = frustum_culling(parent._xyz, viewpoint_cam.full_proj_transform)
         # available_indices = torch.nonzero(available_mask, as_tuple=True)[0]
         
-
-
         
         rendered_list, depth_list, alpha_list = [], [], []
         viewspace_points_list, visibility_filter_list, radii_list = [], [], []
-        visible_indices_list = []
-        available_num = 0
-        visible_block_idxs = []
         
         
         for kid in kids:
@@ -140,16 +133,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         image = merge(rendered_list, depth_list, alpha_list)   
         
-
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
         
         if viewpoint_cam.image_name == debug_image_name:
             iteration_path = os.path.join(img_path_in_debug, f"iter_{iteration}")
+            
             os.makedirs(iteration_path, exist_ok=True)
             torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}.png"))
-            save_block_img(iteration_path, rendered_list, visible_block_idxs, parent, viewpoint_cam, image, config)
+            
+            block_img_path = os.path.join(img_path_in_debug, "block_images")
+            os.makedirs(block_img_path, exist_ok=True)
+            
+            for block_id, block_img in enumerate(rendered_list):
+                torchvision.utils.save_image(block_img,os.path.join(block_img_path, f"_block_{block_id}.png"))
+            torchvision.utils.save_image(image, os.path.join(block_img_path, view.image_name + ".png"))   
+             
             LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
 
         # Loss
@@ -163,21 +163,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss.backward()
 
-        global_viewspace_points_grad = torch.zeros( N_total, 3, device="cuda", requires_grad=False )
-        for viewspace_points, sub_set_mask in zip(viewspace_points_list, visible_indices_list):
-            global_viewspace_points_grad[sub_set_mask] = viewspace_points.grad
-        
 
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
-            total_points = parent.get_xyz.shape[0]
+            total_points = 0
+            for kid in kids:
+                total_points += kid.get_xyz.shape[0]
             
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": available_num, "blocks": len(parent.block_indices), "pts": total_points})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts": total_points})
                 progress_bar.update(10)
-                log = {"iter": iteration,"loss": ema_loss_for_log, "pts_in_frustum": available_num, "pts": total_points} 
+                log = {"iter": iteration,"loss": ema_loss_for_log, "pts": total_points} 
                 LOGGER.info(log)
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
@@ -194,49 +192,48 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 
                 for idx in range(len(kids)):
                     kid = kids[idx]
-                    visibility_filter = visibility_filter_list[idx]
                     radii = radii_list[idx]
-                    kid.max_radii2D[visibility_filter] = torch.max(parent.max_radii2D[visibility_filter], radii[visibility_filter])
-                    parent.add_densification_stats2(global_viewspace_points_grad, visibility_filter)
+                    visibility_filter = visibility_filter_list[idx]
+                    viewspace_point_tensor = viewspace_points_list[idx]
+                    kid.max_radii2D[visibility_filter] = torch.max(kid.max_radii2D[visibility_filter], radii[visibility_filter])
+                    kid.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    parent.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
-                    if parent.partitioned and not DEBUG_MODE:
-                        wandb.log(
-                            {
-                                f"block/{idx}_size": len(block)
-                                for idx, block in enumerate(parent.block_indices)
-                            },
-                            step=iteration
-                        )
-
-                        parent.repartition()
+                    for idx in range(len(kids)):
+                        kid = kids[idx]
+                        radii = radii_list[idx]
+                        kid.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    parent.reset_opacity()
+                    for idx in range(len(kids)):
+                        kid = kids[idx]
+                        kid.reset_opacity()
 
             # Optimizer step
             if iteration < opt.iterations:
-                parent.exposure_optimizer.step()
-                parent.exposure_optimizer.zero_grad(set_to_none = True)
-                if use_sparse_adam:
-                    visible = radii > 0
-                    parent.optimizer.step(visible, radii.shape[0])
-                    parent.optimizer.zero_grad(set_to_none = True)
-                else:
-                    # xyz_before = gaussians._xyz.detach().cpu().clone()
-                    # gaussians.optimizer.step()
-                    # xyz_after = gaussians._xyz.detach().cpu()
-                    # delta = (xyz_after - xyz_before).abs().max().item()
-                    # print("max |Δxyz| =", delta)
-                    # gaussians.optimizer.zero_grad(set_to_none = True)
-                    parent.optimizer.step()
-                    parent.optimizer.zero_grad(set_to_none = True)
+                for idx in range(len(kids)):
+                    kid = kids[idx]
+                    kid.exposure_optimizer.step()
+                    kid.exposure_optimizer.zero_grad(set_to_none = True)
+                    radii = radii_list[idx]
+                    if use_sparse_adam:
+                        visible = radii > 0
+                        kid.optimizer.step(visible, radii.shape[0])
+                        kid.optimizer.zero_grad(set_to_none = True)
+                    else:
+                        # xyz_before = gaussians._xyz.detach().cpu().clone()
+                        # gaussians.optimizer.step()
+                        # xyz_after = gaussians._xyz.detach().cpu()
+                        # delta = (xyz_after - xyz_before).abs().max().item()
+                        # print("max |Δxyz| =", delta)
+                        # gaussians.optimizer.zero_grad(set_to_none = True)
+                        kid.optimizer.step()
+                        kid.optimizer.zero_grad(set_to_none = True)
                     
-            if (iteration in checkpoint_iterations):
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((parent.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+            # if (iteration in checkpoint_iterations):
+            #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
+            #     torch.save((parent.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:

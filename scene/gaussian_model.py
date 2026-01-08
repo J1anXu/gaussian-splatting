@@ -583,7 +583,11 @@ class GaussianModel:
 
         torch.cuda.empty_cache()
 
-    def add_densification_stats(self, viewspace_point_tensor, global_visibility_filter, frustum_visibility_filter):
+    def add_densification_stats(self, viewspace_point_tensor, update_filter):
+        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
+        self.denom[update_filter] += 1
+
+    def add_densification_stats1(self, viewspace_point_tensor, global_visibility_filter, frustum_visibility_filter):
         self.xyz_gradient_accum[global_visibility_filter] += torch.norm(viewspace_point_tensor.grad[frustum_visibility_filter,:2], dim=-1, keepdim=True)
         self.denom[global_visibility_filter] += 1
 
