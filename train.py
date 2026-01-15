@@ -169,6 +169,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             if gaussians.partitioned:
                 save_block_img(iteration_path, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
+                
             LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
 
         # Loss
@@ -179,14 +180,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # Depth regularization
         Ll1depth = 0
-
+        img_name = viewpoint_cam.image_name.split('.')[0]
+        image = image.clamp(0.0, 1.0)
+        gt = gt_image.clamp(0.0, 1.0)
+        torchvision.utils.save_image(image, os.path.join("debug", f"{img_name}_{iteration}_render.png"))
+        
         loss.backward()
 
         global_viewspace_points_grad = torch.zeros( N_total, 3, device="cuda", requires_grad=False )
         for viewspace_points, sub_set_mask in zip(viewspace_points_list, visible_indices_list):
             global_viewspace_points_grad[sub_set_mask] = viewspace_points.grad
         
-
+        torch.save(global_viewspace_points_grad.detach().cpu(),os.path.join("debug", "viewspace_points_grad.pt"))
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
