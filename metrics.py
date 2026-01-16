@@ -14,6 +14,7 @@ import os
 from PIL import Image
 import torch
 import torchvision.transforms.functional as tf
+from utils.general_utils import get_git_branch
 from utils.loss_utils import ssim
 from lpipsPyTorch import lpips
 import json
@@ -48,12 +49,11 @@ def evaluate(model_paths):
             per_view_dict[scene_dir] = {}
             full_dict_polytopeonly[scene_dir] = {}
             per_view_dict_polytopeonly[scene_dir] = {}
-
-            test_dir = Path(scene_dir) / "test"
-
+            BRANCH = get_git_branch()
+            test_dir = Path(scene_dir)/ BRANCH / "test"
+            print(f"TEST_DIR = {test_dir}")
             for method in os.listdir(test_dir):
                 print("Method:", method)
-
                 full_dict[scene_dir][method] = {}
                 per_view_dict[scene_dir][method] = {}
                 full_dict_polytopeonly[scene_dir][method] = {}
