@@ -82,8 +82,8 @@ class Scene:
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
 
-    def save(self, iteration):
-        point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+    def save(self, iteration, branch_name=""):
+        point_cloud_path = os.path.join(self.model_path, f"point_cloud/{branch_name}/iteration_{iteration}")
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         exposure_dict = {
             image_name: self.gaussians.get_exposure_from_name(image_name).detach().cpu().numpy().tolist()
