@@ -36,7 +36,7 @@ SCENE_NAME = "unknown_scene"
 BRANCH = "unknown_branch"
 DEBUG_MODE = False
 
-WANDB = False
+WANDB = True
 LOGGER = None
 
 try:
@@ -225,7 +225,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
-                    if gaussians.partitioned and not DEBUG_MODE:
+                    if WANDB and gaussians.partitioned and not DEBUG_MODE:
                         wandb.log(
                             {
                                 f"block/{idx}_size": len(block)
