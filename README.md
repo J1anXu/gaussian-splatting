@@ -3,7 +3,7 @@ CUDA_VISIBLE_DEVICES=1 nohup python train.py -s /data2/jian/data/mip360/bicycle 
 CUDA_VISIBLE_DEVICES=2 nohup python train.py -s /data2/jian/data/mip360/bicycle --model_path ./output/mip360/bicycle --eval   > debug/train2.log 2>&1 &
 
 python render.py -m output/mip360/bicycle
-python render_blocks.py -m output/mip360/bicycle --skip_train
+python render_p.py -m output/mip360/bicycle --skip_train
 
 python metrics.py -m output/mip360/bicycle
 
