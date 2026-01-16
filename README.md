@@ -1,1 +1,5 @@
+python train.py -s /data2/jian/data/mip360/bicycle --model_path ./output/mip360/bicycle --eval
+python render.py -m output/mip360/bicycle --eval
+python render_p.py -m output/mip360/bicycle
+
 CUDA_VISIBLE_DEVICES=0 nohup python train.py -s /data2/jian/data/mip360/bicycle --model_path ./output/mip360/bicycle --eval   > debug/train0.log 2>&1 &
