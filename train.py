@@ -75,14 +75,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
-    debug_image_name = "_DSC8680.JPG"
-    img_path_in_debug = os.path.join("debug", BRANCH, debug_image_name)
-    os.makedirs(img_path_in_debug, exist_ok=True)
+
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     
     debug_image_name = "_DSC8680.JPG"
-    img_path_in_debug = os.path.join("debug", BRANCH, debug_image_name)
+    img_path_in_debug = os.path.join("/data2/jian/debug", BRANCH, debug_image_name)
     os.makedirs(img_path_in_debug, exist_ok=True)
     
     for iteration in range(first_iter, opt.iterations + 1):
@@ -158,7 +156,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         if viewpoint_cam.image_name == debug_image_name:
             iteration_path = os.path.join(img_path_in_debug, f"iter_{iteration}")
-            os.makedirs(iteration_path, exist_ok=True)
+            # os.makedirs(iteration_path, exist_ok=True)
             front_rgbs = merge_res["front_rgbs"]
             prefix_T = merge_res["prefix_T"]
             # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
@@ -167,7 +165,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             save_layer_contribution(iteration_path, block_rank, front_rgbs, prefix_T, visible_block_idxs)
             save_depth_list(iteration_path, depth_list, visible_block_idxs)
 
-            torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}.png"))
+            # torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}.png"))
 
             if gaussians.partitioned:
                 save_block_img(iteration_path, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
