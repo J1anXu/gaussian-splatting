@@ -17,7 +17,7 @@ from os import makedirs
 from gaussian_renderer import render,merge_opt
 import torchvision
 from utils.general_utils import safe_state, get_git_branch
-from utils.camera_utils import frustum_culling, draw_box, rebuild_block_bound_aabb_2d, rebuild_pointcloud_aabb_2d, extract_block_layer_contribution
+from utils.camera_utils import frustum_culling
 from utils.debug_utils import save_rgb_layers, save_layer_contribution, save_depth_list, save_block_img
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
