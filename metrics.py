@@ -45,7 +45,7 @@ def evaluate(model_paths):
     BRANCH = get_git_branch()
 
     for scene_dir in model_paths:
-        scene_dir = scene_dir + f"/{BRANCH}"
+        scene_dir = scene_dir + f"/rendered/{BRANCH}"
         try:
             print("Scene:", scene_dir)
             full_dict[scene_dir] = {}
