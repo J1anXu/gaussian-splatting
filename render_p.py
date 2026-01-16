@@ -34,8 +34,8 @@ BRANCH = "unknown_branch"
 def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pipeline, background, train_test_exp, separate_sh):
     BRANCH = get_git_branch()
 
-    render_path = os.path.join(model_path, BRANCH, name, "ours_{}".format(iteration), "renders")
-    gts_path = os.path.join(model_path, BRANCH, name, "ours_{}".format(iteration), "gt")
+    render_path = os.path.join(model_path, "rendered", BRANCH, name, "ours_{}".format(iteration), "renders")
+    gts_path = os.path.join(model_path, "rendered", BRANCH, name, "ours_{}".format(iteration), "gt")
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
