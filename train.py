@@ -111,7 +111,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         available_indices = torch.nonzero(available_mask, as_tuple=True)[0]
         
         if not gaussians.partitioned:
-            if iteration > 15000:
+            if gaussians._xyz.shape[0] > 300_000:
                 gaussians.partition() 
                 gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
                 gaussians.partitioned = True
