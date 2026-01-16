@@ -30,11 +30,13 @@ import wandb
 import time
 from logger import get_logger
 import config
+import diff_gaussian_rasterization
+
 SCENE_NAME = "unknown_scene"
 BRANCH = "unknown_branch"
 DEBUG_MODE = False
 
-WANDB = True
+WANDB = False
 LOGGER = None
 
 try:
@@ -148,8 +150,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         N_total = gaussians._xyz.shape[0]       
         merge_res = merge_opt(N_total, rendered_list, depth_list, alpha_list, visibility_filter_list, radii_list, visible_indices_list)   
         
-        image, visibility_filter, radii = merge_res["final_rgb"], merge_res["global_visibility_filter"], merge_res["global_radii"]
-
+        image, colors_bg, visibility_filter, radii = merge_res["final_rgb"], merge_res["bg_rgb"], merge_res["global_visibility_filter"], merge_res["global_radii"]
+    
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
@@ -186,7 +188,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # Depth regularization
         Ll1depth = 0
-
+        diff_gaussian_rasterization.set_colors_bg(colors_bg)
         loss.backward()
 
         global_viewspace_points_grad = torch.zeros( N_total, 3, device="cuda", requires_grad=False )
