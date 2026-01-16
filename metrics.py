@@ -11,6 +11,7 @@
 
 from pathlib import Path
 import os
+from sre_constants import BRANCH
 from PIL import Image
 import torch
 import torchvision.transforms.functional as tf
@@ -41,16 +42,17 @@ def evaluate(model_paths):
     full_dict_polytopeonly = {}
     per_view_dict_polytopeonly = {}
     print("")
+    BRANCH = get_git_branch()
 
     for scene_dir in model_paths:
+        scene_dir = scene_dir + f"/{BRANCH}"
         try:
             print("Scene:", scene_dir)
             full_dict[scene_dir] = {}
             per_view_dict[scene_dir] = {}
             full_dict_polytopeonly[scene_dir] = {}
             per_view_dict_polytopeonly[scene_dir] = {}
-            BRANCH = get_git_branch()
-            test_dir = Path(scene_dir)/ BRANCH / "test"
+            test_dir = Path(scene_dir)/ "test"
             print(f"TEST_DIR = {test_dir}")
             for method in os.listdir(test_dir):
                 print("Method:", method)
