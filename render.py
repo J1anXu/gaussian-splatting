@@ -16,7 +16,7 @@ from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render
 import torchvision
-from utils.general_utils import safe_state
+from utils.general_utils import get_git_branch, safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
@@ -28,8 +28,9 @@ except:
 
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, train_test_exp, separate_sh):
-    render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
-    gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+    BRANCH = get_git_branch()
+    render_path = os.path.join(model_path, "rendered", BRANCH, name, "ours_{}".format(iteration), "renders")
+    gts_path = os.path.join(model_path, "rendered", BRANCH, name, "ours_{}".format(iteration), "gt")
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
