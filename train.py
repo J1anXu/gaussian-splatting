@@ -217,7 +217,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.optimizer.zero_grad(set_to_none = True)
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                pth_path = os.path.join(args.model_path, f"point_cloud/{BRANCH}")
+                pth_path = os.path.join(args.model_path, f"checkpoints/{BRANCH}")
                 torch.save((gaussians.capture(), iteration), pth_path + "/chkpnt" + str(iteration) + ".pth")
 
 def prepare_output_and_logger(args):    
