@@ -183,7 +183,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
+                scene.save(iteration, BRANCH)
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -217,7 +217,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.optimizer.zero_grad(set_to_none = True)
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+                pth_path = os.path.join(args.model_path, f"point_cloud/{BRANCH}")
+
+                torch.save((gaussians.capture(), iteration), pth_path + "/chkpnt" + str(iteration) + ".pth")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
