@@ -202,6 +202,35 @@ class GaussianModel:
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
 
+    def create_from_pcd_cpu(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float):
+        self.spatial_lr_scale = spatial_lr_scale
+        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
+        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        features[:, :3, 0 ] = fused_color
+        features[:, 3:, 1:] = 0.0
+
+        print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+
+        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots[:, 0] = 1
+
+        opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
+        self.pretrained_exposures = None
+        exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
+        self._exposure = nn.Parameter(exposure.requires_grad_(True))
+
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -266,37 +295,23 @@ class GaussianModel:
     def build_block_id(self):
         N = self._xyz.shape[0]
         block_id = np.full(N, -1, dtype=np.int32)
-
         for b, idx in enumerate(self.block_indices):
             idx = idx.detach().cpu().numpy()
             block_id[idx] = b
-
-        # if (block_id < 0).any():
-        #     bad = np.where(block_id < 0)[0][:10]
-        #     raise RuntimeError(f"Some points have no block_id, e.g. {bad}")
-
         return block_id
 
     def build_block_elements(self):
         B = len(self.block_bounds)
-
-        dtype = [
-            ("xmin", "f4"), ("ymin", "f4"), ("zmin", "f4"),
-            ("xmax", "f4"), ("ymax", "f4"), ("zmax", "f4"),
-        ]
-
+        dtype = [ ("xmin", "f4"), ("ymin", "f4"), ("zmin", "f4"), ("xmax", "f4"), ("ymax", "f4"), ("zmax", "f4"), ]
         blocks = np.empty(B, dtype=dtype)
-
         for i, (mn, mx) in enumerate(self.block_bounds):
             mn = mn.detach().cpu().numpy()
             mx = mx.detach().cpu().numpy()
             blocks[i] = (*mn, *mx)
-
         return PlyElement.describe(blocks, "block")
 
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
-
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
@@ -307,24 +322,14 @@ class GaussianModel:
         # 新增：block_id 
         block_id = self.build_block_id()[:, None]  # [N,1]
         # dtype：多一个 block_id
-        dtype_full = (
-            [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
-            + [('block_id', 'i4')]
-        )
-
-
+        dtype_full = ( [(attribute, 'f4') for attribute in self.construct_list_of_attributes()] + [('block_id', 'i4')] )
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         # attributes：拼上 block_id 
-        attributes = np.concatenate(
-            (xyz, normals, f_dc, f_rest, opacities, scale, rotation, block_id),
-            axis=1
-        )
+        attributes = np.concatenate( (xyz, normals, f_dc, f_rest, opacities, scale, rotation, block_id), axis=1 )
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
-        
         # 新增：block_bounds element
         el_block = self.build_block_elements()
-        
         PlyData([el, el_block]).write(path)
 
     def reset_opacity(self):
@@ -382,53 +387,79 @@ class GaussianModel:
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
-
         self.active_sh_degree = self.max_sh_degree
+        self.block_bounds = None
+        self.block_indices = None
         
-        has_block = "block" in plydata
-        
-        if has_block:
+        if "block" in plydata:
             block_elem = plydata["block"].data  # structured array, shape (B,)
-
             block_bounds = []
             for b in block_elem:
-                mn = torch.tensor(
-                    [b["xmin"], b["ymin"], b["zmin"]],
-                    dtype=torch.float32
-                )
-                mx = torch.tensor(
-                    [b["xmax"], b["ymax"], b["zmax"]],
-                    dtype=torch.float32
-                )
+                mn = torch.tensor( [b["xmin"], b["ymin"], b["zmin"]], dtype=torch.float32 )
+                mx = torch.tensor( [b["xmax"], b["ymax"], b["zmax"]], dtype=torch.float32 )
                 block_bounds.append((mn, mx))
-
             self.block_bounds = block_bounds
-        else:
-            self.block_bounds = None
-            
+
         if self.block_bounds is not None:
             xyz_cpu = self._xyz.detach().cpu()  # [N,3]
-
             block_indices = []
-
             for mn, mx in self.block_bounds:
                 mn = mn.cpu()
                 mx = mx.cpu()
-
                 inside = (
                     (xyz_cpu[:, 0] >= mn[0]) & (xyz_cpu[:, 0] <= mx[0]) &
                     (xyz_cpu[:, 1] >= mn[1]) & (xyz_cpu[:, 1] <= mx[1]) &
                     (xyz_cpu[:, 2] >= mn[2]) & (xyz_cpu[:, 2] <= mx[2])
                 )
-
                 idx = torch.nonzero(inside, as_tuple=False).squeeze(1)
                 block_indices.append(idx)
-
                 self.block_indices = block_indices
-        else:
-            self.block_indices = None
+            
 
-        
+    def get_kid(self, idx, training_args):
+        """
+        Create an independent GaussianModel for block idx.
+        This kid has its OWN parameters and OWN optimizer,
+        and is optimized from scratch.
+        """
+        assert self.block_indices is not None, "block_indices is None"
+        assert idx < len(self.block_indices), f"block idx {idx} out of range"
+
+        indices = self.block_indices[idx].to(self._xyz.device)
+
+        kid = GaussianModel(
+            sh_degree=self.max_sh_degree,
+            optimizer_type=self.optimizer_type
+        )
+
+        # ====== 核心参数：深拷贝 & 断梯度 ======
+        kid._xyz = nn.Parameter(self._xyz[indices].clone().detach())
+        kid._features_dc = nn.Parameter(self._features_dc[indices].clone().detach())
+        kid._features_rest = nn.Parameter(self._features_rest[indices].clone().detach())
+        kid._scaling = nn.Parameter(self._scaling[indices].clone().detach())
+        kid._rotation = nn.Parameter(self._rotation[indices].clone().detach())
+        kid._opacity = nn.Parameter(self._opacity[indices].clone().detach())
+
+        # exposure：通常不 block 化，但如果你希望完全独立，也 clone
+        kid._exposure = nn.Parameter(self._exposure.clone().detach())
+
+        # ====== 其他状态 ======
+        kid.active_sh_degree = self.active_sh_degree
+        kid.spatial_lr_scale = self.spatial_lr_scale
+        kid.max_radii2D = torch.zeros(
+            kid._xyz.shape[0], device=kid._xyz.device
+        )
+
+        kid.block_bounds = None
+        kid.block_indices = None
+        kid.partitioned = False
+        kid.visible_indices = None
+
+        # ====== 初始化 optimizer（step = 0） ======
+        kid.training_setup(training_args)
+
+        return kid
+
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}

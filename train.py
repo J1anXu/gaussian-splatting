@@ -60,7 +60,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter = 0
     prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-    scene = Scene(dataset, gaussians)
+    scene = Scene(dataset, gaussians, on_cpu=True)
     gaussians.training_setup(opt)
     
     if checkpoint:
@@ -82,6 +82,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     debug_image_name = "_DSC8680.JPG"
     img_path_in_debug = os.path.join("/data2/jian/debug", BRANCH, debug_image_name)
     os.makedirs(img_path_in_debug, exist_ok=True)
+    
+    sub_gaussians = []
     
     for iteration in range(first_iter, opt.iterations + 1):
         
@@ -112,6 +114,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if gaussians._xyz.shape[0] > 300_000:
                 gaussians.partition() 
                 gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
+                
+                for idx, block in enumerate(gaussians.block_indices):
+                    LOGGER.info(f"Block {idx} size: {len(block)}")  
+                    kid = gaussians.get_kid(idx, opt)
+                    sub_gaussians.append(kid)
+                    
                 gaussians.partitioned = True
                 LOGGER.info(f"Partitioned Gaussians at iteration {iteration}, total gaussians: {gaussians._xyz.shape[0]}, num partitions: {len(gaussians.block_indices)}")
             else:
