@@ -24,5 +24,12 @@ def mkdir_p(folder_path):
             raise
 
 def searchForMaxIteration(folder):
-    saved_iters = [int(fname.split("_")[-1]) for fname in os.listdir(folder)]
+    saved_iters = []
+    for fname in os.listdir(folder):
+        try:
+            it = int(fname.split("_")[-1])
+            saved_iters.append(it)
+        except (ValueError, IndexError):
+            print(f"Skipping file {fname} as it does not conform to the naming convention.")
+            continue
     return max(saved_iters)
