@@ -144,7 +144,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = Ll1depth.item()
         else:
             Ll1depth = 0
-
+        img_name = viewpoint_cam.image_name.split('.')[0]
+        image_rgb = image
         loss.backward()
 
         iter_end.record()
@@ -193,14 +194,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.optimizer.step(visible, radii.shape[0])
                     gaussians.optimizer.zero_grad(set_to_none = True)
                 else:
-                    # xyz_before = gaussians._xyz.detach().cpu().clone()
-                    # gaussians.optimizer.step()
-                    # xyz_after = gaussians._xyz.detach().cpu()
-                    # delta = (xyz_after - xyz_before).abs().max().item()
-                    # print("max |Δxyz| =", delta)
-                    # gaussians.optimizer.zero_grad(set_to_none = True)
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
+                    
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 pth_path = os.path.join(args.model_path, f"checkpoints/{BRANCH}")
