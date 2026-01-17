@@ -1,0 +1,28 @@
+🚀 Launching 4 GPU queues...
+
+========================================
+GPU   : 4
+Scene : bicycle
+========================================
+GPU   : 5
+Scene : kitchen
+========================================
+========================================
+GPU   : 6
+GPU   : 7
+Scene : room
+Scene : bonsai
+Time  : Fri Jan 16 11:45:23 PM CST 2026
+========================================
+Time  : Fri Jan 16 11:45:23 PM CST 2026
+========================================
+Time  : Fri Jan 16 11:45:23 PM CST 2026
+========================================
+Time  : Fri Jan 16 11:45:23 PM CST 2026
+========================================
+Terminated
+run_all.sh: line 22: 1905459 Killed                  python train.py -s "$data_path" --model_path "$model_path" --eval > "$LOG_ROOT/train_${scene}.log" 2>&1
+run_all.sh: line 22: 1905460 Killed                  python train.py -s "$data_path" --model_path "$model_path" --eval > "$LOG_ROOT/train_${scene}.log" 2>&1
+run_all.sh: line 22: 1905458 Killed                  python train.py -s "$data_path" --model_path "$model_path" --eval > "$LOG_ROOT/train_${scene}.log" 2>&1
+
+🎉 All pipelines finished.
