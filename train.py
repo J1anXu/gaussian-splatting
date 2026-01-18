@@ -233,7 +233,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": available_num, "pts": N_total})
                 progress_bar.update(10)
                 state = {f"pts_block_{i}": sub._xyz.shape[0] for i, sub in enumerate(sub_gaussians)}
-                log = { "iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": available_num, "pts_total": N_total,  **state }
+                log = { "iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": available_num, "pts": N_total,  **state }
                 LOGGER.info(log)
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
