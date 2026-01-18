@@ -17,6 +17,7 @@ import cv2
 import torch
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from tqdm import tqdm
 
 WARNED = False
 
@@ -72,8 +73,8 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
 def cameraList_from_camInfos(cam_infos, resolution_scale, args, is_nerf_synthetic, is_test_dataset):
     camera_list = []
 
-    for id, c in enumerate(cam_infos):
-        camera_list.append(loadCam(args, id, c, resolution_scale, is_nerf_synthetic, is_test_dataset))
+    for i, c in enumerate(tqdm(cam_infos, desc="Loading cameras")):
+        camera_list.append(loadCam(args, i, c, resolution_scale, is_nerf_synthetic, is_test_dataset))
 
     return camera_list
 

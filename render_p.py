@@ -14,7 +14,7 @@ from scene import Scene
 import os
 from tqdm import tqdm
 from os import makedirs
-from gaussian_renderer import render,merge_opt
+from gaussian_renderer import merge_opt_kid, render,merge_opt
 import torchvision
 from utils.general_utils import safe_state, get_git_branch
 from utils.camera_utils import frustum_culling
@@ -22,6 +22,8 @@ from utils.debug_utils import save_rgb_layers, save_layer_contribution, save_dep
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
+from typing import List
+
 import config
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
@@ -31,8 +33,7 @@ except:
 BRANCH = "unknown_branch"
 
 
-def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pipeline, background, train_test_exp, separate_sh):
-    BRANCH = get_git_branch()
+def render_set(model_path, name, iteration, views, sub_gaussians_list: List[GaussianModel], pipeline, background, train_test_exp, separate_sh):
 
     render_path = os.path.join(model_path, "rendered_p", BRANCH, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, "rendered_p", BRANCH, name, "ours_{}".format(iteration), "gt")
@@ -46,44 +47,29 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
     # gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
     
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        frustum_culling_available_mask = frustum_culling(gaussians._xyz, view.full_proj_transform)
+        # frustum_culling_available_mask = frustum_culling(gaussians._xyz, view.full_proj_transform)
         
         rendered_list, depth_list, alpha_list = [], [], []
-        viewspace_points_list, visibility_filter_list, radii_list = [], [], []
-        visible_indices_list = []
+        viewspace_points_list, radii_list = [], []
         visible_block_idxs = []
-        available_num = 0
         
-        
-        for block_idx in range(len(gaussians.block_indices)):
-            block_indice = gaussians.block_indices[block_idx].to("cuda")
-            visible_mask_in_block = frustum_culling_available_mask[block_indice]
-            visible_indices = block_indice[visible_mask_in_block]
-            if visible_indices.shape[0] == 0:
-                continue
-            visible_block_idxs.append(block_idx)
-            available_num += visible_indices.shape[0]
-            gaussians.set_subset(visible_indices)
-            render_pkg = render(view, gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        N_total = 0
+        for block_idx in range(len(sub_gaussians_list)):
+            sub_gaussians = sub_gaussians_list[block_idx]
+            render_pkg = render(view, sub_gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             image, viewspace_point_tensor, visibility_filter, radii, alphaLeft = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["alphaLeft"]
-
             rendered_list.append(image)
             depth_list.append(render_pkg["depth"])
             alpha_list.append(alphaLeft)
             viewspace_points_list.append(viewspace_point_tensor)
-            visibility_filter_list.append(visibility_filter)
             radii_list.append(radii)
-            visible_indices_list.append(visible_indices)
-            gaussians.clear_subset()
+            N_total += sub_gaussians._xyz.shape[0]
             
-
-        N_total = gaussians._xyz.shape[0]       
-        merge_res = merge_opt(N_total, rendered_list, depth_list, alpha_list, visibility_filter_list, radii_list, visible_indices_list)   
+        merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)   
         
-        image, visibility_filter, radii = merge_res["final_rgb"], merge_res["global_visibility_filter"], merge_res["global_radii"]
+        image = merge_res["final_rgb"]
         front_rgbs = merge_res["front_rgbs"]
         prefix_T = merge_res["prefix_T"]
-        # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
         block_rank = merge_res["block_rank"] # [K, H, W]
         
         if view.alpha_mask is not None:
@@ -94,8 +80,8 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
         if args.train_test_exp:
             image = image[..., image.shape[-1] // 2:]
             gt = gt[..., gt.shape[-1] // 2:]
+            
         img_name = view.image_name
-
 
         img_path_in_debug = os.path.join(debug_path, img_name)
         
@@ -108,10 +94,7 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
         if config.SAVE_DEPTH_LIST:
             save_depth_list(img_path_in_debug, depth_list, visible_block_idxs)
                 
-        if config.SAVE_BLOCK_IMG:
-            save_block_img(img_path_in_debug, rendered_list, visible_block_idxs, gaussians, view, image, config)
 
-                
         torchvision.utils.save_image(image, os.path.join(render_path, img_name + ".png"))            
         torchvision.utils.save_image(gt, os.path.join(gts_path, img_name + ".png"))
 
@@ -119,17 +102,25 @@ def render_set(model_path, name, iteration, views, gaussians: GaussianModel, pip
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():
-        gaussians = GaussianModel(dataset.sh_degree)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
-
+        sub_gaussians_list = []
+        scene = Scene(dataset, None, load_iteration=iteration, shuffle=False, only_camera=True)
+        ply_path = os.path.join(scene.model_path, "point_cloud", BRANCH, "iteration_" + str(scene.loaded_iter))
+        ply_files = sorted( f for f in os.listdir(ply_path) if f.startswith("point_cloud_sub_") and f.endswith(".ply") )
+        for fname in ply_files:
+            full_path = os.path.join(ply_path, fname)
+            sub_gaussians = GaussianModel(dataset.sh_degree)
+            sub_gaussians.load_ply(full_path, dataset.train_test_exp)
+            sub_gaussians_list.append(sub_gaussians)
+            print("loading", full_path, "with", sub_gaussians._xyz.shape[0], "gaussians success", )
+            
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
-             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, dataset.train_test_exp, separate_sh)
+             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), sub_gaussians_list, pipeline, background, dataset.train_test_exp, separate_sh)
 
         if not skip_test:
-             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, dataset.train_test_exp, separate_sh)
+             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), sub_gaussians_list, pipeline, background, dataset.train_test_exp, separate_sh)
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -142,6 +133,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
+    BRANCH = get_git_branch()
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
