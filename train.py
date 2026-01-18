@@ -244,7 +244,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}")
                 for idx, kid in enumerate(sub_gaussians):
-                    kid.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{idx}.ply"))
+                    kid.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{idx}.ply"), include_block=False)
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -297,10 +297,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
                     
-            if (iteration in checkpoint_iterations):
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                pth_path = os.path.join(args.model_path, f"point_cloud/{BRANCH}")
-                torch.save((gaussians.capture(), iteration), pth_path + "/chkpnt" + str(iteration) + ".pth")
+            # if (iteration in checkpoint_iterations):
+            #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
+            #     pth_path = os.path.join(args.model_path, f"point_cloud/{BRANCH}")
+            #     torch.save((gaussians.capture(), iteration), pth_path + "/chkpnt" + str(iteration) + ".pth")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
