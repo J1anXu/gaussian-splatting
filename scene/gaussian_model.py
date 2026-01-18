@@ -312,6 +312,7 @@ class GaussianModel:
 
     def save_ply(self, path, include_block=True):
         mkdir_p(os.path.dirname(path))
+        
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
@@ -319,19 +320,25 @@ class GaussianModel:
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
-        # 新增：block_id 
-        block_id = self.build_block_id()[:, None]  # [N,1]
-        # dtype：多一个 block_id
-        dtype_full = ( [(attribute, 'f4') for attribute in self.construct_list_of_attributes()] + [('block_id', 'i4')] )
-        elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        # attributes：拼上 block_id 
-        attributes = np.concatenate( (xyz, normals, f_dc, f_rest, opacities, scale, rotation, block_id), axis=1 )
-        elements[:] = list(map(tuple, attributes))
-        el = PlyElement.describe(elements, 'vertex')
+        
         if include_block:
-            # 新增：block_bounds element
+            block_id = self.build_block_id()[:, None]  # [N,1]
+            dtype_full = ( [(attribute, 'f4') for attribute in self.construct_list_of_attributes()] + [('block_id', 'i4')] )
+            elements = np.empty(xyz.shape[0], dtype=dtype_full)
+            attributes = np.concatenate( (xyz, normals, f_dc, f_rest, opacities, scale, rotation, block_id), axis=1 )
+            elements[:] = list(map(tuple, attributes))
+            el = PlyElement.describe(elements, 'vertex')
             el_block = self.build_block_elements()
             PlyData([el, el_block]).write(path)
+        else:        
+            dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+            elements = np.empty(xyz.shape[0], dtype=dtype_full)
+            attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+            elements[:] = list(map(tuple, attributes))
+            el = PlyElement.describe(elements, 'vertex')
+            PlyData([el]).write(path)
+        
+            
 
     def reset_opacity(self):
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
