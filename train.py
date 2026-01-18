@@ -124,7 +124,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
                 
                 for idx, block in enumerate(gaussians.block_indices):
-                    LOGGER.info(f"Block {idx} size: {len(block)}")  
+                    LOGGER.info(f"GS {idx} size: {len(block)}")  
                     kid = gaussians.get_kid(idx, opt)
                     sub_gaussians.append(kid)
                     
@@ -232,8 +232,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": available_num, "pts": N_total})
                 progress_bar.update(10)
-                
-                log = {"iter": iteration,"loss": ema_loss_for_log, "pts_in_frustum": available_num, "pts": total_points} 
+                state = {f"pts_block_{i}": sub._xyz.shape[0] for i, sub in enumerate(sub_gaussians)}
+                log = { "iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": available_num, "pts_total": N_total,  **state }
                 LOGGER.info(log)
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
@@ -257,18 +257,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     gaussians.add_densification_stats2(global_viewspace_points_grad, visibility_filter)
                 else:
-                    for kid in sub_gaussians:
-                        global_viewspace_points_grad = viewspace_points_list[sub_gaussians.index(kid)].grad
-                        visibility_filter = visibility_filter_list[sub_gaussians.index(kid)]
-                        radii = radii_list[sub_gaussians.index(kid)]
+                    for idx, kid in enumerate(sub_gaussians):
+                        global_viewspace_points_grad = viewspace_points_list[idx].grad
+                        visibility_filter = visibility_filter_list[idx]
+                        radii = radii_list[idx]
                         kid.max_radii2D[visibility_filter] = torch.max(kid.max_radii2D[visibility_filter], radii[visibility_filter])
                         kid.add_densification_stats2(global_viewspace_points_grad, visibility_filter)
                 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     if partitioned:
-                        for kid in sub_gaussians:
-                            kid.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii_list[sub_gaussians.index(kid)])
+                        for idx, kid in enumerate(sub_gaussians):
+                            kid.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii_list[idx])
                     else:
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
 
