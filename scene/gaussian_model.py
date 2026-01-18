@@ -158,11 +158,11 @@ class GaussianModel:
     def get_exposure(self):
         return self._exposure
 
-    def get_exposure_from_name(self, image_name):
-        if self.pretrained_exposures is None:
-            return self._exposure[self.exposure_mapping[image_name]]
-        else:
-            return self.pretrained_exposures[image_name]
+    # def get_exposure_from_name(self, image_name):
+    #     if self.pretrained_exposures is None:
+    #         return self._exposure[self.exposure_mapping[image_name]]
+    #     else:
+    #         return self.pretrained_exposures[image_name]
     
     def get_covariance(self, scaling_modifier = 1):
         if self.visible_indices is not None:
@@ -198,7 +198,7 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
-        self.pretrained_exposures = None
+        # self.pretrained_exposures = None
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
 
@@ -227,7 +227,7 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
-        self.pretrained_exposures = None
+        # self.pretrained_exposures = None
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
 
@@ -267,10 +267,10 @@ class GaussianModel:
                                                         max_steps=training_args.iterations)
 
     def update_learning_rate(self, iteration):
-        ''' Learning rate scheduling per step '''
-        if self.pretrained_exposures is None:
-            for param_group in self.exposure_optimizer.param_groups:
-                param_group['lr'] = self.exposure_scheduler_args(iteration)
+        # ''' Learning rate scheduling per step '''
+        # if self.pretrained_exposures is None:
+        #     for param_group in self.exposure_optimizer.param_groups:
+        #         param_group['lr'] = self.exposure_scheduler_args(iteration)
 
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "xyz":
@@ -339,16 +339,16 @@ class GaussianModel:
 
     def load_ply(self, path, use_train_test_exp = False):
         plydata = PlyData.read(path)
-        if use_train_test_exp:
-            exposure_file = os.path.join(os.path.dirname(path), os.pardir, os.pardir, "exposure.json")
-            if os.path.exists(exposure_file):
-                with open(exposure_file, "r") as f:
-                    exposures = json.load(f)
-                self.pretrained_exposures = {image_name: torch.FloatTensor(exposures[image_name]).requires_grad_(False).cuda() for image_name in exposures}
-                print(f"Pretrained exposures loaded.")
-            else:
-                print(f"No exposure to be loaded at {exposure_file}")
-                self.pretrained_exposures = None
+        # if use_train_test_exp:
+        #     exposure_file = os.path.join(os.path.dirname(path), os.pardir, os.pardir, "exposure.json")
+        #     if os.path.exists(exposure_file):
+        #         with open(exposure_file, "r") as f:
+        #             exposures = json.load(f)
+        #         self.pretrained_exposures = {image_name: torch.FloatTensor(exposures[image_name]).requires_grad_(False).cuda() for image_name in exposures}
+        #         print(f"Pretrained exposures loaded.")
+        #     else:
+        #         print(f"No exposure to be loaded at {exposure_file}")
+        #         self.pretrained_exposures = None
 
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
