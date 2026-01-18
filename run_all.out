@@ -1,0 +1,29 @@
+nohup: ignoring input
+🚀 Launching 4 GPU queues...
+
+========================================
+GPU   : 4
+========================================
+Scene : bicycle
+GPU   : 5
+Scene : kitchen
+========================================
+========================================
+GPU   : 7
+GPU   : 6
+Scene : bonsai
+Scene : room
+Time  : Sun Jan 18 03:53:51 PM CST 2026
+Time  : Sun Jan 18 03:53:51 PM CST 2026
+========================================
+========================================
+Time  : Sun Jan 18 03:53:51 PM CST 2026
+========================================
+Time  : Sun Jan 18 03:53:51 PM CST 2026
+========================================
+run_all.sh: line 22: 2014378 Killed                  python train.py -s "$data_path" --model_path "$model_path" --eval > "$LOG_ROOT/train_${scene}.log" 2>&1
+run_all.sh: line 22: 2014377 Killed                  python train.py -s "$data_path" --model_path "$model_path" --eval > "$LOG_ROOT/train_${scene}.log" 2>&1
+run_all.sh: line 22: 2014379 Killed                  python train.py -s "$data_path" --model_path "$model_path" --eval > "$LOG_ROOT/train_${scene}.log" 2>&1
+run_all.sh: line 22: 2014380 Killed                  python train.py -s "$data_path" --model_path "$model_path" --eval > "$LOG_ROOT/train_${scene}.log" 2>&1
+
+🎉 All pipelines finished.

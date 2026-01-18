@@ -58,21 +58,6 @@ run_pipeline() {
     -m "$model_path" \
     > "$LOG_ROOT/metrics_p_${scene}.log" 2>&1
 
-  ####################
-  # 4. RENDER
-  ####################
-  python render.py \
-    -m "$model_path" \
-    --skip_train \
-    > "$LOG_ROOT/render_${scene}.log" 2>&1
-
-  ####################
-  # 5. METRICS
-  ####################
-  python metrics.py \
-    -m "$model_path" \
-    > "$LOG_ROOT/metrics_${scene}.log" 2>&1
-
   echo "✅ Finished $scene on GPU $gpu"
 }
 
