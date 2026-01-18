@@ -1,6 +1,6 @@
 # config.py
 # 控制加载数据集大小,减少启动时间,用于调试
-LIMITED_DATASIZE = True
+LIMITED_DATASIZE = False
 DATASIZE_LIMIT = 20
 
 
