@@ -359,7 +359,7 @@ if __name__ == "__main__":
         wandb.login()
         run = wandb.init(
             project = "3dgs_baseline", 
-            name = f"{BRANCH}_{time.strftime('%m%d%H%M')}", 
+            name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
             job_type = "train", 
             group = SCENE_NAME,
             config = vars(op.extract(args)) 
