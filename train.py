@@ -117,7 +117,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         # available_mask = frustum_culling(gaussians._xyz, viewpoint_cam.full_proj_transform)
         # available_indices = torch.nonzero(available_mask, as_tuple=True)[0]
+        available_mask = torch.ones(gaussians._xyz.shape[0], dtype=torch.bool, device=gaussians._xyz.device)
         available_indices = torch.arange(gaussians._xyz.shape[0], device=gaussians._xyz.device)
+
         if not partitioned:
             if gaussians._xyz.shape[0] > 300_000:
                 gaussians.partition() 
