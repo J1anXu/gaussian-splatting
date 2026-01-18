@@ -310,7 +310,7 @@ class GaussianModel:
             blocks[i] = (*mn, *mx)
         return PlyElement.describe(blocks, "block")
 
-    def save_ply(self, path):
+    def save_ply(self, path, include_block=True):
         mkdir_p(os.path.dirname(path))
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
@@ -328,9 +328,10 @@ class GaussianModel:
         attributes = np.concatenate( (xyz, normals, f_dc, f_rest, opacities, scale, rotation, block_id), axis=1 )
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
-        # 新增：block_bounds element
-        el_block = self.build_block_elements()
-        PlyData([el, el_block]).write(path)
+        if include_block:
+            # 新增：block_bounds element
+            el_block = self.build_block_elements()
+            PlyData([el, el_block]).write(path)
 
     def reset_opacity(self):
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
