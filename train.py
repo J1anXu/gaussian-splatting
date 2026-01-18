@@ -232,8 +232,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": available_num, "pts": N_total})
                 progress_bar.update(10)
-                state = {f"pts_block_{i}": sub._xyz.shape[0] for i, sub in enumerate(sub_gaussians)}
-                log = { "iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": available_num, "pts": N_total,  **state }
+                log = { "iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": available_num, "pts": N_total}
                 LOGGER.info(log)
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
@@ -271,7 +270,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             kid.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii_list[idx])
                     else:
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
-
+                    if WANDB and gaussians.partitioned and not DEBUG_MODE:
+                        wandb.log(
+                            {
+                                f"block/{idx}_size": len(gs._xyz.shape[0])
+                                for idx, gs in enumerate(sub_gaussians)
+                            },
+                            step=iteration
+                        )
 
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
