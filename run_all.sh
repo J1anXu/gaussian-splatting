@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+
+# ===== auto-daemon =====
+if [[ -z "$DAEMONIZED" ]]; then
+  export DAEMONIZED=1
+  nohup "$0" "$@" > debug/pipeline.out 2>&1 &
+  echo "🚀 Pipeline started in background"
+  exit 0
+fi
+# ======================
+
+
 set -e
 set -o pipefail
 
@@ -16,6 +27,11 @@ LOG_ROOT=debug
 
 mkdir -p "$LOG_ROOT"
 
+
+
+
+
+
 ########################################
 # 单 GPU 队列：完整 pipeline
 ########################################
@@ -28,11 +44,20 @@ run_pipeline() {
   local data_path="$DATA_ROOT/$scene"
   local model_path="$OUT_ROOT/$scene"
 
+  ########################################
+  # Git info
+  ########################################
+  GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
+  echo "🌿 Git branch: $GIT_BRANCH"
+
   echo "========================================"
   echo "GPU   : $gpu"
   echo "Scene : $scene"
   echo "Time  : $(date)"
+  echo "Branch: $GIT_BRANCH"
   echo "========================================"
+
+
 
   ####################
   # 1. TRAIN
@@ -40,6 +65,7 @@ run_pipeline() {
   python train.py \
     -s "$data_path" \
     --model_path "$model_path" \
+    --git_branch "$GIT_BRANCH" \
     --eval \
     > "$LOG_ROOT/train_${scene}.log" 2>&1
 
@@ -48,6 +74,7 @@ run_pipeline() {
   ####################
   python render_p.py \
     -m "$model_path" \
+    --git_branch "$GIT_BRANCH" \
     --skip_train \
     > "$LOG_ROOT/render_p_${scene}.log" 2>&1
 
@@ -56,6 +83,7 @@ run_pipeline() {
   ####################
   python metrics_p.py \
     -m "$model_path" \
+    --git_branch "$GIT_BRANCH" \
     > "$LOG_ROOT/metrics_p_${scene}.log" 2>&1
 
   echo "✅ Finished $scene on GPU $gpu"
