@@ -123,7 +123,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # 视锥剔除
         for model in model_list:
             # visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
-            visible_mask = torch.ones( model._xyz.shape[0], dtype=torch.bool, device=model._xyz.device )
+            visible_mask = torch.ones(model._xyz.shape[0], dtype=torch.bool, device=model._xyz.device)
             model.visible_idx = torch.nonzero(visible_mask, as_tuple=True)[0]
         
         rendered_list, depth_list, alpha_list = [], [], []
