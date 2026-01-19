@@ -68,7 +68,8 @@ class GaussianModel:
         # visible_indices should keep None unless set by set_subset
         self.visible_indices = None
         self.block_bounds = []
-        self.block_indices = []
+        self.block_idx_list = []
+        self.visible_idx = None
         self.partitioned = False
         self.setup_functions()
         
@@ -295,7 +296,7 @@ class GaussianModel:
     def build_block_id(self):
         N = self._xyz.shape[0]
         block_id = np.full(N, -1, dtype=np.int32)
-        for b, idx in enumerate(self.block_indices):
+        for b, idx in enumerate(self.block_idx_list):
             idx = idx.detach().cpu().numpy()
             block_id[idx] = b
         return block_id
@@ -397,7 +398,7 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
         self.active_sh_degree = self.max_sh_degree
         self.block_bounds = None
-        self.block_indices = None
+        self.block_idx_list = None
         
         if "block" in plydata:
             block_elem = plydata["block"].data  # structured array, shape (B,)
@@ -421,7 +422,7 @@ class GaussianModel:
                 )
                 idx = torch.nonzero(inside, as_tuple=False).squeeze(1)
                 block_indices.append(idx)
-                self.block_indices = block_indices
+                self.block_idx_list = block_indices
             
 
     def get_kid(self, idx, training_args):
@@ -430,10 +431,10 @@ class GaussianModel:
         This kid has its OWN parameters and OWN optimizer,
         and is optimized from scratch.
         """
-        assert self.block_indices is not None, "block_indices is None"
-        assert idx < len(self.block_indices), f"block idx {idx} out of range"
+        assert self.block_idx_list is not None, "block_indices is None"
+        assert idx < len(self.block_idx_list), f"block idx {idx} out of range"
 
-        indices = self.block_indices[idx].to(self._xyz.device)
+        indices = self.block_idx_list[idx].to(self._xyz.device)
 
         kid = GaussianModel(
             sh_degree=self.max_sh_degree,
@@ -459,7 +460,7 @@ class GaussianModel:
         )
 
         kid.block_bounds = None
-        kid.block_indices = None
+        kid.block_idx_list = None
         kid.partitioned = False
         kid.visible_indices = None
 
@@ -517,8 +518,7 @@ class GaussianModel:
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
-        if self.tmp_radii is not None:
-            self.tmp_radii = self.tmp_radii[valid_points_mask]
+
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -542,7 +542,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -558,7 +558,6 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
-        self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
@@ -583,9 +582,8 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
-        new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -604,15 +602,13 @@ class GaussianModel:
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
-        new_tmp_radii = self.tmp_radii[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        self.tmp_radii = radii
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
 
@@ -622,8 +618,6 @@ class GaussianModel:
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
-        tmp_radii = self.tmp_radii
-        self.tmp_radii = None
 
         torch.cuda.empty_cache()
 
@@ -645,7 +639,7 @@ class GaussianModel:
     def partition(self):
         block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz)
         self.block_bounds = block_bounds
-        self.block_indices = block_indices
+        self.block_idx_list = block_indices
     
     def visualize_blocks(self, point_alpha=0.02, box_alpha=0.15, save_path="boxxes.png"):
         xyz = self._xyz.detach().cpu()
@@ -710,8 +704,8 @@ class GaussianModel:
             ax.add_collection3d(box)
 
             # ---------- 4. 可选：标注 block ----------
-            if self.block_indices is not None:
-                idx = self.block_indices[i]
+            if self.block_idx_list is not None:
+                idx = self.block_idx_list[i]
                 if idx.numel() > 0:
                     center = (mn + mx) * 0.5
                     ax.text(
@@ -781,5 +775,5 @@ class GaussianModel:
             # debug 用
             # print(f"[repartition] Block {i:2d}: {idx.numel():7d} points")
         uncovered_idx = all_idx[~covered_mask]
-        self.block_indices = new_block_indices
+        self.block_idx_list = new_block_indices
         print(f"[repartition] Uncovered points ({uncovered_idx.numel()}): {uncovered_idx.tolist()}")
