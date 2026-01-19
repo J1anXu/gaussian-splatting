@@ -23,6 +23,14 @@ from argparse import ArgumentParser
 from utils.general_utils import safe_state, get_git_branch
 
 BRANCH = None
+
+def load_json_safe(path):
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return {}
+
+
 def readImages(renders_dir, gt_dir):
     renders = []
     gts = []
@@ -88,11 +96,22 @@ def evaluate(model_paths):
                                                             "PSNR": {name: psnr for psnr, name in zip(torch.tensor(psnrs).tolist(), image_names)},
                                                             "LPIPS": {name: lp for lp, name in zip(torch.tensor(lpipss).tolist(), image_names)}})
 
-            with open(scene_dir + "/results.json", 'w') as fp:
-                json.dump(full_dict[scene_dir], fp, indent=True)
-                
-            with open(scene_dir + "/per_view.json", 'w') as fp:
-                json.dump(per_view_dict[scene_dir], fp, indent=True)
+            results_path = scene_dir + "/results.json"
+            per_view_path = scene_dir + "/per_view.json"
+
+            old_results = load_json_safe(results_path)
+            old_per_view = load_json_safe(per_view_path)
+
+
+            # merge：同 method 覆盖，不同 method 保留
+            old_results.update(full_dict[scene_dir])
+            old_per_view.update(per_view_dict[scene_dir])
+
+            with open(results_path, "w") as fp:
+                json.dump(old_results, fp, indent=2)
+
+            with open(per_view_path, "w") as fp:
+                json.dump(old_per_view, fp, indent=2)
         except:
             print("Unable to compute metrics for model", scene_dir)
 

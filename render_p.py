@@ -101,15 +101,12 @@ def render_set(model_path, name, iteration, views, sub_gaussians_list: List[Gaus
         torchvision.utils.save_image(image, os.path.join(render_path, img_name + ".png"))            
         torchvision.utils.save_image(gt, os.path.join(gts_path, img_name + ".png"))
 
-def store_pts(res_path, pts):
+def store_pts(res_path, pts, key):
     res_path = Path(res_path) 
-    if res_path.exists():
-        with open(res_path, "r") as f:
-            data = json.load(f)
-    else:
-        data = {}
+    data = {}
+        
     data.setdefault("meta", {})
-    data["meta"].update({
+    data[key].update({
         "branch": BRANCH,
         "num_gaussians": int(pts)
     })
@@ -132,7 +129,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             print("loading", full_path, "with", sub_gaussians._xyz.shape[0], "gaussians success", )
         
         res_path = os.path.join(scene.model_path, "rendered_p", BRANCH, "results.json")
-        store_pts(res_path, pts)
+        store_pts(res_path, pts, key = f"ours_{scene.loaded_iter}")
         
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
