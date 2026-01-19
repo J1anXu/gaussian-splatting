@@ -30,6 +30,11 @@ def load_json_safe(path):
             return json.load(f)
     return {}
 
+def merge_method_dict(old, new):
+    for method, vals in new.items():
+        old.setdefault(method, {})
+        old[method].update(vals)
+
 
 def readImages(renders_dir, gt_dir):
     renders = []
@@ -104,8 +109,9 @@ def evaluate(model_paths):
 
 
             # merge：同 method 覆盖，不同 method 保留
-            old_results.update(full_dict[scene_dir])
-            old_per_view.update(per_view_dict[scene_dir])
+            merge_method_dict(old_results, full_dict[scene_dir])
+            merge_method_dict(old_per_view, per_view_dict[scene_dir])
+
 
             with open(results_path, "w") as fp:
                 json.dump(old_results, fp, indent=2)

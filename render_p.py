@@ -105,7 +105,7 @@ def store_pts(res_path, pts, key):
     res_path = Path(res_path) 
     data = {}
         
-    data.setdefault("meta", {})
+    data.setdefault(key, {})
     data[key].update({
         "branch": BRANCH,
         "num_gaussians": int(pts)
