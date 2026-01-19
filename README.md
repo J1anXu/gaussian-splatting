@@ -29,4 +29,4 @@ CUDA_VISIBLE_DEVICES=5 python metrics.py -m output/mip360/kitchen > debug/metric
 CUDA_VISIBLE_DEVICES=6 python metrics.py -m output/mip360/room > debug/metrics_room.log 2>&1 &
 CUDA_VISIBLE_DEVICES=7 ython metrics.py -m output/mip360/bonsai > debug/metrics_bonsai.log 2>&1 &
 
-nohup bash run_all.sh > run_all.out 2>&1 &
+nohup bash run_all.sh > debug/run_all.out 2>&1 &
