@@ -32,8 +32,8 @@ from logger import get_logger
 import config
 import diff_gaussian_rasterization
 
-SCENE_NAME = "unknown_scene"
-BRANCH = "unknown_branch"
+SCENE_NAME = None
+BRANCH = None
 DEBUG_MODE = False
 
 WANDB = True
@@ -308,6 +308,7 @@ if __name__ == "__main__":
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 15_000, 30_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument('--git_branch', type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -316,7 +317,11 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
     SCENE_NAME = args.source_path.strip('/').split('/')[-1]
-    BRANCH = get_git_branch()
+    
+    if args.git_branch is not None:
+        BRANCH = args.git_branch
+    else:
+        BRANCH = get_git_branch()
     
     
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))

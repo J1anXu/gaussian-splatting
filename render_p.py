@@ -9,6 +9,9 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import json
+import sys
+from pathlib import Path
 import torch
 from scene import Scene
 import os
@@ -30,7 +33,7 @@ try:
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
-BRANCH = "unknown_branch"
+BRANCH = None
 
 
 def render_set(model_path, name, iteration, views, sub_gaussians_list: List[GaussianModel], pipeline, background, train_test_exp, separate_sh):
@@ -98,21 +101,39 @@ def render_set(model_path, name, iteration, views, sub_gaussians_list: List[Gaus
         torchvision.utils.save_image(image, os.path.join(render_path, img_name + ".png"))            
         torchvision.utils.save_image(gt, os.path.join(gts_path, img_name + ".png"))
 
-
-
+def store_pts(res_path, pts):
+    res_path = Path(res_path) 
+    if res_path.exists():
+        with open(res_path, "r") as f:
+            data = json.load(f)
+    else:
+        data = {}
+    data.setdefault("meta", {})
+    data["meta"].update({
+        "branch": BRANCH,
+        "num_gaussians": int(pts)
+    })
+    with open(res_path, "w") as f:
+        json.dump(data, f, indent=2)
+        
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():
         sub_gaussians_list = []
         scene = Scene(dataset, None, load_iteration=iteration, shuffle=False, only_camera=True)
         ply_path = os.path.join(scene.model_path, "point_cloud", BRANCH, "iteration_" + str(scene.loaded_iter))
         ply_files = sorted( f for f in os.listdir(ply_path) if f.startswith("point_cloud_sub_") and f.endswith(".ply") )
+        pts = 0
         for fname in ply_files:
             full_path = os.path.join(ply_path, fname)
             sub_gaussians = GaussianModel(dataset.sh_degree)
             sub_gaussians.load_ply(full_path, dataset.train_test_exp)
             sub_gaussians_list.append(sub_gaussians)
+            pts+= sub_gaussians._xyz.shape[0]
             print("loading", full_path, "with", sub_gaussians._xyz.shape[0], "gaussians success", )
-            
+        
+        res_path = os.path.join(scene.model_path, "rendered_p", BRANCH, "results.json")
+        store_pts(res_path, pts)
+        
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -131,9 +152,16 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument('--git_branch', type=str, default=None)
+    args_raw = parser.parse_args(sys.argv[1:])
+
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
-    BRANCH = get_git_branch()
+
+    if args_raw.git_branch is not None:
+        BRANCH = args_raw.git_branch
+    else:
+        BRANCH = get_git_branch()
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
