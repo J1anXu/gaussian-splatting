@@ -65,15 +65,15 @@ run_pipeline() {
 
 
 
-  # ####################
-  # # 1. TRAIN
-  # ####################
-  # python train.py \
-  #   -s "$data_path" \
-  #   --model_path "$model_path" \
-  #   --git_branch "$GIT_BRANCH" \
-  #   --eval \
-  #   > "$LOG_ROOT/train_${scene}.log" 2>&1
+  ####################
+  # 1. TRAIN
+  ####################
+  python train.py \
+    -s "$data_path" \
+    --model_path "$model_path" \
+    --git_branch "$GIT_BRANCH" \
+    --eval \
+    > "$LOG_ROOT/train_${scene}.log" 2>&1
 
   ####################
   # 2. RENDER_P
