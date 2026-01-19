@@ -3,7 +3,13 @@
 # ===== auto-daemon =====
 if [[ -z "$DAEMONIZED" ]]; then
   export DAEMONIZED=1
-  nohup "$0" "$@" > debug/pipeline.out 2>&1 &
+
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+
+  mkdir -p "$SCRIPT_DIR/debug"
+
+  nohup bash "$SCRIPT_PATH" "$@" > "$SCRIPT_DIR/debug/pipeline.out" 2>&1 &
   echo "🚀 Pipeline started in background"
   exit 0
 fi
