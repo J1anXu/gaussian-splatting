@@ -36,7 +36,7 @@ except:
 BRANCH = None
 SCENE_NAME = None
 
-def render_set(model_path, name, iteration, views, sub_gaussians_list: List[GaussianModel], pipeline, background, train_test_exp, separate_sh):
+def render_set(model_path, name, iteration, views, model_list: List[GaussianModel], pipeline, background, train_test_exp, separate_sh):
 
     render_path = os.path.join(model_path, "rendered_p", BRANCH, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, "rendered_p", BRANCH, name, "ours_{}".format(iteration), "gt")
@@ -57,16 +57,21 @@ def render_set(model_path, name, iteration, views, sub_gaussians_list: List[Gaus
         visible_block_idxs = []
         
         N_total = 0
-        for block_idx in range(len(sub_gaussians_list)):
-            sub_gaussians = sub_gaussians_list[block_idx]
-            render_pkg = render(view, sub_gaussians, pipeline, background, use_trained_exp=train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        for block_idx in range(len(model_list)):
+            model = model_list[block_idx]
+            
+            visible_mask = frustum_culling(model._xyz, view.full_proj_transform)
+            subset_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
+            model.set_subset(subset_indices)
+            render_pkg = render(view, model, pipeline, background, use_trained_exp=train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            model.clear_subset()
             image, viewspace_point_tensor, visibility_filter, radii, alphaLeft = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["alphaLeft"]
             rendered_list.append(image)
             depth_list.append(render_pkg["depth"])
             alpha_list.append(alphaLeft)
             viewspace_points_list.append(viewspace_point_tensor)
             radii_list.append(radii)
-            N_total += sub_gaussians._xyz.shape[0]
+            N_total += model._xyz.shape[0]
             
         merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)   
         
@@ -116,18 +121,18 @@ def store_pts(res_path, pts, scene, key):
         
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():
-        sub_gaussians_list = []
+        model_list = []
         scene = Scene(dataset, None, load_iteration=iteration, shuffle=False, only_camera=True)
         ply_path = os.path.join(scene.model_path, "point_cloud", BRANCH, "iteration_" + str(scene.loaded_iter))
         ply_files = sorted( f for f in os.listdir(ply_path) if f.startswith("point_cloud_sub_") and f.endswith(".ply") )
         pts = 0
         for fname in ply_files:
             full_path = os.path.join(ply_path, fname)
-            sub_gaussians = GaussianModel(dataset.sh_degree)
-            sub_gaussians.load_ply(full_path, dataset.train_test_exp)
-            sub_gaussians_list.append(sub_gaussians)
-            pts+= sub_gaussians._xyz.shape[0]
-            print("loading", full_path, "with", sub_gaussians._xyz.shape[0], "gaussians success", )
+            model = GaussianModel(dataset.sh_degree)
+            model.load_ply(full_path, dataset.train_test_exp)
+            model_list.append(model)
+            pts+= model._xyz.shape[0]
+            print("loading", full_path, "with", model._xyz.shape[0], "gaussians success", )
         
         res_path = os.path.join(scene.model_path, "rendered_p", BRANCH, "results.json")
         store_pts(res_path, pts, scene = SCENE_NAME, key = f"ours_{scene.loaded_iter}")
@@ -136,10 +141,10 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
-             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), sub_gaussians_list, pipeline, background, dataset.train_test_exp, separate_sh)
+             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), model_list, pipeline, background, dataset.train_test_exp, separate_sh)
 
         if not skip_test:
-             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), sub_gaussians_list, pipeline, background, dataset.train_test_exp, separate_sh)
+             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), model_list, pipeline, background, dataset.train_test_exp, separate_sh)
 
 if __name__ == "__main__":
     # Set up command line argument parser
