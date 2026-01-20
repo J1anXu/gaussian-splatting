@@ -110,6 +110,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         
+        # partition
         if not partitioned and initial_gaussians._xyz.shape[0] > 300_000:
             initial_gaussians.partition() 
             # initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
@@ -120,7 +121,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 LOGGER.info(f"GS {idx} size: {model._xyz.shape[0]}")  
             partitioned = True
         
-        # 视锥剔除
+        # frustum culling
         for model in model_list:
             visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
             model.visible_idx = torch.nonzero(visible_mask, as_tuple=True)[0]
