@@ -52,6 +52,11 @@ except:
     SPARSE_ADAM_AVAILABLE = False
 
 
+def print_config():
+    for k, v in vars(config).items():
+        if not k.startswith("__"):
+            print(f"{k} = {v}")
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -328,10 +333,9 @@ if __name__ == "__main__":
     else:
         BRANCH = get_git_branch()
     
-    
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
-    
     DEBUG_MODE = sys.gettrace() is not None
+    print_config()
     
     if WANDB and not DEBUG_MODE:
         wandb.login()
