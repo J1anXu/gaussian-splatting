@@ -111,20 +111,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         
         # partition
-        if not partitioned and initial_gaussians._xyz.shape[0] > 300_000:
-            initial_gaussians.partition() 
-            # initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
-            model_list = []
-            for idx in range(len(initial_gaussians.block_idx_list)):
-                model = initial_gaussians.get_kid(idx, opt)
-                model_list.append(model)
-                LOGGER.info(f"GS {idx} size: {model._xyz.shape[0]}")  
-            partitioned = True
+        if config.PARTITIONING_ENABLED:
+            if not partitioned and initial_gaussians._xyz.shape[0] > 300_000:
+                initial_gaussians.partition() 
+                # initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
+                model_list = []
+                for idx in range(len(initial_gaussians.block_idx_list)):
+                    model = initial_gaussians.get_kid(idx, opt)
+                    model_list.append(model)
+                    LOGGER.info(f"GS {idx} size: {model._xyz.shape[0]}")  
+                partitioned = True
         
         # frustum culling
-        for model in model_list:
-            visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
-            model.visible_idx = torch.nonzero(visible_mask, as_tuple=True)[0]
+        if config.FRUSTUM_CULLING_ENABLED:
+            for model in model_list:
+                visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
+                model.visible_idx = torch.nonzero(visible_mask, as_tuple=True)[0]
+        else:
+            for model in model_list:
+                model.visible_idx = torch.arange(model._xyz.shape[0], device="cuda")
         
         rendered_list, depth_list, alpha_list = [], [], []
         viewspace_points_list, visibility_filter_list, radii_list = [], [], []
