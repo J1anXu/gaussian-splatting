@@ -136,7 +136,9 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             pts+= model._xyz.shape[0]
             print("loading", full_path, "with", model._xyz.shape[0], "gaussians success", )
         
-        res_path = os.path.join(scene.model_path, "rendered_p", BRANCH, "results.json")
+        res_path = os.path.join(scene.model_path, "rendered_p", BRANCH)
+        os.makedirs(res_path, exist_ok=True)
+        json_path = os.path.join(res_path, "results.json")
         store_pts(res_path, pts, scene = SCENE_NAME, key = f"ours_{scene.loaded_iter}")
         
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
