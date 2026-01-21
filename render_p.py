@@ -139,7 +139,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         res_path = os.path.join(scene.model_path, "rendered_p", BRANCH)
         os.makedirs(res_path, exist_ok=True)
         json_path = os.path.join(res_path, "results.json")
-        store_pts(res_path, pts, scene = SCENE_NAME, key = f"ours_{scene.loaded_iter}")
+        store_pts(json_path, pts, scene = SCENE_NAME, key = f"ours_{scene.loaded_iter}")
         
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
