@@ -340,7 +340,7 @@ if __name__ == "__main__":
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
-            project = "fcsp", 
+            project = "partgs", 
             name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
             job_type = "train", 
             group = SCENE_NAME,
