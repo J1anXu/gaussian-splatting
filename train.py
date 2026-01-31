@@ -316,8 +316,6 @@ if __name__ == "__main__":
         run = wandb.init(
             project = "partgs", 
             name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
-            job_type = "train", 
-            group = SCENE_NAME,
             config = vars(op.extract(args)) 
         )
         wandb.define_metric("iteration")  # 
