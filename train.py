@@ -85,7 +85,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter += 1
     
     debug_image_name = "_DSC8680.JPG"
-    img_path_in_debug = os.path.join("/data2/jian/debug", BRANCH, debug_image_name)
+    img_path_in_debug = os.path.join("/data2/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
     os.makedirs(img_path_in_debug, exist_ok=True)
     
     model_list = [initial_gaussians]
@@ -178,29 +178,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
         
-        # if viewpoint_cam.image_name == debug_image_name:
-        #     iteration_path = os.path.join(img_path_in_debug, f"iter_{iteration}")
-        #     # os.makedirs(iteration_path, exist_ok=True)
-        #     front_rgbs = merge_res["front_rgbs"]
-        #     prefix_T = merge_res["prefix_T"]
-        #     # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
-        #     block_rank = merge_res["block_rank"] # [K, H, W]
-        #     save_rgb_layers(iteration_path, front_rgbs)
-        #     save_layer_contribution(iteration_path, block_rank, front_rgbs, prefix_T, visible_block_idxs)
-        #     save_depth_list(iteration_path, depth_list, visible_block_idxs)
 
-        #     # torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}.png"))
-
-        #     if gaussians.partitioned:
-        #         save_block_img(iteration_path, rendered_list, visible_block_idxs, gaussians, viewpoint_cam, image, config)
-        #     LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
-
-
-        # if viewpoint_cam.image_name == debug_image_name:
-        #     # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
-        #     torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}" + ".png"))
-        #     LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
-
+        if viewpoint_cam.image_name == debug_image_name:
+            torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}" + ".png"))
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -254,13 +234,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
                         
                     if WANDB and initial_gaussians.partitioned and not DEBUG_MODE:
-                        wandb.log(
-                            {
-                                f"block/{idx}_size": len(gs._xyz.shape[0])
-                                for idx, gs in enumerate(model_list)
-                            },
-                            step=iteration
-                        )
+                        wandb.log({f"block/{idx}_size": len(gs._xyz.shape[0]) for idx, gs in enumerate(model_list)}, step=iteration)
 
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
