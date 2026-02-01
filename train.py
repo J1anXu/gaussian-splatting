@@ -406,7 +406,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 
         # save debug image
         if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+            torchvision.utils.save_image(image_with_block_grad, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
                     
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
