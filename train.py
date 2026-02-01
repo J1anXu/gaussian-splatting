@@ -52,12 +52,15 @@ except:
     SPARSE_ADAM_AVAILABLE = False
 
 
+debug_image_name = "_DSC8680.JPG"
+IMG_PATH_IN_DEBUG = None
+
 def print_config():
     for k, v in vars(config).items():
         if not k.startswith("__"):
             print(f"{k} = {v}")
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -84,12 +87,149 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     
-    debug_image_name = "_DSC8680.JPG"
-    img_path_in_debug = os.path.join("/data2/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
-    os.makedirs(img_path_in_debug, exist_ok=True)
+    colors_bg = None
     
-    model_list = [initial_gaussians]
-    partitioned = False
+    for iteration in range(first_iter, opt.iterations + 1):
+        # partition
+        if config.PARTITIONING_ENABLED:
+            if initial_gaussians._xyz.shape[0] > 300_000:
+                print(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
+                LOGGER.info(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
+                return scene, iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg
+            
+        initial_gaussians.update_learning_rate(iteration)
+        
+        # Every 1000 its we increase the levels of SH up to a maximum degree
+        if iteration % 1000 == 0:
+            initial_gaussians.oneupSHdegree()
+
+        # Pick a random Camera
+        if not viewpoint_stack:
+            viewpoint_stack = scene.getTrainCameras().copy()
+            viewpoint_indices = list(range(len(viewpoint_stack)))
+        rand_idx = randint(0, len(viewpoint_indices) - 1)
+        viewpoint_cam = viewpoint_stack.pop(rand_idx)
+        vind = viewpoint_indices.pop(rand_idx)
+
+        # Render
+        if (iteration - 1) == debug_from:
+            pipe.debug = True
+
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        
+        # frustum culling
+        if config.FRUSTUM_CULLING_ENABLED:
+            visible_mask = frustum_culling(initial_gaussians._xyz, viewpoint_cam.full_proj_transform)
+            initial_gaussians.visible_idx = torch.nonzero(visible_mask, as_tuple=True)[0]
+        else:
+            initial_gaussians.visible_idx = torch.arange(initial_gaussians._xyz.shape[0], device="cuda")
+        
+
+        visible_pts = 0        
+        pts_total = 0
+
+        pts_total += initial_gaussians._xyz.shape[0]
+        visible_pts += initial_gaussians.visible_idx.shape[0]
+        
+        initial_gaussians.set_subset(initial_gaussians.visible_idx)
+        render_pkg = render(viewpoint_cam, initial_gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        initial_gaussians.clear_subset()
+        
+        # pixel level 
+        image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
+        
+        # gaussian points level
+        viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        
+        if viewpoint_cam.alpha_mask is not None:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            image *= alpha_mask
+        
+
+        if viewpoint_cam.image_name == debug_image_name:
+            torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+
+        # Loss
+        gt_image = viewpoint_cam.original_image.cuda()
+        if colors_bg is None:
+            colors_bg = torch.zeros_like(gt_image)
+        Ll1 = l1_loss(image, gt_image)
+        ssim_value = ssim(image, gt_image)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        # Depth regularization
+        Ll1depth = 0
+        diff_gaussian_rasterization.set_colors_bg(colors_bg)
+        loss.backward()
+
+        with torch.no_grad():
+            # Progress bar
+            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
+            
+            if iteration % 10 == 0:
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
+                progress_bar.update(10)
+                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total}
+                LOGGER.info(log)
+                if WANDB and not DEBUG_MODE:
+                    wandb.log(log, step=iteration)
+                    
+            if iteration == opt.iterations:
+                progress_bar.close()
+
+
+            # Densification
+            if iteration < opt.densify_until_iter:
+                global_viewspace_points_grad = torch.zeros(initial_gaussians.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
+                global_viewspace_points_grad[initial_gaussians.visible_idx] = viewspace_point_tensor.grad
+                global_visibility_filter = initial_gaussians.visible_idx[visibility_filter]
+                
+                initial_gaussians.max_radii2D[global_visibility_filter] = torch.max(initial_gaussians.max_radii2D[global_visibility_filter], radii[visibility_filter])
+                initial_gaussians.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
+                
+                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    initial_gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                
+                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    initial_gaussians.reset_opacity()
+
+
+            # Optimizer step
+            if iteration < opt.iterations:
+                initial_gaussians.optimizer.step()
+                initial_gaussians.optimizer.zero_grad(set_to_none = True)
+
+
+
+def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
+    scene, old_iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg = res
+
+    if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
+        sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
+
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    viewpoint_stack = scene.getTrainCameras().copy()
+    viewpoint_indices = list(range(len(viewpoint_stack)))
+
+    first_iter = old_iteration
+    
+    model_list = []
+    
+    initial_gaussians = scene.gaussians
+    
+    # partition
+    initial_gaussians.partition() 
+    # initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
+    model_list = []
+    for idx in range(len(initial_gaussians.block_idx_list)):
+        model = initial_gaussians.get_kid(idx, opt)
+        model_list.append(model)
+        LOGGER.info(f"GS {idx} size: {model._xyz.shape[0]}")  
+    
     
     for iteration in range(first_iter, opt.iterations + 1):
         
@@ -114,18 +254,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             pipe.debug = True
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
-        
-        # partition
-        if config.PARTITIONING_ENABLED:
-            if not partitioned and initial_gaussians._xyz.shape[0] > 300_000:
-                initial_gaussians.partition() 
-                # initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
-                model_list = []
-                for idx in range(len(initial_gaussians.block_idx_list)):
-                    model = initial_gaussians.get_kid(idx, opt)
-                    model_list.append(model)
-                    LOGGER.info(f"GS {idx} size: {model._xyz.shape[0]}")  
-                partitioned = True
         
         # frustum culling
         if config.FRUSTUM_CULLING_ENABLED:
@@ -180,7 +308,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
 
         if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}" + ".png"))
+            torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -232,10 +360,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     for idx, model in enumerate(model_list):
                         model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-                        
-                    if WANDB and initial_gaussians.partitioned and not DEBUG_MODE:
-                        wandb.log({f"block/{idx}_size": len(gs._xyz.shape[0]) for idx, gs in enumerate(model_list)}, step=iteration)
-
+                    if WANDB:
+                        wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     for model in model_list:
@@ -253,6 +379,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
             #     pth_path = os.path.join(args.model_path, f"point_cloud/{BRANCH}")
             #     torch.save((gaussians.capture(), iteration), pth_path + "/chkpnt" + str(iteration) + ".pth")
+
+
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -322,7 +450,10 @@ if __name__ == "__main__":
         
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     os.makedirs("debug", exist_ok=True)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    IMG_PATH_IN_DEBUG = os.path.join("/data2/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
+    os.makedirs(IMG_PATH_IN_DEBUG, exist_ok=True)
+    res = training_phase_1(lp.extract(args), op.extract(args), pp.extract(args), args.start_checkpoint, args.debug_from)
+    training_phase_2(lp.extract(args), op.extract(args), pp.extract(args), args.save_iterations, args.debug_from, res)
 
     # All done
     print("\nTraining complete.")
