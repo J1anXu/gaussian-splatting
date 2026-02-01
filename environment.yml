@@ -17,6 +17,7 @@ dependencies:
   - mkl==2024.0
   - pandas
   - opencv
+  - matplotlib
 
 # 手动、在 torch 已存在的环境里编译 必须这个顺序
 # pip install -e submodules/simple-knn
