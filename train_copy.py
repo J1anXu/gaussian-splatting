@@ -179,7 +179,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         # 遍历所有block 轮流当active block
         for index, block_id in enumerate(in_frustum_block_ids):
-            model = model_list[block_id]
+            model: GaussianModel = model_list[block_id]
             pts_total += model._xyz.shape[0]
             visible_pts += model.visible_idx.shape[0]
             
