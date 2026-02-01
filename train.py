@@ -93,7 +93,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             if initial_gaussians._xyz.shape[0] > 300_000:
                 print(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
                 LOGGER.info(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
-                return {scene, iteration, viewpoint_stack, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar}
+                return scene, iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar
             
         initial_gaussians.update_learning_rate(iteration)
         
@@ -200,7 +200,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
 
 def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
-    scene, old_iteration, viewpoint_stack, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar = res
+    scene, old_iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar = res
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -208,8 +208,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
+    viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
-
 
     first_iter = old_iteration
     
@@ -358,7 +358,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
                         
                     if WANDB and initial_gaussians.partitioned and not DEBUG_MODE:
-                        wandb.log({f"block/{idx}_size": len(gs._xyz.shape[0]) for idx, gs in enumerate(model_list)}, step=iteration)
+                        wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
 
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
