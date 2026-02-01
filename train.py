@@ -53,8 +53,7 @@ except:
 
 
 debug_image_name = "_DSC8680.JPG"
-img_path_in_debug = os.path.join("/data2/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
-os.makedirs(img_path_in_debug, exist_ok=True)
+IMG_PATH_IN_DEBUG = None
 
 def print_config():
     for k, v in vars(config).items():
@@ -146,7 +145,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         
 
         if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}" + ".png"))
+            torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -305,7 +304,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         
 
         if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}" + ".png"))
+            torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -449,7 +448,8 @@ if __name__ == "__main__":
         
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     os.makedirs("debug", exist_ok=True)
-    
+    IMG_PATH_IN_DEBUG = os.path.join("/data2/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
+    os.makedirs(IMG_PATH_IN_DEBUG, exist_ok=True)
     res = training_phase_1(lp.extract(args), op.extract(args), pp.extract(args), args.start_checkpoint, args.debug_from)
     training_phase_2(lp.extract(args), op.extract(args), pp.extract(args), args.save_iterations, args.debug_from, res)
 
