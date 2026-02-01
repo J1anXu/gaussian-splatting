@@ -78,13 +78,13 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
+    use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
-    
     first_iter += 1
     
     for iteration in range(first_iter, opt.iterations + 1):
@@ -434,7 +434,7 @@ if __name__ == "__main__":
         BRANCH = get_git_branch()
     
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
-    DEBUG_MODE = sys.gettrace() is not None
+    # DEBUG_MODE = sys.gettrace() is not None
     print_config()
     
     if WANDB and not DEBUG_MODE:
