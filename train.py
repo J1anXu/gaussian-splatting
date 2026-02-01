@@ -224,10 +224,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     # partition
     initial_gaussians.partition() 
     # initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
+    
     model_list = []
     for idx in range(len(initial_gaussians.block_idx_list)):
         model = initial_gaussians.get_kid(idx, opt)
         model_list.append(model)
+        print(f"GS {idx} size: {model._xyz.shape[0]}")
         LOGGER.info(f"GS {idx} size: {model._xyz.shape[0]}")  
     
     
@@ -264,20 +266,51 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             for model in model_list:
                 model.visible_idx = torch.arange(model._xyz.shape[0], device="cuda")
         
+        # 无渲染全部结果 为计算Loss做准备
         rendered_list, depth_list, alpha_list = [], [], []
         viewspace_points_list, visibility_filter_list, radii_list = [], [], []
+        in_frustum_block_ids = []
+        with torch.no_grad():
+            for idx, model in enumerate(model_list):
+                
+                if model.visible_idx.shape[0] == 0:
+                    continue
+                
+                in_frustum_block_ids.append(idx)
+                
+                model.set_subset(model.visible_idx)
+                render_pkg = render(viewpoint_cam, model, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                model.clear_subset()
+                
+                # pixel level 
+                image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
+                
+                rendered_list.append(image)
+                depth_list.append(depth)
+                alpha_list.append(alphaLeft)
+                
+                # gaussian points level
+                viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+                
+                viewspace_points_list.append(viewspace_point_tensor)
+                visibility_filter_list.append(visibility_filter)
+                radii_list.append(radii)
+                
+        cpu_merge_result = merge_opt_kid(rendered_list, depth_list, alpha_list)
+        C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
+        prefix_T = cpu_merge_result["prefix_T"]
+        block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
+        K, C, H, W = C_sorted.shape   # C应该=3
+        colors_bg = cpu_merge_result["bg_rgb"]
+
         visible_pts = 0
         visible_model_idx = []
-        
         pts_total = 0
         
-        for idx, model in enumerate(model_list):
+        # 遍历所有block 轮流当active block
+        for index, block_id in enumerate(in_frustum_block_ids):
+            model = model_list[block_id]
             pts_total += model._xyz.shape[0]
-            # this model has no point in the view frustum in this view
-            if model.visible_idx.shape[0] == 0:
-                continue
-            
-            visible_model_idx.append(idx)
             visible_pts += model.visible_idx.shape[0]
             
             model.set_subset(model.visible_idx)
@@ -287,98 +320,103 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # pixel level 
             image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
             
-            rendered_list.append(image)
-            depth_list.append(depth)
-            alpha_list.append(alphaLeft)
-            
             # gaussian points level
             viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             
-            viewspace_points_list.append(viewspace_point_tensor)
-            visibility_filter_list.append(visibility_filter)
-            radii_list.append(radii)
+            rank_map = block_rank[index]  # [H,W]，当前block的渲染结果在每个像素上的排序位置
+            idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
+            idx = idx.expand(1, C, H, W)               # [1,3,H,W]
             
+            # 3. 当前块位置能拿到的透射率
+            prefix_T_k = prefix_T[:, 0].gather(dim=0, index=rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
 
-        merged_pkg = merge_opt_kid(rendered_list, depth_list, alpha_list)
-        image, colors_bg = merged_pkg["final_rgb"], merged_pkg["bg_rgb"]
-    
-        if viewpoint_cam.alpha_mask is not None:
-            alpha_mask = viewpoint_cam.alpha_mask.cuda()
-            image *= alpha_mask
-        
+            # 4. 当前块在最终结果中贡献的颜色(用于从全量渲染结果中扣除当前块的旧贡献，得到背景图)
+            C_sorted_k = C_sorted.gather(dim=0,index=idx).squeeze(0)   # [3,H,W]   
+            
+            # 5. 从最终结果中扣除当前块的贡献，得到背景图
+            C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k                  
+            
+            # 6. 带梯度的渲染结果
+            C_active = render_pkg["render"]      # [3,H,W], has grad   
+            
+            # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
+            image = C_base + prefix_T_k * C_active
+            
+            if viewpoint_cam.alpha_mask is not None:
+                alpha_mask = viewpoint_cam.alpha_mask.cuda()
+                image *= alpha_mask
+                
+            # Loss
+            gt_image = viewpoint_cam.original_image.cuda()
+            Ll1 = l1_loss(image, gt_image)
+            ssim_value = ssim(image, gt_image)
+            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
+            # Depth regularization
+            Ll1depth = 0
+            diff_gaussian_rasterization.set_colors_bg(colors_bg)
+            loss.backward()
+
+            with torch.no_grad():
+                # Progress bar
+                ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+                ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
+                
+                if iteration % 10 == 0:
+                    progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
+                    progress_bar.update(10)
+                    log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total}
+                    LOGGER.info(log)
+                    if WANDB and not DEBUG_MODE:
+                        wandb.log(log, step=iteration)
+                if iteration == opt.iterations:
+                    progress_bar.close()
+
+                if (iteration in saving_iterations):
+                    print("\n[ITER {}] Saving Gaussians".format(iteration))
+                    point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}")
+                    for idx, model in enumerate(model_list):
+                        model.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{idx}.ply"), include_block=False)
+
+                # Densification
+                if iteration < opt.densify_until_iter:
+                    for idx, model_idx in enumerate(visible_model_idx):
+                        model = model_list[model_idx]
+                        viewspace_points = viewspace_points_list[idx]
+                        radii = radii_list[idx]
+                        global_viewspace_points_grad = torch.zeros(model.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
+                        global_viewspace_points_grad[model.visible_idx] = viewspace_points.grad
+                        visibility_filter = visibility_filter_list[idx]
+                        global_visibility_filter = model.visible_idx[visibility_filter]
+                        
+                        model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii[visibility_filter])
+                        model.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
+                    
+                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        for idx, model in enumerate(model_list):
+                            model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                        if WANDB:
+                            wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
+                    
+                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                        for model in model_list:
+                            model.reset_opacity()
+
+
+                # Optimizer step
+                if iteration < opt.iterations:
+                    for model in model_list:
+                        model.optimizer.step()
+                        model.optimizer.zero_grad(set_to_none = True)
+                        
         if viewpoint_cam.image_name == debug_image_name:
             torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
-
-        # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        ssim_value = ssim(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
-
-        # Depth regularization
-        Ll1depth = 0
-        diff_gaussian_rasterization.set_colors_bg(colors_bg)
-        loss.backward()
-
-        with torch.no_grad():
-            # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
-            
-            if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
-                progress_bar.update(10)
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total}
-                LOGGER.info(log)
-                if WANDB and not DEBUG_MODE:
-                    wandb.log(log, step=iteration)
-            if iteration == opt.iterations:
-                progress_bar.close()
-
-            if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
-                point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}")
-                for idx, model in enumerate(model_list):
-                    model.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{idx}.ply"), include_block=False)
-
-            # Densification
-            if iteration < opt.densify_until_iter:
-                for idx, model_idx in enumerate(visible_model_idx):
-                    model = model_list[model_idx]
-                    viewspace_points = viewspace_points_list[idx]
-                    radii = radii_list[idx]
-                    global_viewspace_points_grad = torch.zeros(model.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
-                    global_viewspace_points_grad[model.visible_idx] = viewspace_points.grad
-                    visibility_filter = visibility_filter_list[idx]
-                    global_visibility_filter = model.visible_idx[visibility_filter]
                     
-                    model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii[visibility_filter])
-                    model.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
-                
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    for idx, model in enumerate(model_list):
-                        model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-                    if WANDB:
-                        wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
-                
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    for model in model_list:
-                        model.reset_opacity()
-
-
-            # Optimizer step
-            if iteration < opt.iterations:
-                for model in model_list:
-                    model.optimizer.step()
-                    model.optimizer.zero_grad(set_to_none = True)
-
-                    
-            # if (iteration in checkpoint_iterations):
-            #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
-            #     pth_path = os.path.join(args.model_path, f"point_cloud/{BRANCH}")
-            #     torch.save((gaussians.capture(), iteration), pth_path + "/chkpnt" + str(iteration) + ".pth")
+    # if (iteration in checkpoint_iterations):
+    #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
+    #     pth_path = os.path.join(args.model_path, f"point_cloud/{BRANCH}")
+    #     torch.save((gaussians.capture(), iteration), pth_path + "/chkpnt" + str(iteration) + ".pth")
 
 
 
