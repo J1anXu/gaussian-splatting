@@ -73,7 +73,7 @@ run_pipeline() {
     --model_path "$model_path" \
     --git_branch "$GIT_BRANCH" \
     --eval \
-    > "$LOG_ROOT/train_${scene}_{$GIT_BRANCH}.log" 2>&1
+    > "$LOG_ROOT/train_${scene}_$GIT_BRANCH.log" 2>&1
 
   ####################
   # 2. RENDER_P
@@ -82,7 +82,7 @@ run_pipeline() {
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
     --skip_train \
-    > "$LOG_ROOT/render_p_${scene}_{$GIT_BRANCH}.log" 2>&1
+    > "$LOG_ROOT/render_p_${scene}_$GIT_BRANCH.log" 2>&1
 
   ####################
   # 3. METRICS_P
@@ -90,7 +90,7 @@ run_pipeline() {
   python metrics_p.py \
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
-    > "$LOG_ROOT/metrics_p_${scene}_{$GIT_BRANCH}.log" 2>&1
+    > "$LOG_ROOT/metrics_p_${scene}_$GIT_BRANCH.log" 2>&1
 
   echo "✅ Finished $scene on GPU $gpu"
 }
