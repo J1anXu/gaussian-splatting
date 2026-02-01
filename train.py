@@ -87,13 +87,15 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     
+    colors_bg = None
+    
     for iteration in range(first_iter, opt.iterations + 1):
         # partition
         if config.PARTITIONING_ENABLED:
             if initial_gaussians._xyz.shape[0] > 300_000:
                 print(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
                 LOGGER.info(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
-                return scene, iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar
+                return scene, iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg
             
         initial_gaussians.update_learning_rate(iteration)
         
@@ -149,13 +151,15 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
+        if colors_bg is None:
+            colors_bg = torch.zeros_like(gt_image)
         Ll1 = l1_loss(image, gt_image)
         ssim_value = ssim(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
         # Depth regularization
         Ll1depth = 0
-        diff_gaussian_rasterization.set_colors_bg(bg)
+        diff_gaussian_rasterization.set_colors_bg(colors_bg)
         loss.backward()
 
         with torch.no_grad():
@@ -200,7 +204,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
 
 def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
-    scene, old_iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar = res
+    scene, old_iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg = res
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -356,10 +360,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     for idx, model in enumerate(model_list):
                         model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-                        
-                    if WANDB and initial_gaussians.partitioned and not DEBUG_MODE:
+                    if WANDB:
                         wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
-
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     for model in model_list:
@@ -434,7 +436,7 @@ if __name__ == "__main__":
         BRANCH = get_git_branch()
     
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
-    # DEBUG_MODE = sys.gettrace() is not None
+    DEBUG_MODE = sys.gettrace() is not None
     print_config()
     
     if WANDB and not DEBUG_MODE:
