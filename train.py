@@ -93,7 +93,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     for iteration in range(first_iter, opt.iterations + 1):
         # partition
         if config.PARTITIONING_ENABLED:
-            if initial_gaussians._xyz.shape[0] > 300_000:
+            if initial_gaussians._xyz.shape[0] > config.SPLIT_SIZE:
                 print(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
                 LOGGER.info(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
                 return scene, iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg
@@ -230,7 +230,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     submodel_list: List[GaussianModel] = gaussians.split()
         
     for submodel in submodel_list:
-        submodel.training_setup(opt)
+        submodel.training_setup(opt, device = "cpu")
         
     for iteration in range(first_iter, opt.iterations + 1):
         
