@@ -25,7 +25,7 @@ set -o pipefail
 
 # GPU 与 scene 对应关系（一个 GPU 一个队列）
 GPUS=(1)
-SCENES=(bicycle)
+SCENES=(bonsai)
 
 DATA_ROOT=/home/jian/data/mip360
 OUT_ROOT=output/mip360
