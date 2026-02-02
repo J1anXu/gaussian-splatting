@@ -236,7 +236,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     cpu_full_proj_transform_dict = {}
     for cam in scene.getTrainCameras():
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
-        
+    
+    
+    time_start = time.time()
     for iteration in range(first_iter, opt.iterations + 1):
         
         for submodel in submodel_list:
@@ -397,8 +399,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 progress_bar.update(10)
                 if iteration == opt.iterations:
                     progress_bar.close()
-                
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total}
+                time_spent = time.time() - time_start
+                log = {"iter": iteration, "loss": ema_loss_for_log, "time_spent": time_spent, "pts_in_frustum": visible_pts, "pts": pts_total}
                 
                 # logging
                 LOGGER.info(log)
