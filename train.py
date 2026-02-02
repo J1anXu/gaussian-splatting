@@ -236,9 +236,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     cpu_full_proj_transform_dict = {}
     for cam in scene.getTrainCameras():
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
-        
+    
+    
+    time_start = time.time()
     for iteration in range(first_iter, opt.iterations + 1):
-        time_start = time.time()
+        
         for submodel in submodel_list:
             submodel.update_learning_rate(iteration)
         
