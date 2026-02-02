@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import threading
 import torch
 from torch import nn
 import numpy as np
@@ -36,6 +37,12 @@ class Camera(nn.Module):
         self.image_path = image_path
         self.invdepthmap_path = invdepthmap_path
         self.resolution = resolution  # (w,h)
+        self._prefetch_thread = None
+        self._prefetched_image = None
+        self._prefetch_lock = threading.Lock()
+        
+        
+        
         try:
             self.data_device = torch.device(data_device)
         except Exception as e:
@@ -60,6 +67,8 @@ class Camera(nn.Module):
         # self.original_image = gt_image.clamp(0.0, 1.0).to(self.data_device)
         # self.image_width = self.original_image.shape[2]
         # self.image_height = self.original_image.shape[1]
+        self.image_width  = resolution[0]
+        self.image_height = resolution[1]
 
         self.invdepthmap = None
         self.depth_reliable = False
@@ -147,7 +156,76 @@ class Camera(nn.Module):
         depth = depth.astype(np.float32)
         depth = depth / (512.0 if self.is_nerf_synthetic else float(2**16))
         return depth  # CPU numpy
-        
+    
+    def prefetch_image(self):
+        # ❗如果已经在预加载 or 已经加载好，直接跳过
+        if self._prefetch_thread is not None or self._prefetched_image is not None:
+            return
+
+        def _load():
+            try:
+                with Image.open(self.image_path) as img:
+                    image = img.copy()
+                # 用锁写结果，避免竞争
+                with self._prefetch_lock:
+                    self._prefetched_image = image
+            finally:
+                # 标记线程结束
+                self._prefetch_thread = None
+
+        # 启动后台线程（daemon 不阻塞进程退出）
+        t = threading.Thread(target=_load, daemon=True)
+        self._prefetch_thread = t
+        t.start()
+
+
+    def load_image(self, device="cuda"):
+        # 1. 拿到 PIL.Image（来自 prefetch 或磁盘）
+        if self._prefetched_image is not None:
+            img = self._prefetched_image
+            self._prefetched_image = None
+        elif self._prefetch_thread is not None:
+            self._prefetch_thread.join()
+            self._prefetch_thread = None
+            img = self._prefetched_image
+            self._prefetched_image = None
+        else:
+            with Image.open(self.image_path) as im:
+                img = im.copy()
+
+        # 2. PIL → Tensor
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        W, H = self.resolution
+        if img.size != (W, H):
+            img = img.resize((W, H), Image.BILINEAR)
+
+        arr = np.asarray(img).astype(np.float32) / 255.0   # [H,W,3]
+        tensor = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+
+        return tensor.to(device, non_blocking=True)
+
+
+    def prefetch_image(self):
+        # 已经有数据 or 正在加载 → 不重复开线程
+        if self._prefetched_image is not None or self._prefetch_thread is not None:
+            return
+
+        def _load():
+            try:
+                with Image.open(self.image_path) as im:
+                    img = im.copy()
+                with self._prefetch_lock:
+                    self._prefetched_image = img   # ✅ 真正写入
+            finally:
+                self._prefetch_thread = None
+
+        t = threading.Thread(target=_load, daemon=True)
+        self._prefetch_thread = t
+        t.start()
+
+
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
         self.image_width = width

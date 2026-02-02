@@ -113,6 +113,9 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
         vind = viewpoint_indices.pop(rand_idx)
 
+        # asyn1 Pro: prefetch
+        viewpoint_cam.prefetch_image()
+
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
@@ -150,11 +153,11 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
         if viewpoint_cam.image_name == debug_image_name:
             torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+            
+        # asyn1 Con
+        gt_image = viewpoint_cam.load_image().to("cuda", non_blocking=True)
 
         # Loss
-        # gt_image = viewpoint_cam.original_image.cuda()
-        gt_image = viewpoint_cam.load_original_image(device="cuda")
-
         
         if colors_bg is None:
             colors_bg = torch.zeros_like(gt_image)
@@ -251,7 +254,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         if iteration % 1000 == 0:
             for submodel in submodel_list:
                 submodel.oneupSHdegree()
-
+                
         # Pick a random Camera
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
@@ -259,6 +262,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         rand_idx = randint(0, len(viewpoint_indices) - 1)
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
         vind = viewpoint_indices.pop(rand_idx)
+
+        viewpoint_cam.prefetch_image()
 
         # Render
         if (iteration - 1) == debug_from:
@@ -312,6 +317,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = merge_res["bg_rgb"]
         
+        gt_image = viewpoint_cam.load_image().to("cuda", non_blocking=True)
         
         # 遍历所有可见block 轮流当active block
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
@@ -345,12 +351,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
             composed_img = C_base + prefix_T_k * C_active
             
-            if viewpoint_cam.alpha_mask is not None:
-                alpha_mask = viewpoint_cam.alpha_mask.cuda()
-                composed_img *= alpha_mask
                 
             # Loss
-            gt_image = viewpoint_cam.original_image.cuda()
             Ll1 = l1_loss(composed_img, gt_image)
             ssim_value = ssim(composed_img, gt_image)
             loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
