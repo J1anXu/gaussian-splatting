@@ -121,18 +121,18 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         # frustum culling
         if config.FRUSTUM_CULLING_ENABLED:
             visible_mask = frustum_culling(initial_gaussians._xyz, viewpoint_cam.full_proj_transform)
-            initial_gaussians.visible_gaussian_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
+            initial_gaussians.visible_points = torch.nonzero(visible_mask, as_tuple=True)[0]
         else:
-            initial_gaussians.visible_gaussian_indices = torch.arange(initial_gaussians._xyz.shape[0], device="cuda")
+            initial_gaussians.visible_points = torch.arange(initial_gaussians._xyz.shape[0], device="cuda")
         
 
         visible_pts = 0        
         pts_total = 0
 
         pts_total += initial_gaussians._xyz.shape[0]
-        visible_pts += initial_gaussians.visible_gaussian_indices.shape[0]
+        visible_pts += initial_gaussians.visible_points.shape[0]
         
-        initial_gaussians.active(initial_gaussians.visible_gaussian_indices)
+        initial_gaussians.active(initial_gaussians.visible_points)
         render_pkg = render(viewpoint_cam, initial_gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
         initial_gaussians.deactive()
         
@@ -183,8 +183,8 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             # Densification
             if iteration < opt.densify_until_iter:
                 global_viewspace_points_grad = torch.zeros(initial_gaussians.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
-                global_viewspace_points_grad[initial_gaussians.visible_gaussian_indices] = viewspace_point_tensor.grad
-                global_visibility_filter = initial_gaussians.visible_gaussian_indices[visibility_filter]
+                global_viewspace_points_grad[initial_gaussians.visible_points] = viewspace_point_tensor.grad
+                global_visibility_filter = initial_gaussians.visible_points[visibility_filter]
                 
                 initial_gaussians.max_radii2D[global_visibility_filter] = torch.max(initial_gaussians.max_radii2D[global_visibility_filter], radii[visibility_filter])
                 initial_gaussians.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
@@ -227,20 +227,20 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     gaussians.build_split_indices()
     # gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
     
-    subset_list: List[GaussianModel] = gaussians.split()
+    submodel_list: List[GaussianModel] = gaussians.split()
         
-    for subset in subset_list:
-        subset.training_setup(opt)
+    for submodel in submodel_list:
+        submodel.training_setup(opt)
         
     for iteration in range(first_iter, opt.iterations + 1):
         
-        for subset in subset_list:
-            subset.update_learning_rate(iteration)
+        for submodel in submodel_list:
+            submodel.update_learning_rate(iteration)
         
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
-            for subset in subset_list:
-                subset.oneupSHdegree()
+            for submodel in submodel_list:
+                submodel.oneupSHdegree()
 
         # Pick a random Camera
         if not viewpoint_stack:
@@ -258,32 +258,30 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         
         # frustum culling
         if config.FRUSTUM_CULLING_ENABLED:
-            for subset in subset_list:
-                visible_mask = frustum_culling(subset._xyz, viewpoint_cam.full_proj_transform)
-                subset.visible_gaussian_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
+            for submodel in submodel_list:
+                visible_mask = frustum_culling(submodel._xyz, viewpoint_cam.full_proj_transform)
+                submodel.visible_points = torch.nonzero(visible_mask, as_tuple=True)[0]
         else:
-            for subset in subset_list:
-                subset.visible_gaussian_indices = torch.arange(subset._xyz.shape[0], device="cuda")
+            for submodel in submodel_list:
+                submodel.visible_points = torch.arange(submodel._xyz.shape[0], device="cuda")
         
         # 无渲染全部结果 为计算Loss做准备
         rendered_list, depth_list, alpha_list = [], [], []
-        visible_subset_id_list = []
+        visible_submodel_id_list = []
         visible_pts = 0
         
         with torch.no_grad():
-            for subset_id, subset in enumerate(subset_list):
+            for submodel_id, submodel in enumerate(submodel_list):
                 
-                if subset.visible_gaussian_indices.shape[0] == 0:
+                if submodel.visible_points.shape[0] == 0:
                     continue
                 
-                visible_pts += subset.visible_gaussian_indices.shape[0]
-                visible_subset_id_list.append(subset_id)
-                
-                active_gaussians_mask = subset.visible_gaussian_indices
-                
-                subset.active(active_gaussians_mask)
-                render_pkg = render(viewpoint_cam, subset, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                subset.deactive()
+                visible_pts += submodel.visible_points.shape[0]
+                visible_submodel_id_list.append(submodel_id)
+                                
+                submodel.active(submodel.visible_points)
+                render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                submodel.deactive()
                 
                 # pixel level 
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
@@ -302,35 +300,33 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         
         
         # 遍历所有可见block 轮流当active block
-        for subset_id, rank_map in zip(visible_subset_id_list, block_rank):
-            subset: GaussianModel = subset_list[subset_id]
-            
-            active_gaussians_mask = subset.visible_gaussian_indices
-            
-            subset.active(active_gaussians_mask)
-            render_pkg = render(viewpoint_cam, subset, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-            subset.deactive()
+        for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
+            submodel: GaussianModel = submodel_list[submodel_id]
+                        
+            submodel.active(submodel.visible_points)
+            render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            submodel.deactive()
             
             # pixel level 
-            subset_img = render_pkg["render"]
+            sub_img = render_pkg["render"]
             
             # gaussian points level
-            subset_viewspace_point_tensor, subset_visibility_filter, subset_radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+            sub_viewspace_point_tensor, sub_visibility_filter, sub_radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             
            # 当前subset的渲染结果在每个像素上的排序位置
-            subset_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
+            submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
             
             # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
             prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
 
             # 4. 当前块(index = idx)块提供的颜色
-            C_sorted_k = C_sorted.gather(dim=0, index=subset_rank_per_pixel).squeeze(0)   # [3,H,W]   
+            C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]   
             
             # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
             C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k                  
             
             # 6. 带梯度的渲染结果
-            C_active = subset_img      # [3,H,W], has grad   
+            C_active = sub_img      # [3,H,W], has grad   
             
             # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
             composed_img = C_base + prefix_T_k * C_active
@@ -353,24 +349,24 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with torch.no_grad():
                 # Densification
                 if iteration < opt.densify_until_iter:
-                    global_viewspace_points_grad = torch.zeros(subset.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
-                    global_viewspace_points_grad[subset.visible_gaussian_indices] = subset_viewspace_point_tensor.grad
-                    global_visibility_filter = subset.visible_gaussian_indices[subset_visibility_filter]
+                    global_viewspace_points_grad = torch.zeros(submodel.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
+                    global_viewspace_points_grad[submodel.visible_points] = sub_viewspace_point_tensor.grad
+                    global_visibility_filter = submodel.visible_points[sub_visibility_filter]
                     
-                    subset.max_radii2D[global_visibility_filter] = torch.max(subset.max_radii2D[global_visibility_filter], subset_radii[subset_visibility_filter])
-                    subset.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
+                    submodel.max_radii2D[global_visibility_filter] = torch.max(submodel.max_radii2D[global_visibility_filter], sub_radii[sub_visibility_filter])
+                    submodel.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
                     
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        subset.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                        submodel.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
                         
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        subset.reset_opacity()
+                        submodel.reset_opacity()
                         
                 # Optimizer step
                 if iteration < opt.iterations:
-                        subset.optimizer.step()
-                        subset.optimizer.zero_grad(set_to_none = True)
+                        submodel.optimizer.step()
+                        submodel.optimizer.zero_grad(set_to_none = True)
                         
                         
         with torch.no_grad():
@@ -379,8 +375,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
             
             pts_total = 0
-            for subset in subset_list:
-                pts_total += subset._xyz.shape[0]
+            for submodel in submodel_list:
+                pts_total += submodel._xyz.shape[0]
             
             
             if iteration % 10 == 0:
@@ -398,14 +394,14 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 # wandb logging
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
-                    wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(subset_list)}, step=iteration)
+                    wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(submodel_list)}, step=iteration)
             
         # saving Gaussians ply    
         if (iteration in saving_iterations):
             print("\n[ITER {}] Saving Gaussians".format(iteration))
             point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}")
-            for subset_id, subset in enumerate(subset_list):
-                subset.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{subset_id}.ply"), include_block=False)
+            for submodel_id, submodel in enumerate(submodel_list):
+                submodel.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{submodel_id}.ply"), include_block=False)
                 
         # save debug image
         if viewpoint_cam.image_name == debug_image_name:

@@ -72,7 +72,7 @@ class GaussianModel:
         self.visible_indices = None
         self.block_bounds = []
         self.block_idx_list = []
-        self.visible_gaussian_indices = None
+        self.visible_points = None
         self.partitioned = False
         self.setup_functions()
         
@@ -452,10 +452,7 @@ class GaussianModel:
 
         indices = self.block_idx_list[idx].to(self._xyz.device)
 
-        kid = GaussianModel(
-            sh_degree=self.max_sh_degree,
-            optimizer_type=self.optimizer_type
-        )
+        kid = GaussianModel( sh_degree=self.max_sh_degree, optimizer_type=self.optimizer_type )
 
         # ====== 核心参数：深拷贝 & 断梯度 ======
         kid._xyz = nn.Parameter(self._xyz[indices].clone().detach())
@@ -471,9 +468,7 @@ class GaussianModel:
         # ====== 其他状态 ======
         kid.active_sh_degree = self.active_sh_degree
         kid.spatial_lr_scale = self.spatial_lr_scale
-        kid.max_radii2D = torch.zeros(
-            kid._xyz.shape[0], device=kid._xyz.device
-        )
+        kid.max_radii2D = torch.zeros( kid._xyz.shape[0], device=kid._xyz.device )
 
         kid.block_bounds = None
         kid.block_idx_list = None
@@ -484,7 +479,7 @@ class GaussianModel:
 
     def split(self):
         subsets = []
-        for idx in self.block_idx_list:
+        for idx in range(len(self.block_idx_list)):
             subset = self.get_subset_by_id(idx)
             subsets.append(subset)
             print(f"GS {idx} size: {subset._xyz.shape[0]}")
