@@ -72,7 +72,6 @@ class GaussianModel:
         self.visible_indices = None
         self.block_bounds = []
         self.block_idx_list = []
-        self.visible_points = None
         self.partitioned = False
         self.setup_functions()
         
@@ -645,10 +644,10 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor_grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    def active(self, visible_indices):
+    def activate(self, visible_indices):
         self.visible_indices = visible_indices
         
-    def deactive(self):
+    def deactivate(self):
         self.visible_indices = None    
         
         

@@ -121,20 +121,20 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         # frustum culling
         if config.FRUSTUM_CULLING_ENABLED:
             visible_mask = frustum_culling(initial_gaussians._xyz, viewpoint_cam.full_proj_transform)
-            initial_gaussians.visible_points = torch.nonzero(visible_mask, as_tuple=True)[0]
+            initial_gaussians.visible_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
         else:
-            initial_gaussians.visible_points = torch.arange(initial_gaussians._xyz.shape[0], device="cuda")
+            initial_gaussians.visible_visible_indicespoints = torch.arange(initial_gaussians._xyz.shape[0], device="cuda")
         
 
         visible_pts = 0        
         pts_total = 0
 
         pts_total += initial_gaussians._xyz.shape[0]
-        visible_pts += initial_gaussians.visible_points.shape[0]
+        visible_pts += initial_gaussians.visible_indices.shape[0]
         
-        initial_gaussians.active(initial_gaussians.visible_points)
+        initial_gaussians.activate(initial_gaussians.visible_indices)
         render_pkg = render(viewpoint_cam, initial_gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-        initial_gaussians.deactive()
+        initial_gaussians.deactivate()
         
         # pixel level 
         image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
@@ -183,8 +183,8 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             # Densification
             if iteration < opt.densify_until_iter:
                 global_viewspace_points_grad = torch.zeros(initial_gaussians.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
-                global_viewspace_points_grad[initial_gaussians.visible_points] = viewspace_point_tensor.grad
-                global_visibility_filter = initial_gaussians.visible_points[visibility_filter]
+                global_viewspace_points_grad[initial_gaussians.visible_indices] = viewspace_point_tensor.grad
+                global_visibility_filter = initial_gaussians.visible_indices[visibility_filter]
                 
                 initial_gaussians.max_radii2D[global_visibility_filter] = torch.max(initial_gaussians.max_radii2D[global_visibility_filter], radii[visibility_filter])
                 initial_gaussians.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
@@ -232,6 +232,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     for submodel in submodel_list:
         submodel.training_setup(opt, device = "cpu")
         
+    cpu_full_proj_transform_dict = []
+    for cam in scene.getTrainCameras():
+        cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
+        
     for iteration in range(first_iter, opt.iterations + 1):
         
         for submodel in submodel_list:
@@ -258,12 +262,16 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         
         # frustum culling
         if config.FRUSTUM_CULLING_ENABLED:
-            for submodel in submodel_list:
-                visible_mask = frustum_culling(submodel._xyz, viewpoint_cam.full_proj_transform)
-                submodel.visible_points = torch.nonzero(visible_mask, as_tuple=True)[0]
+            for model in submodel_list:
+                # TODO 可以做一个懒加载设计 每隔一段时间做一次 fc 不必每次都做 节约时间 成为一个contribution
+                if model._xyz.is_cuda:
+                    visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
+                else:
+                    visible_mask = frustum_culling(model._xyz, cpu_full_proj_transform_dict[viewpoint_cam.image_name])
+                model.visible_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
         else:
-            for submodel in submodel_list:
-                submodel.visible_points = torch.arange(submodel._xyz.shape[0], device="cuda")
+            for model in submodel_list:
+                model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
         
         # 无渲染全部结果 为计算Loss做准备
         rendered_list, depth_list, alpha_list = [], [], []
@@ -273,15 +281,15 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         with torch.no_grad():
             for submodel_id, submodel in enumerate(submodel_list):
                 
-                if submodel.visible_points.shape[0] == 0:
+                if submodel.visible_indices.shape[0] == 0:
                     continue
                 
-                visible_pts += submodel.visible_points.shape[0]
+                visible_pts += submodel.visible_indices.shape[0]
                 visible_submodel_id_list.append(submodel_id)
                                 
-                submodel.active(submodel.visible_points)
+                submodel.activate(submodel.visible_indices)
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                submodel.deactive()
+                submodel.deactivate()
                 
                 # pixel level 
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
@@ -303,9 +311,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
                         
-            submodel.active(submodel.visible_points)
+            submodel.activate(submodel.visible_indices)
             render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-            submodel.deactive()
+            submodel.deactivate()
             
             # pixel level 
             sub_img = render_pkg["render"]
@@ -350,8 +358,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 # Densification
                 if iteration < opt.densify_until_iter:
                     global_viewspace_points_grad = torch.zeros(submodel.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
-                    global_viewspace_points_grad[submodel.visible_points] = sub_viewspace_point_tensor.grad
-                    global_visibility_filter = submodel.visible_points[sub_visibility_filter]
+                    global_viewspace_points_grad[submodel.visible_indices] = sub_viewspace_point_tensor.grad
+                    global_visibility_filter = submodel.visible_indices[sub_visibility_filter]
                     
                     submodel.max_radii2D[global_visibility_filter] = torch.max(submodel.max_radii2D[global_visibility_filter], sub_radii[sub_visibility_filter])
                     submodel.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
