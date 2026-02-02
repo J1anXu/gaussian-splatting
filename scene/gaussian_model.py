@@ -69,10 +69,14 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         # visible_indices should keep None unless set by set_subset
-        self.visible_indices = None
+        self.visible_indices = None # 用在第一次render
         self.block_bounds = []
         self.block_idx_list = []
         self.partitioned = False
+        
+        self.subset_mode = False
+        self.subset_indices = None # 用在第二次render
+        
         self.setup_functions()
         
     def dump_to_cpu(self):
@@ -649,7 +653,38 @@ class GaussianModel:
         
     def deactivate(self):
         self.visible_indices = None    
+
+
+    def set_cpu_subset_to_gpu(self, indices_to_send, requires_grad=True):
+        # 
+        def _to_cpu_index(idx):
+            if not torch.is_tensor(idx):
+                idx = torch.tensor(idx, dtype=torch.long)
+            return idx.to("cpu")
+
+        idx = _to_cpu_index(indices_to_send)
         
+        def send_subset_to_gpu(tensor):
+            subset = tensor[idx].cuda(non_blocking=True)
+            if requires_grad:
+                subset.requires_grad_(True)
+                
+            return subset
+        
+        # --------------- Parameter subset (with gradients) ---------------
+        self._xyz_gpu           = send_subset_to_gpu(self._xyz)
+        self._opacity_gpu       = send_subset_to_gpu(self._opacity)
+        self._scaling_gpu       = send_subset_to_gpu(self._scaling)
+        self._rotation_gpu      = send_subset_to_gpu(self._rotation)
+        self._features_dc_gpu   = send_subset_to_gpu(self._features_dc)
+        self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
+        
+        self.subset_indices = idx
+        self.subset_mode = True
+
+    def end_cpu_subset_to_gpu(self):
+        self.subset_indices = None
+        self.subset_mode = False
         
     def build_split_indices(self):
         block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz)

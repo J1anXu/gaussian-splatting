@@ -287,9 +287,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 visible_pts += submodel.visible_indices.shape[0]
                 visible_submodel_id_list.append(submodel_id)
                                 
-                submodel.activate(submodel.visible_indices)
+                submodel.set_cpu_subset_to_gpu(submodel.visible_indices)
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                submodel.deactivate()
+                submodel.end_cpu_subset_to_gpu()
                 
                 # pixel level 
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
