@@ -232,7 +232,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     for submodel in submodel_list:
         submodel.training_setup(opt, device = "cpu")
         
-    cpu_full_proj_transform_dict = []
+    cpu_full_proj_transform_dict = {}
     for cam in scene.getTrainCameras():
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
         
@@ -287,9 +287,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 visible_pts += submodel.visible_indices.shape[0]
                 visible_submodel_id_list.append(submodel_id)
                                 
-                submodel.set_cpu_subset_to_gpu(submodel.visible_indices)
+                submodel.send(submodel.visible_indices)
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                submodel.end_cpu_subset_to_gpu()
+                submodel.offline()
                 
                 # pixel level 
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
@@ -311,9 +311,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
                         
-            submodel.activate(submodel.visible_indices)
+            submodel.send(submodel.visible_indices)
             render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-            submodel.deactivate()
+            submodel.offline()
             
             # pixel level 
             sub_img = render_pkg["render"]

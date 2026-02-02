@@ -655,7 +655,7 @@ class GaussianModel:
         self.visible_indices = None    
 
 
-    def set_cpu_subset_to_gpu(self, indices_to_send, requires_grad=True):
+    def send(self, indices_to_send, requires_grad=True):
         # 
         def _to_cpu_index(idx):
             if not torch.is_tensor(idx):
@@ -682,7 +682,7 @@ class GaussianModel:
         self.subset_indices = idx
         self.subset_mode = True
 
-    def end_cpu_subset_to_gpu(self):
+    def offline(self):
         self.subset_indices = None
         self.subset_mode = False
         
