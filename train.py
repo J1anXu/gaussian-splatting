@@ -221,7 +221,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     gaussians: GaussianModel = scene.gaussians
     
     # generate a initialized gs copy
-    gaussians = gaussians.dump_to_cpu()
+    # gaussians = gaussians.dump_to_cpu()
     
     # partition
     gaussians.build_split_indices()
