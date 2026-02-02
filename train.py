@@ -307,7 +307,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = merge_res["bg_rgb"]
         
-        
+        time_start = time.time()
         # 遍历所有可见block 轮流当active block
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
@@ -397,8 +397,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 progress_bar.update(10)
                 if iteration == opt.iterations:
                     progress_bar.close()
-                
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total}
+                time_spent = time.time() - time_start
+                log = {"iter": iteration, "loss": ema_loss_for_log, "time_spent": time_spent, "pts_in_frustum": visible_pts, "pts": pts_total}
                 
                 # logging
                 LOGGER.info(log)

@@ -695,12 +695,12 @@ class GaussianModel:
             return subset
         
         # --------------- Parameter subset (with gradients) ---------------
-        # self._xyz_gpu           = send_subset_to_gpu(self._xyz)
-        # self._opacity_gpu       = send_subset_to_gpu(self._opacity)
-        # self._scaling_gpu       = send_subset_to_gpu(self._scaling)
-        # self._rotation_gpu      = send_subset_to_gpu(self._rotation)
-        # self._features_dc_gpu   = send_subset_to_gpu(self._features_dc)
-        # self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
+        self._xyz_gpu           = send_subset_to_gpu(self._xyz)
+        self._opacity_gpu       = send_subset_to_gpu(self._opacity)
+        self._scaling_gpu       = send_subset_to_gpu(self._scaling)
+        self._rotation_gpu      = send_subset_to_gpu(self._rotation)
+        self._features_dc_gpu   = send_subset_to_gpu(self._features_dc)
+        self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
         
         self.subset_mode_2 = True
 
