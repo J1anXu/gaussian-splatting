@@ -157,28 +157,19 @@ class Camera(nn.Module):
         depth = depth / (512.0 if self.is_nerf_synthetic else float(2**16))
         return depth  # CPU numpy
     
-    def prefetch_image(self):
-        # ❗如果已经在预加载 or 已经加载好，直接跳过
-        if self._prefetch_thread is not None or self._prefetched_image is not None:
-            return
+    def load_image_cpu(self):
+        """
+        Load and preprocess GT image on CPU only.
+        Safe to be called in background threads.
+        """
+        image = Image.open(self.image_path).convert("RGB")
 
-        def _load():
-            try:
-                with Image.open(self.image_path) as img:
-                    image = img.copy()
-                # 用锁写结果，避免竞争
-                with self._prefetch_lock:
-                    self._prefetched_image = image
-            finally:
-                # 标记线程结束
-                self._prefetch_thread = None
+        # Resize + to torch tensor (CPU)
+        resized_image_rgb = PILtoTorch(image, self.resolution)[:3, ...]
+        gt_image = resized_image_rgb.clamp(0.0, 1.0)
 
-        # 启动后台线程（daemon 不阻塞进程退出）
-        t = threading.Thread(target=_load, daemon=True)
-        self._prefetch_thread = t
-        t.start()
-
-
+        return gt_image
+    
     def load_image(self, device="cuda"):
         # 1. 拿到 PIL.Image（来自 prefetch 或磁盘）
         if self._prefetched_image is not None:
@@ -238,7 +229,6 @@ class MiniCam:
         self.full_proj_transform = full_proj_transform
         view_inv = torch.inverse(self.world_view_transform)
         self.camera_center = view_inv[3][:3]
-
 
 
 

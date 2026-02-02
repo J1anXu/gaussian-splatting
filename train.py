@@ -15,6 +15,7 @@ import torch
 from random import randint
 
 import torchvision
+from scene.image_reservoir import ImageReservoir
 from utils.debug_utils import save_block_img, save_depth_list, save_rgb_layers, save_layer_contribution
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, merge_opt, merge_opt_kid
@@ -71,7 +72,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
     initial_gaussians.training_setup(opt)
-    
+    image_reservoir = ImageReservoir(scene.getTrainCameras(), capacity=8, device="cuda")
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         initial_gaussians.restore(model_params, opt)
@@ -97,7 +98,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             if initial_gaussians._xyz.shape[0] > config.SPLIT_SIZE:
                 print(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
                 LOGGER.info(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
-                return scene, iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg
+                return scene, iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg, image_reservoir
             
         initial_gaussians.update_learning_rate(iteration)
         
@@ -106,15 +107,15 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             initial_gaussians.oneupSHdegree()
 
         # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-            viewpoint_indices = list(range(len(viewpoint_stack)))
-        rand_idx = randint(0, len(viewpoint_indices) - 1)
-        viewpoint_cam = viewpoint_stack.pop(rand_idx)
-        vind = viewpoint_indices.pop(rand_idx)
+        # if not viewpoint_stack:
+        #     viewpoint_stack = scene.getTrainCameras().copy()
+        #     viewpoint_indices = list(range(len(viewpoint_stack)))
+        # rand_idx = randint(0, len(viewpoint_indices) - 1)
+        # # viewpoint_cam = viewpoint_stack.pop(rand_idx)
+        # vind = viewpoint_indices.pop(rand_idx)
 
-        # asyn1 Pro: prefetch
-        viewpoint_cam.prefetch_image()
+        viewpoint_cam, gt_image = image_reservoir.queue.get()
+
 
         # Render
         if (iteration - 1) == debug_from:
@@ -154,8 +155,6 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         if viewpoint_cam.image_name == debug_image_name:
             torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
             
-        # asyn1 Con
-        gt_image = viewpoint_cam.load_image().to("cuda", non_blocking=True)
 
         # Loss
         
@@ -212,7 +211,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
 
 def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
-    scene, old_iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg = res
+    scene, old_iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg, image_reservoir = res
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -220,8 +219,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    viewpoint_stack = scene.getTrainCameras().copy()
-    viewpoint_indices = list(range(len(viewpoint_stack)))
+    # viewpoint_stack = scene.getTrainCameras().copy()
+    # viewpoint_indices = list(range(len(viewpoint_stack)))
 
     first_iter = old_iteration
     
@@ -256,14 +255,14 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 submodel.oneupSHdegree()
                 
         # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-            viewpoint_indices = list(range(len(viewpoint_stack)))
-        rand_idx = randint(0, len(viewpoint_indices) - 1)
-        viewpoint_cam = viewpoint_stack.pop(rand_idx)
-        vind = viewpoint_indices.pop(rand_idx)
+        # if not viewpoint_stack:
+        #     viewpoint_stack = scene.getTrainCameras().copy()
+        #     viewpoint_indices = list(range(len(viewpoint_stack)))
+        # rand_idx = randint(0, len(viewpoint_indices) - 1)
+        # viewpoint_cam = viewpoint_stack.pop(rand_idx)
+        # vind = viewpoint_indices.pop(rand_idx)
 
-        viewpoint_cam.prefetch_image()
+        viewpoint_cam, gt_image = image_reservoir.queue.get()
 
         # Render
         if (iteration - 1) == debug_from:
@@ -317,7 +316,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = merge_res["bg_rgb"]
         
-        gt_image = viewpoint_cam.load_image().to("cuda", non_blocking=True)
         
         # 遍历所有可见block 轮流当active block
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
