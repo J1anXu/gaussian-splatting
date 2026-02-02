@@ -650,10 +650,10 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor_grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    def active_gaussians(self, visible_indices):
+    def active(self, visible_indices):
         self.visible_indices = visible_indices
         
-    def deactive_gaussians(self):
+    def deactive(self):
         self.visible_indices = None    
         
         

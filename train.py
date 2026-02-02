@@ -132,9 +132,9 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         pts_total += initial_gaussians._xyz.shape[0]
         visible_pts += initial_gaussians.visible_gaussian_indices.shape[0]
         
-        initial_gaussians.active_gaussians(initial_gaussians.visible_gaussian_indices)
+        initial_gaussians.active(initial_gaussians.visible_gaussian_indices)
         render_pkg = render(viewpoint_cam, initial_gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-        initial_gaussians.deactive_gaussians()
+        initial_gaussians.deactive()
         
         # pixel level 
         image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
@@ -281,9 +281,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 
                 active_gaussians_mask = subset.visible_gaussian_indices
                 
-                subset.active_gaussians(active_gaussians_mask)
+                subset.active(active_gaussians_mask)
                 render_pkg = render(viewpoint_cam, subset, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                subset.deactive_gaussians()
+                subset.deactive()
                 
                 # pixel level 
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
@@ -307,9 +307,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             
             active_gaussians_mask = subset.visible_gaussian_indices
             
-            subset.active_gaussians(active_gaussians_mask)
+            subset.active(active_gaussians_mask)
             render_pkg = render(viewpoint_cam, subset, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-            subset.deactive_gaussians()
+            subset.deactive()
             
             # pixel level 
             subset_img = render_pkg["render"]
