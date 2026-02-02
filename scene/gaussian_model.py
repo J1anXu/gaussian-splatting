@@ -69,13 +69,13 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         # visible_indices should keep None unless set by set_subset
-        self.visible_indices = None # 用在第一次render
+        self.visible_indices = None # 
         self.block_bounds = []
         self.block_idx_list = []
         self.partitioned = False
         
-        self.subset_mode = False
-        self.subset_indices = None # 用在第二次render
+        self.subset_mode_1 = False # for render first time
+        self.subset_mode_2 = False # for render second time
         
         self.setup_functions()
         
@@ -130,25 +130,25 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        if self.visible_indices is not None:
+        if self.subset_mode_1:
             return self.scaling_activation(self._scaling[self.visible_indices])
         return self.scaling_activation(self._scaling)
     
     @property
     def get_rotation(self):
-        if self.visible_indices is not None:
+        if self.subset_mode_1:
             return self.rotation_activation(self._rotation[self.visible_indices])
         return self.rotation_activation(self._rotation)
     
     @property
     def get_xyz(self):
-        if self.visible_indices is not None:
+        if self.subset_mode_1:
             return self._xyz[self.visible_indices]
         return self._xyz
     
     @property
     def get_features(self):
-        if self.visible_indices is not None:
+        if self.subset_mode_1:
             features_dc = self._features_dc[self.visible_indices]
             features_rest = self._features_rest[self.visible_indices]
             return torch.cat((features_dc, features_rest), dim=1)
@@ -158,19 +158,19 @@ class GaussianModel:
     
     @property
     def get_features_dc(self):
-        if self.visible_indices is not None:
+        if self.subset_mode_1:
             return self._features_dc[self.visible_indices]
         return self._features_dc
     
     @property
     def get_features_rest(self):
-        if self.visible_indices is not None:
+        if self.subset_mode_1:
             return self._features_rest[self.visible_indices]
         return self._features_rest
     
     @property
     def get_opacity(self):
-        if self.visible_indices is not None:
+        if self.subset_mode_1:
             return self.opacity_activation(self._opacity[self.visible_indices])
         return self.opacity_activation(self._opacity)
     
@@ -185,7 +185,7 @@ class GaussianModel:
     #         return self.pretrained_exposures[image_name]
     
     def get_covariance(self, scaling_modifier = 1):
-        if self.visible_indices is not None:
+        if self.subset_mode_1:
             return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation[self.visible_indices])
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
@@ -648,11 +648,11 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor_grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    def activate(self, visible_indices):
-        self.visible_indices = visible_indices
+    def activate_subset(self):
+        self.subset_mode_1 = True
         
-    def deactivate(self):
-        self.visible_indices = None    
+    def deactivate_subset(self):
+        self.subset_mode_1 = False    
 
 
     def send(self, indices_to_send, requires_grad=True):
