@@ -24,6 +24,9 @@ from utils.general_utils import strip_symmetric, build_scaling_rotation
 from partition import generate_octant_blocks, generate_octant_blocks_kdtree, generate_space_kdtree_blocks
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import copy
+
+
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
 except:
@@ -69,11 +72,24 @@ class GaussianModel:
         self.visible_indices = None
         self.block_bounds = []
         self.block_idx_list = []
-        self.visible_idx = []
+        self.visible_gaussian_indices = None
         self.partitioned = False
         self.setup_functions()
         
+    def dump_to_cpu(self):
+        """
+        Create a frozen CPU snapshot that only serves as
+        initialization source for get_kid().
+        """
+        new = copy.copy(self)
 
+        for k, v in self.__dict__.items():
+            if torch.is_tensor(v):
+                setattr(new, k, v.detach().cpu())
+            elif k == "optimizer":
+                setattr(new, k, None)
+
+        return new
 
     def capture(self):
         return (
@@ -425,7 +441,7 @@ class GaussianModel:
                 self.block_idx_list = block_indices
             
 
-    def get_kid(self, idx, training_args):
+    def get_subset_by_id(self, idx):
         """
         Create an independent GaussianModel for block idx.
         This kid has its OWN parameters and OWN optimizer,
@@ -463,11 +479,16 @@ class GaussianModel:
         kid.block_idx_list = None
         kid.partitioned = False
         kid.visible_indices = None
-
-        # ====== 初始化 optimizer（step = 0） ======
-        kid.training_setup(training_args)
-
+        
         return kid
+
+    def split(self):
+        subsets = []
+        for idx in self.block_idx_list:
+            subset = self.get_subset_by_id(idx)
+            subsets.append(subset)
+            print(f"GS {idx} size: {subset._xyz.shape[0]}")
+        return subsets
 
 
     def replace_tensor_to_optimizer(self, tensor, name):
@@ -629,14 +650,14 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor_grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    def set_subset(self, visible_indices):
+    def active_gaussians(self, visible_indices):
         self.visible_indices = visible_indices
         
-    def clear_subset(self):
+    def deactive_gaussians(self):
         self.visible_indices = None    
         
         
-    def partition(self):
+    def build_split_indices(self):
         block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz)
         self.block_bounds = block_bounds
         self.block_idx_list = block_indices
