@@ -690,7 +690,6 @@ class GaussianModel:
         
         def send_subset_to_gpu(tensor):
             subset = tensor[idx].cuda(non_blocking=True)
-            subset = subset.clone().detach()
             if requires_grad:
                 subset.requires_grad_(True)
             return subset
