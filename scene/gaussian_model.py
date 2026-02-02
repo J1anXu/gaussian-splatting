@@ -132,7 +132,7 @@ class GaussianModel:
     @property
     def get_scaling(self):
         if self.subset_mode_2:
-            return self.scaling_activation(self._scaling[self.visible_indices]).to("cuda")
+            return self.scaling_activation(self._scaling_gpu)
         elif self.subset_mode_1:
             return self.scaling_activation(self._scaling[self.visible_indices])
         else:
@@ -141,7 +141,7 @@ class GaussianModel:
     @property
     def get_rotation(self):
         if self.subset_mode_2:
-            return self.rotation_activation(self._rotation[self.visible_indices]).to("cuda")
+            return self.rotation_activation(self._rotation_gpu)
         elif self.subset_mode_1:
             return self.rotation_activation(self._rotation[self.visible_indices])
         else:
@@ -150,7 +150,7 @@ class GaussianModel:
     @property
     def get_xyz(self):
         if self.subset_mode_2:
-            return self._xyz[self.visible_indices].to("cuda")
+            return self._xyz_gpu
         elif self.subset_mode_1:
             return self._xyz[self.visible_indices]
         else:
@@ -159,8 +159,8 @@ class GaussianModel:
     @property
     def get_features(self):
         if self.subset_mode_2:
-            features_dc = self._features_dc[self.visible_indices].to("cuda")
-            features_rest = self._features_rest[self.visible_indices].to("cuda")
+            features_dc = self._features_dc_gpu
+            features_rest = self._features_rest_gpu
         elif self.subset_mode_1:
             features_dc = self._features_dc[self.visible_indices]
             features_rest = self._features_rest[self.visible_indices]
@@ -172,7 +172,7 @@ class GaussianModel:
     @property
     def get_features_dc(self):
         if self.subset_mode_2:
-            return self._features_dc[self.visible_indices].to("cuda")
+            return self._features_dc_gpu
         elif self.subset_mode_1:
             return self._features_dc[self.visible_indices]
         else:
@@ -181,7 +181,7 @@ class GaussianModel:
     @property
     def get_features_rest(self):
         if self.subset_mode_2:
-            return self._features_rest[self.visible_indices].to("cuda")
+            return self._features_rest_gpu
         elif self.subset_mode_1:
             return self._features_rest[self.visible_indices]
         else:
@@ -190,7 +190,7 @@ class GaussianModel:
     @property
     def get_opacity(self):
         if self.subset_mode_2:
-            return self.opacity_activation(self._opacity[self.visible_indices].to("cuda"))
+            return self.opacity_activation(self._opacity_gpu)
         elif self.subset_mode_1:
             return self.opacity_activation(self._opacity[self.visible_indices])
         else:
@@ -208,7 +208,7 @@ class GaussianModel:
     
     def get_covariance(self, scaling_modifier = 1):
         if self.subset_mode_2:
-            return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation[self.visible_indices].to("cuda"))
+            return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation_gpu)
         elif self.subset_mode_1:
             return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation[self.visible_indices])
         else:
