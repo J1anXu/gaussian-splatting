@@ -15,9 +15,10 @@ import numpy as np
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 from utils.general_utils import PILtoTorch
 import cv2
+from PIL import Image
 
 class Camera(nn.Module):
-    def __init__(self, resolution, colmap_id, R, T, FoVx, FoVy, depth_params, image, invdepthmap,
+    def __init__(self, resolution, colmap_id, R, T, FoVx, FoVy, depth_params, image_path, invdepthmap_path,
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
                  train_test_exp = False, is_test_dataset = False, is_test_view = False
@@ -31,7 +32,10 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
-
+        # Added by jian
+        self.image_path = image_path
+        self.invdepthmap_path = invdepthmap_path
+        self.resolution = resolution  # (w,h)
         try:
             self.data_device = torch.device(data_device)
         except Exception as e:
@@ -39,13 +43,13 @@ class Camera(nn.Module):
             print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
             self.data_device = torch.device("cuda")
 
-        resized_image_rgb = PILtoTorch(image, resolution)
-        gt_image = resized_image_rgb[:3, ...]
-        self.alpha_mask = None
-        if resized_image_rgb.shape[0] == 4:
-            self.alpha_mask = resized_image_rgb[3:4, ...].to(self.data_device)
-        else: 
-            self.alpha_mask = torch.ones_like(resized_image_rgb[0:1, ...].to(self.data_device))
+        # resized_image_rgb = PILtoTorch(image, resolution)
+        # gt_image = resized_image_rgb[:3, ...]
+        # self.alpha_mask = None
+        # if resized_image_rgb.shape[0] == 4:
+        #     self.alpha_mask = resized_image_rgb[3:4, ...].to(self.data_device)
+        # else: 
+        #     self.alpha_mask = torch.ones_like(resized_image_rgb[0:1, ...].to(self.data_device))
 
         if train_test_exp and is_test_view:
             if is_test_dataset:
@@ -53,29 +57,29 @@ class Camera(nn.Module):
             else:
                 self.alpha_mask[..., self.alpha_mask.shape[-1] // 2:] = 0
 
-        self.original_image = gt_image.clamp(0.0, 1.0).to(self.data_device)
-        self.image_width = self.original_image.shape[2]
-        self.image_height = self.original_image.shape[1]
+        # self.original_image = gt_image.clamp(0.0, 1.0).to(self.data_device)
+        # self.image_width = self.original_image.shape[2]
+        # self.image_height = self.original_image.shape[1]
 
         self.invdepthmap = None
         self.depth_reliable = False
-        if invdepthmap is not None:
-            self.depth_mask = torch.ones_like(self.alpha_mask)
-            self.invdepthmap = cv2.resize(invdepthmap, resolution)
-            self.invdepthmap[self.invdepthmap < 0] = 0
-            self.depth_reliable = True
+        # if invdepthmap is not None:
+        #     self.depth_mask = torch.ones_like(self.alpha_mask)
+        #     self.invdepthmap = cv2.resize(invdepthmap, resolution)
+        #     self.invdepthmap[self.invdepthmap < 0] = 0
+        #     self.depth_reliable = True
 
-            if depth_params is not None:
-                if depth_params["scale"] < 0.2 * depth_params["med_scale"] or depth_params["scale"] > 5 * depth_params["med_scale"]:
-                    self.depth_reliable = False
-                    self.depth_mask *= 0
+        #     if depth_params is not None:
+        #         if depth_params["scale"] < 0.2 * depth_params["med_scale"] or depth_params["scale"] > 5 * depth_params["med_scale"]:
+        #             self.depth_reliable = False
+        #             self.depth_mask *= 0
                 
-                if depth_params["scale"] > 0:
-                    self.invdepthmap = self.invdepthmap * depth_params["scale"] + depth_params["offset"]
+        #         if depth_params["scale"] > 0:
+        #             self.invdepthmap = self.invdepthmap * depth_params["scale"] + depth_params["offset"]
 
-            if self.invdepthmap.ndim != 2:
-                self.invdepthmap = self.invdepthmap[..., 0]
-            self.invdepthmap = torch.from_numpy(self.invdepthmap[None]).to(self.data_device)
+        #     if self.invdepthmap.ndim != 2:
+        #         self.invdepthmap = self.invdepthmap[..., 0]
+        #     self.invdepthmap = torch.from_numpy(self.invdepthmap[None]).to(self.data_device)
 
         self.zfar = 100.0
         self.znear = 0.01
@@ -87,6 +91,62 @@ class Camera(nn.Module):
         self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
+        
+    def load_original_image(self, device="cuda"):
+        """
+        Return GT image tensor in [0,1], shape [3,H,W], resized to self.resolution.
+        Does NOT cache -> disk is the source of truth.
+        """
+        W, H = self.resolution  # 你这里 resolution 是 (w,h)
+
+        with Image.open(self.image_path) as img:
+            # 原版 3DGS 常用 RGB；如果有 alpha，也先读出来
+            img = img.convert("RGBA")
+            if (img.size[0], img.size[1]) != (W, H):
+                img = img.resize((W, H), resample=Image.BILINEAR)
+
+            arr = np.array(img).astype(np.float32) / 255.0  # [H,W,4]
+            rgb = arr[..., :3]                               # [H,W,3]
+            alpha = arr[..., 3:4]                            # [H,W,1]
+
+            # 如果你希望像原版那样把 alpha 合成背景：
+            # 这里用黑背景（0）做合成；如果你要白背景，把 bg 改成 1
+            bg = 0.0
+            rgb = rgb * alpha + bg * (1.0 - alpha)
+
+        gt = torch.from_numpy(rgb).permute(2, 0, 1).contiguous()  # [3,H,W]
+        return gt.to(device, non_blocking=True)
+
+    def load_alpha_mask(self, device="cuda"):
+        """
+        If image has alpha channel, return alpha mask tensor [1,H,W] on device.
+        Otherwise return None.
+        """
+        W, H = self.resolution
+        with Image.open(self.image_path) as img:
+            if img.mode != "RGBA":
+                # 没 alpha
+                return None
+            if (img.size[0], img.size[1]) != (W, H):
+                img = img.resize((W, H), resample=Image.BILINEAR)
+            alpha = np.array(img.getchannel("A")).astype(np.float32) / 255.0  # [H,W]
+
+        m = torch.from_numpy(alpha)[None, ...].contiguous()  # [1,H,W]
+        return m.to(device, non_blocking=True)
+
+    def load_invdepth(self):
+        """
+        Load invdepthmap on CPU float32, scaled properly.
+        No cache.
+        """
+        if not self.depth_path:
+            return None
+        depth = cv2.imread(self.depth_path, -1)
+        if depth is None:
+            raise FileNotFoundError(f"Depth file not found or unreadable: {self.depth_path}")
+        depth = depth.astype(np.float32)
+        depth = depth / (512.0 if self.is_nerf_synthetic else float(2**16))
+        return depth  # CPU numpy
         
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
@@ -100,4 +160,7 @@ class MiniCam:
         self.full_proj_transform = full_proj_transform
         view_inv = torch.inverse(self.world_view_transform)
         self.camera_center = view_inv[3][:3]
+
+
+
 
