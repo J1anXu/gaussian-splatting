@@ -132,7 +132,7 @@ class GaussianModel:
     @property
     def get_scaling(self):
         if self.subset_mode_2:
-            return self.scaling_activation(self._scaling_gpu)
+            return self.scaling_activation(self._scaling[self.visible_indices]).to("cuda")
         elif self.subset_mode_1:
             return self.scaling_activation(self._scaling[self.visible_indices])
         else:
@@ -141,7 +141,7 @@ class GaussianModel:
     @property
     def get_rotation(self):
         if self.subset_mode_2:
-            return self.rotation_activation(self._rotation_gpu)
+            return self.rotation_activation(self._rotation[self.visible_indices]).to("cuda")
         elif self.subset_mode_1:
             return self.rotation_activation(self._rotation[self.visible_indices])
         else:
@@ -150,7 +150,7 @@ class GaussianModel:
     @property
     def get_xyz(self):
         if self.subset_mode_2:
-            return self._xyz_gpu
+            return self._xyz[self.visible_indices].to("cuda")
         elif self.subset_mode_1:
             return self._xyz[self.visible_indices]
         else:
@@ -159,8 +159,8 @@ class GaussianModel:
     @property
     def get_features(self):
         if self.subset_mode_2:
-            features_dc = self._features_dc_gpu
-            features_rest = self._features_rest_gpu
+            features_dc = self._features_dc[self.visible_indices].to("cuda")
+            features_rest = self._features_rest[self.visible_indices].to("cuda")
         elif self.subset_mode_1:
             features_dc = self._features_dc[self.visible_indices]
             features_rest = self._features_rest[self.visible_indices]
@@ -172,7 +172,7 @@ class GaussianModel:
     @property
     def get_features_dc(self):
         if self.subset_mode_2:
-            return self._features_dc_gpu
+            return self._features_dc[self.visible_indices].to("cuda")
         elif self.subset_mode_1:
             return self._features_dc[self.visible_indices]
         else:
@@ -181,7 +181,7 @@ class GaussianModel:
     @property
     def get_features_rest(self):
         if self.subset_mode_2:
-            return self._features_rest_gpu
+            return self._features_rest[self.visible_indices].to("cuda")
         elif self.subset_mode_1:
             return self._features_rest[self.visible_indices]
         else:
@@ -190,7 +190,7 @@ class GaussianModel:
     @property
     def get_opacity(self):
         if self.subset_mode_2:
-            return self.opacity_activation(self._opacity_gpu)
+            return self.opacity_activation(self._opacity[self.visible_indices].to("cuda"))
         elif self.subset_mode_1:
             return self.opacity_activation(self._opacity[self.visible_indices])
         else:
@@ -208,7 +208,7 @@ class GaussianModel:
     
     def get_covariance(self, scaling_modifier = 1):
         if self.subset_mode_2:
-            return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation_gpu)
+            return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation[self.visible_indices].to("cuda"))
         elif self.subset_mode_1:
             return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation[self.visible_indices])
         else:
@@ -680,7 +680,7 @@ class GaussianModel:
         self.subset_mode_1 = False    
         self.subset_mode_2 = False  
 
-    def move_and_activate_subset(self, requires_grad=True):
+    def subset_to_cuda(self, requires_grad=True):
         def _to_cpu_index(idx):
             if not torch.is_tensor(idx):
                 idx = torch.tensor(idx, dtype=torch.long)
@@ -695,12 +695,12 @@ class GaussianModel:
             return subset
         
         # --------------- Parameter subset (with gradients) ---------------
-        self._xyz_gpu           = send_subset_to_gpu(self._xyz)
-        self._opacity_gpu       = send_subset_to_gpu(self._opacity)
-        self._scaling_gpu       = send_subset_to_gpu(self._scaling)
-        self._rotation_gpu      = send_subset_to_gpu(self._rotation)
-        self._features_dc_gpu   = send_subset_to_gpu(self._features_dc)
-        self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
+        # self._xyz_gpu           = send_subset_to_gpu(self._xyz)
+        # self._opacity_gpu       = send_subset_to_gpu(self._opacity)
+        # self._scaling_gpu       = send_subset_to_gpu(self._scaling)
+        # self._rotation_gpu      = send_subset_to_gpu(self._rotation)
+        # self._features_dc_gpu   = send_subset_to_gpu(self._features_dc)
+        # self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
         
         self.subset_mode_2 = True
 
