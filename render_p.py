@@ -62,8 +62,9 @@ def render_set(model_path, name, iteration, views, model_list: List[GaussianMode
             
             visible_mask = frustum_culling(model._xyz, view.full_proj_transform)
             subset_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
+            model.visible_indices = subset_indices
             
-            model.activate_subset(subset_indices)
+            model.activate_subset()
             render_pkg = render(view, model, pipeline, background, use_trained_exp=train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             model.deactivate_subset()
             
