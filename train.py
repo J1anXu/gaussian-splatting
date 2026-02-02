@@ -238,7 +238,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
         
     for iteration in range(first_iter, opt.iterations + 1):
-        
+        time_start = time.time()
         for submodel in submodel_list:
             submodel.update_learning_rate(iteration)
         
@@ -307,7 +307,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = merge_res["bg_rgb"]
         
-        time_start = time.time()
+        
         # 遍历所有可见block 轮流当active block
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
