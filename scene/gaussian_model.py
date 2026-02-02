@@ -128,51 +128,73 @@ class GaussianModel:
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
 
+    # TODO 这个_gpu好像不太必要 可以直接tocuda
     @property
     def get_scaling(self):
-        if self.subset_mode_1:
+        if self.subset_mode_2:
+            return self.scaling_activation(self._scaling_gpu)
+        elif self.subset_mode_1:
             return self.scaling_activation(self._scaling[self.visible_indices])
-        return self.scaling_activation(self._scaling)
+        else:
+            return self.scaling_activation(self._scaling)
     
     @property
     def get_rotation(self):
-        if self.subset_mode_1:
+        if self.subset_mode_2:
+            return self.rotation_activation(self._rotation_gpu)
+        elif self.subset_mode_1:
             return self.rotation_activation(self._rotation[self.visible_indices])
-        return self.rotation_activation(self._rotation)
+        else:
+            return self.rotation_activation(self._rotation)
     
     @property
     def get_xyz(self):
-        if self.subset_mode_1:
+        if self.subset_mode_2:
+            return self._xyz_gpu
+        elif self.subset_mode_1:
             return self._xyz[self.visible_indices]
-        return self._xyz
+        else:
+            return self._xyz
     
     @property
     def get_features(self):
-        if self.subset_mode_1:
+        if self.subset_mode_2:
+            features_dc = self._features_dc_gpu
+            features_rest = self._features_rest_gpu
+        elif self.subset_mode_1:
             features_dc = self._features_dc[self.visible_indices]
             features_rest = self._features_rest[self.visible_indices]
-            return torch.cat((features_dc, features_rest), dim=1)
-        features_dc = self._features_dc
-        features_rest = self._features_rest
+        else:
+            features_dc = self._features_dc
+            features_rest = self._features_rest
         return torch.cat((features_dc, features_rest), dim=1)
     
     @property
     def get_features_dc(self):
-        if self.subset_mode_1:
+        if self.subset_mode_2:
+            return self._features_dc_gpu
+        elif self.subset_mode_1:
             return self._features_dc[self.visible_indices]
-        return self._features_dc
+        else:
+            return self._features_dc
     
     @property
     def get_features_rest(self):
-        if self.subset_mode_1:
+        if self.subset_mode_2:
+            return self._features_rest_gpu
+        elif self.subset_mode_1:
             return self._features_rest[self.visible_indices]
-        return self._features_rest
+        else:
+            return self._features_rest
     
     @property
     def get_opacity(self):
-        if self.subset_mode_1:
+        if self.subset_mode_2:
+            return self.opacity_activation(self._opacity_gpu)
+        elif self.subset_mode_1:
             return self.opacity_activation(self._opacity[self.visible_indices])
-        return self.opacity_activation(self._opacity)
+        else:
+            return self.opacity_activation(self._opacity)
     
     @property
     def get_exposure(self):
@@ -185,9 +207,12 @@ class GaussianModel:
     #         return self.pretrained_exposures[image_name]
     
     def get_covariance(self, scaling_modifier = 1):
-        if self.subset_mode_1:
+        if self.subset_mode_2:
+            return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation_gpu)
+        elif self.subset_mode_1:
             return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation[self.visible_indices])
-        return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+        else:
+            return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
@@ -561,7 +586,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, device="cuda"):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -577,24 +602,24 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=device)
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=device)
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=device)
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, device = "cuda"):
         # 梯度大 + 尺度已经很大的 Gaussian → 不该再 clone，而是必须 split（拆分）: 沿 Gaussian 自身尺度与朝向，在空间上强制生成 N 个彼此分离的子 Gaussian
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
-        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad = torch.zeros((n_init_points), device=device)
         padded_grad[:grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        selected_pts_mask = torch.logical_and(selected_pts_mask, torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
-        means =torch.zeros((stds.size(0), 3),device="cuda")
+        means =torch.zeros((stds.size(0), 3), device=device)
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+        rots = rots.to(device) # add by jian
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
@@ -602,12 +627,12 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, device=device)
 
-        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device=device, dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, device="cuda"):
         # Extract points that satisfy the gradient condition
         # 只克隆那些"梯度大、但尺度还不算大"的高斯点 → 克隆, 让它们变得更密集 (原地复制)
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
@@ -622,14 +647,14 @@ class GaussianModel:
         new_rotation = self._rotation[selected_pts_mask]
 
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, device=device)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, device="cuda"):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        self.densify_and_clone(grads, max_grad, extent, device=device)
+        self.densify_and_split(grads, max_grad, extent, device=device)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
@@ -653,22 +678,21 @@ class GaussianModel:
         
     def deactivate_subset(self):
         self.subset_mode_1 = False    
+        self.subset_mode_2 = False  
 
-
-    def send(self, indices_to_send, requires_grad=True):
-        # 
+    def move_and_activate_subset(self, requires_grad=True):
         def _to_cpu_index(idx):
             if not torch.is_tensor(idx):
                 idx = torch.tensor(idx, dtype=torch.long)
             return idx.to("cpu")
-
-        idx = _to_cpu_index(indices_to_send)
+        
+        idx = _to_cpu_index(self.visible_indices)
         
         def send_subset_to_gpu(tensor):
             subset = tensor[idx].cuda(non_blocking=True)
+            subset = subset.clone().detach()
             if requires_grad:
                 subset.requires_grad_(True)
-                
             return subset
         
         # --------------- Parameter subset (with gradients) ---------------
@@ -679,12 +703,9 @@ class GaussianModel:
         self._features_dc_gpu   = send_subset_to_gpu(self._features_dc)
         self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
         
-        self.subset_indices = idx
-        self.subset_mode = True
+        self.subset_mode_2 = True
 
-    def offline(self):
-        self.subset_indices = None
-        self.subset_mode = False
+
         
     def build_split_indices(self):
         block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz)

@@ -91,10 +91,6 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     colors_bg = None
     
     
-    cpu_full_proj_transform_dict = {}
-    for cam in scene.getTrainCameras():
-        cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
-    
     for iteration in range(first_iter, opt.iterations + 1):
         # partition
         if config.PARTITIONING_ENABLED:
@@ -226,7 +222,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     gaussians: GaussianModel = scene.gaussians
     
     # generate a initialized gs copy
-    # gaussians = gaussians.dump_to_cpu()
+    gaussians = gaussians.dump_to_cpu()
     
     # partition
     gaussians.build_split_indices()
@@ -292,9 +288,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 visible_pts += submodel.visible_indices.shape[0]
                 visible_submodel_id_list.append(submodel_id)
                                 
-                submodel.send(submodel.visible_indices)
+                submodel.move_and_activate_subset()
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                submodel.offline()
+                submodel.deactivate_subset()
                 
                 # pixel level 
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
@@ -316,9 +312,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
                         
-            submodel.send(submodel.visible_indices)
+            submodel.move_and_activate_subset()
             render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-            submodel.offline()
+            submodel.deactivate_subset()
             
             # pixel level 
             sub_img = render_pkg["render"]
@@ -362,6 +358,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with torch.no_grad():
                 # Densification
                 if iteration < opt.densify_until_iter:
+                    sub_visibility_filter = sub_visibility_filter.cpu()
+                    sub_radii = sub_radii.cpu()
                     global_viewspace_points_grad = torch.zeros(submodel.get_xyz.shape[0], 3, device="cpu", requires_grad=False )
                     global_viewspace_points_grad[submodel.visible_indices] = sub_viewspace_point_tensor.grad.cpu()
                     
@@ -372,7 +370,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        submodel.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                        submodel.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
                         
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         submodel.reset_opacity()
