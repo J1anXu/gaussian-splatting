@@ -27,6 +27,7 @@ set -o pipefail
 GPUS=(0 1 2 3)
 SCENES=(bicycle kitchen room bonsai)
 
+
 DATA_ROOT=/data2/jian/data/mip360
 OUT_ROOT=output/mip360
 LOG_ROOT=debug
