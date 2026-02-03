@@ -24,8 +24,9 @@ set -o pipefail
 ########################################
 
 # GPU 与 scene 对应关系（一个 GPU 一个队列）
-GPUS=(0 1 2 3)
-SCENES=(bicycle kitchen room bonsai)
+GPUS=(0)
+# SCENES=(bicycle kitchen room bonsai)
+SCENES=(bicycle)
 
 DATA_ROOT=/data2/jian/data/mip360
 OUT_ROOT=output/mip360
