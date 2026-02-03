@@ -265,9 +265,14 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             for model in model_list:
                 model.visible_idx = torch.arange(model._xyz.shape[0], device="cuda")
         
+        if viewpoint_cam.image_name == debug_image_name:
+            detail_path = os.path.join("/data/jian/debug", BRANCH, SCENE_NAME, debug_image_name, f"iter_{iteration}")
+            os.makedirs(detail_path, exist_ok=True)
+        
         # 无渲染全部结果 为计算Loss做准备
         rendered_list, depth_list, alpha_list = [], [], []
         visible_model_id_list = []
+        act_contribution_list = [] # 真的有渲染结果的 block
         visible_pts = 0
         with torch.no_grad():
             for idx, model in enumerate(model_list):
@@ -276,7 +281,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     continue
                 
                 visible_pts += model.visible_idx.shape[0]
-                visible_model_id_list.append(idx)
                 
                 model.set_subset(model.visible_idx)
                 render_pkg = render(viewpoint_cam, model, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -285,10 +289,25 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 # pixel level 
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
                 
+                
+                # 能被视锥看见并不一定真的有贡献
+                # image: [3, H, W]
+                valid_mask = (image > 0).any(dim=0)   # [H, W] bool
+                valid_pixels = valid_mask.sum().item()
+                total_pixels = valid_mask.numel()
+                contributed_percent = valid_pixels / total_pixels
+                if contributed_percent < 0.05:
+                    continue
+                if viewpoint_cam.image_name == debug_image_name:
+                    torchvision.utils.save_image(image, os.path.join(detail_path, f"block_{idx}_contri_{contributed_percent}" + ".png"))
+                
+                
                 rendered_list.append(image)
                 depth_list.append(depth)
                 alpha_list.append(alphaLeft)
                 
+                    
+                visible_model_id_list.append(idx)
                 
         cpu_merge_result = merge_opt_kid(rendered_list, depth_list, alpha_list)
         C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
@@ -387,7 +406,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if iteration == opt.iterations:
                     progress_bar.close()
                 
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total}
+                log = {"iter": iteration, "loss": ema_loss_for_log, "visible_blocks": len(visible_model_id_list), "pts_in_frustum": visible_pts, "pts": pts_total}
                 
                 # logging
                 LOGGER.info(log)
@@ -396,7 +415,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
                     wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
-            
+                        
         # saving Gaussians ply    
         if (iteration in saving_iterations):
             print("\n[ITER {}] Saving Gaussians".format(iteration))
