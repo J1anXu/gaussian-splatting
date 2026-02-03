@@ -286,7 +286,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     continue
                 
                 visible_pts += submodel.visible_indices.shape[0]
-                visible_submodel_id_list.append(submodel_id)
                                 
                 submodel.move_and_activate_subset()
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -295,9 +294,21 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 # pixel level 
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
                 
+                # 能被视锥看见并不一定真的有贡献
+                # image: [3, H, W]
+                valid_mask = (image > 0).any(dim=0)   # [H, W] bool
+                valid_pixels = valid_mask.sum().item()
+                total_pixels = valid_mask.numel()
+                contributed_percent = valid_pixels / total_pixels
+                if contributed_percent < 0.05:
+                    continue
+                
                 rendered_list.append(image)
                 depth_list.append(depth)
                 alpha_list.append(alphaLeft)
+                
+                visible_submodel_id_list.append(submodel_id)
+
                 
         # execute merge 
         merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
@@ -496,8 +507,20 @@ if __name__ == "__main__":
     os.makedirs("debug", exist_ok=True)
     IMG_PATH_IN_DEBUG = os.path.join("/data/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
     os.makedirs(IMG_PATH_IN_DEBUG, exist_ok=True)
+    time_start = time.time()
     res = training_phase_1(lp.extract(args), op.extract(args), pp.extract(args), args.start_checkpoint, args.debug_from)
     training_phase_2(lp.extract(args), op.extract(args), pp.extract(args), args.save_iterations, args.debug_from, res)
-
-    # All done
+    time_end = time.time()
+    
+    cost = time_end - time_start
+    hours = int(cost // 3600)
+    minutes = int((cost % 3600) // 60)
+    hhmm = f"{hours:02d}:{minutes:02d}"
     print("\nTraining complete.")
+
+    print(f"\nTraining complete. Total time: {hhmm}")
+    LOGGER.info(f"\nTraining complete. Total time: {hhmm}")
+    if WANDB and not DEBUG_MODE:
+        wandb.log({"time_cost": hhmm})
+        run.finish()    
+        
