@@ -265,6 +265,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             for model in model_list:
                 model.visible_idx = torch.arange(model._xyz.shape[0], device="cuda")
         
+        if viewpoint_cam.image_name == debug_image_name:
+            detail_path = os.path.join("/data/jian/debug", BRANCH, SCENE_NAME, debug_image_name, f"iter_{iteration}")
+            os.makedirs(detail_path, exist_ok=True)
+        
         # 无渲染全部结果 为计算Loss做准备
         rendered_list, depth_list, alpha_list = [], [], []
         visible_model_id_list = []
@@ -274,6 +278,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 
                 if model.visible_idx.shape[0] == 0:
                     continue
+                
+                visible_percent = model.visible_idx.shape[0] / model._xyz.shape[0]
                 
                 visible_pts += model.visible_idx.shape[0]
                 visible_model_id_list.append(idx)
@@ -288,6 +294,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 rendered_list.append(image)
                 depth_list.append(depth)
                 alpha_list.append(alphaLeft)
+                
+                if viewpoint_cam.image_name == debug_image_name:
+                    vp_str = f"{visible_percent:.2f}"
+                    torchvision.utils.save_image(image, os.path.join(detail_path, f"block_{idx}_vis_{vp_str}" + ".png"))
                 
                 
         cpu_merge_result = merge_opt_kid(rendered_list, depth_list, alpha_list)
@@ -396,7 +406,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
                     wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
-            
+                    wandb.log({f"block/{idx}_vis_per": gs.visible_idx.shape[0] / gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
         # saving Gaussians ply    
         if (iteration in saving_iterations):
             print("\n[ITER {}] Saving Gaussians".format(iteration))
