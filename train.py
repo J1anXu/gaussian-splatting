@@ -296,21 +296,18 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 valid_pixels = valid_mask.sum().item()
                 total_pixels = valid_mask.numel()
                 contributed_percent = valid_pixels / total_pixels
-                
+                if contributed_percent < 0.05:
+                    continue
                 if viewpoint_cam.image_name == debug_image_name:
                     torchvision.utils.save_image(image, os.path.join(detail_path, f"block_{idx}_contri_{contributed_percent}" + ".png"))
                 
-                if contributed_percent < 0.05:
-                    continue
                 
                 rendered_list.append(image)
                 depth_list.append(depth)
                 alpha_list.append(alphaLeft)
                 
-
                     
                 visible_model_id_list.append(idx)
-
                 
         cpu_merge_result = merge_opt_kid(rendered_list, depth_list, alpha_list)
         C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
@@ -409,7 +406,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if iteration == opt.iterations:
                     progress_bar.close()
                 
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total}
+                log = {"iter": iteration, "loss": ema_loss_for_log, "visible_blocks": len(visible_model_id_list), "pts_in_frustum": visible_pts, "pts": pts_total}
                 
                 # logging
                 LOGGER.info(log)
