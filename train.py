@@ -72,7 +72,10 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
     initial_gaussians.training_setup(opt)
-    image_reservoir = ImageReservoir(scene.getTrainCameras(), capacity=8, device="cuda")
+    
+    image_reservoir = ImageReservoir(scene.getTrainCameras(), capacity=16, device="cuda", num_workers=4)
+    print("[Main] ImageReservoir queue size after sleep:", image_reservoir.queue.qsize())   
+    
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         initial_gaussians.restore(model_params, opt)
@@ -115,6 +118,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         # vind = viewpoint_indices.pop(rand_idx)
 
         viewpoint_cam, gt_image = image_reservoir.queue.get()
+        gt_image = gt_image.to("cuda", non_blocking=True)
 
 
         # Render
@@ -175,9 +179,9 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
             
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Qsize":image_reservoir.queue.qsize(), "pts_in_frustum": visible_pts, "pts": pts_total})
                 progress_bar.update(10)
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total}
+                log = {"iter": iteration, "loss": ema_loss_for_log, "Qsize":image_reservoir.queue.qsize(), "pts_in_frustum": visible_pts, "pts": pts_total}
                 LOGGER.info(log)
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
@@ -212,6 +216,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
 def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     scene, old_iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg, image_reservoir = res
+    image_reservoir = ImageReservoir(scene.getTrainCameras(), capacity=16, device="cuda", num_workers=2)
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -263,6 +268,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         # vind = viewpoint_indices.pop(rand_idx)
 
         viewpoint_cam, gt_image = image_reservoir.queue.get()
+        gt_image = gt_image.to("cuda", non_blocking=True)
 
         # Render
         if (iteration - 1) == debug_from:
@@ -398,12 +404,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             
             if iteration % 10 == 0:
                 # progress bar
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Qsize":image_reservoir.queue.qsize(), "pts_in_frustum": visible_pts, "pts": pts_total})
                 progress_bar.update(10)
                 if iteration == opt.iterations:
                     progress_bar.close()
                 time_spent = time.time() - time_start
-                log = {"iter": iteration, "loss": ema_loss_for_log, "time_spent": time_spent, "pts_in_frustum": visible_pts, "pts": pts_total}
+                log = {"iter": iteration, "loss": ema_loss_for_log, "time_spent": time_spent, "Qsize":image_reservoir.queue.qsize(), "pts_in_frustum": visible_pts, "pts": pts_total}
                 
                 # logging
                 LOGGER.info(log)
