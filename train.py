@@ -418,8 +418,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
                     wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
-                    if viewpoint_cam.image_name == debug_image_name:
-                        wandb.log({f"vis_per/{idx}": gs.visible_idx.shape[0] / gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
                         
         # saving Gaussians ply    
         if (iteration in saving_iterations):
