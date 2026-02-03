@@ -25,10 +25,7 @@ class ImageReservoir:
         self.threads = []
 
         for i in range(num_workers):
-            t = threading.Thread(
-                target=self._producer_loop,
-                daemon=True
-            )
+            t = threading.Thread(target=self._producer_loop, daemon=True)
             t.start()
             self.threads.append(t)
 
@@ -52,21 +49,17 @@ class ImageReservoir:
     
 
     def _producer_loop(self):
-        try:
-            while not self._stop:
-                if self.queue.full():
-                    time.sleep(0.001)
-                    continue
+        while not self._stop:
+            if self.queue.full():
+                time.sleep(1)
+                continue
 
-                cam = random.choice(self.cameras)
+            cam = random.choice(self.cameras)
 
-                # CPU only
-                img_cpu = cam.load_image_cpu().pin_memory()
+            # CPU only
+            # 很可能出现“你还在用，生产者已经把这块 pinned buffer 复用了 / 覆盖了”
+            img_cpu = cam.load_image_cpu().clone().pin_memory()
 
-                # ❌ 不要 to(cuda)
-                self.queue.put((cam, img_cpu))
+            # ❌ 不要 to(cuda)
+            self.queue.put((cam, img_cpu))
 
-        except Exception as e:
-            print("[Producer] EXCEPTION:", e)
-            import traceback
-            traceback.print_exc()
