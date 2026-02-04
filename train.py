@@ -32,7 +32,7 @@ import time
 from logger import get_logger
 import config
 import diff_gaussian_rasterization
-
+from TimerManager import TimerManager
 SCENE_NAME = None
 BRANCH = None
 DEBUG_MODE = False
@@ -216,7 +216,9 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
 def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     scene, old_iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg = res
-
+    
+    timer = TimerManager()
+    
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
@@ -271,17 +273,18 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         
         # frustum culling
-        if config.FRUSTUM_CULLING_ENABLED:
-            for model in submodel_list:
-                # TODO 可以做一个懒加载设计 每隔一段时间做一次 fc 不必每次都做 节约时间 成为一个contribution
-                if model._xyz.is_cuda:
-                    visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
-                else:
-                    visible_mask = frustum_culling(model._xyz, cpu_full_proj_transform_dict[viewpoint_cam.image_name])
-                model.visible_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
-        else:
-            for model in submodel_list:
-                model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
+        with timer.scope("frustum_culling"):
+            if config.FRUSTUM_CULLING_ENABLED:
+                for model in submodel_list:
+                    # TODO 可以做一个懒加载设计 每隔一段时间做一次 fc 不必每次都做 节约时间 成为一个contribution
+                    if model._xyz.is_cuda:
+                        visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
+                    else:
+                        visible_mask = frustum_culling(model._xyz, cpu_full_proj_transform_dict[viewpoint_cam.image_name])
+                    model.visible_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
+            else:
+                for model in submodel_list:
+                    model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
         
         # 无渲染全部结果 为计算Loss做准备
         rendered_list, depth_list, alpha_list = [], [], []
@@ -295,9 +298,13 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     continue
                 
                 visible_pts += submodel.visible_indices.shape[0]
-                                
-                submodel.move_and_activate_subset()
-                render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                
+                with timer.scope("send1"):
+                    submodel.move_and_activate_subset()
+                    
+                with timer.scope("render1"):
+                    render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                    
                 submodel.deactivate_subset()
                 
                 # pixel level 
@@ -320,7 +327,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 
         # execute merge 
-        merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
+        with timer.scope("merge"):
+            merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
+            
         C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
         prefix_T = merge_res["prefix_T"]
         block_rank = merge_res["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
@@ -331,9 +340,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         # 遍历所有可见block 轮流当active block
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
-                        
-            submodel.move_and_activate_subset()
-            render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            
+            with timer.scope("send2"):
+                submodel.move_and_activate_subset()
+            with timer.scope("render2"):
+                render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             submodel.deactivate_subset()
             
             # pixel level 
@@ -342,61 +353,67 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # gaussian points level
             sub_viewspace_point_tensor, sub_visibility_filter, sub_radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             
-           # 当前subset的渲染结果在每个像素上的排序位置
-            submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
-            
-            # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
-            prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
-
-            # 4. 当前块(index = idx)块提供的颜色
-            C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]   
-            
-            # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
-            C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k                  
-            
-            # 6. 带梯度的渲染结果
-            C_active = sub_img      # [3,H,W], has grad   
-            
-            # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
-            composed_img = C_base + prefix_T_k * C_active
+            with timer.scope("cal"):
+                # 当前subset的渲染结果在每个像素上的排序位置
+                submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
+                # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
+                prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
+                # 4. 当前块(index = idx)块提供的颜色
+                C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]   
+                # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
+                C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k                  
+                # 6. 带梯度的渲染结果
+                C_active = sub_img      # [3,H,W], has grad   
+                # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
+                composed_img = C_base + prefix_T_k * C_active
             
             if viewpoint_cam.alpha_mask is not None:
                 alpha_mask = viewpoint_cam.alpha_mask.cuda()
                 composed_img *= alpha_mask
                 
             # Loss
-            gt_image = viewpoint_cam.original_image.cuda()
-            Ll1 = l1_loss(composed_img, gt_image)
-            ssim_value = ssim(composed_img, gt_image)
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+            with timer.scope("send gt"):
+                gt_image = viewpoint_cam.original_image.cuda()
+            
+            with timer.scope("loss"):
+                Ll1 = l1_loss(composed_img, gt_image)
+                ssim_value = ssim(composed_img, gt_image)
+                loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
             # Depth regularization
             Ll1depth = 0
-            diff_gaussian_rasterization.set_colors_bg(colors_bg)
-            loss.backward()
+            with timer.scope("set_colors_bg"):
+                diff_gaussian_rasterization.set_colors_bg(colors_bg)
+                
+            with timer.scope("backward"):
+                loss.backward()
 
             with torch.no_grad():
                 # Densification
                 if iteration < opt.densify_until_iter:
-                    sub_visibility_filter = sub_visibility_filter.cpu()
-                    sub_radii = sub_radii.cpu()
-                    global_viewspace_points_grad = torch.zeros(submodel.get_xyz.shape[0], 3, device="cpu", requires_grad=False )
-                    global_viewspace_points_grad[submodel.visible_indices] = sub_viewspace_point_tensor.grad.cpu()
+                    with timer.scope("stats to cpu"):
+                        sub_visibility_filter = sub_visibility_filter.cpu()
+                        sub_radii = sub_radii.cpu()
+                        global_viewspace_points_grad = torch.zeros(submodel.get_xyz.shape[0], 3, device="cpu", requires_grad=False )
+                        global_viewspace_points_grad[submodel.visible_indices] = sub_viewspace_point_tensor.grad.cpu()
+                        global_visibility_filter = submodel.visible_indices[sub_visibility_filter]
                     
-                    global_visibility_filter = submodel.visible_indices[sub_visibility_filter]
-                    
-                    submodel.max_radii2D[global_visibility_filter] = torch.max(submodel.max_radii2D[global_visibility_filter], sub_radii[sub_visibility_filter])
-                    submodel.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
+                    with timer.scope("update stats"):
+                        submodel.max_radii2D[global_visibility_filter] = torch.max(submodel.max_radii2D[global_visibility_filter], sub_radii[sub_visibility_filter])
+                        submodel.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
                     
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        submodel.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
+                        with timer.scope("densify"):
+                            size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                            submodel.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
                         
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        submodel.reset_opacity()
+                        with timer.scope("reset opacity"):
+                            submodel.reset_opacity()
                         
                 # Optimizer step
                 if iteration < opt.iterations:
+                    with timer.scope("opt step"):
                         submodel.optimizer.step()
                         submodel.optimizer.zero_grad(set_to_none = True)
                         
@@ -428,17 +445,19 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     wandb.log(log, step=iteration)
                     wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(submodel_list)}, step=iteration)
             
-        # saving Gaussians ply    
-        if (iteration in saving_iterations):
-            print("\n[ITER {}] Saving Gaussians".format(iteration))
-            point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}")
-            for submodel_id, submodel in enumerate(submodel_list):
-                submodel.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{submodel_id}.ply"), include_block=False)
+        # # saving Gaussians ply    
+        # if (iteration in saving_iterations):
+        #     print("\n[ITER {}] Saving Gaussians".format(iteration))
+        #     point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}")
+        #     for submodel_id, submodel in enumerate(submodel_list):
+        #         submodel.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{submodel_id}.ply"), include_block=False)
                 
-        # save debug image
-        if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(composed_img, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
-                    
+        # # save debug image
+        # if viewpoint_cam.image_name == debug_image_name:
+        #     torchvision.utils.save_image(composed_img, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+        
+    timer.summary()
+        
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
     #     pth_path = os.path.join(args.model_path, f"point_cloud/{BRANCH}")
