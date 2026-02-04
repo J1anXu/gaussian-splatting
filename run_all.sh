@@ -1,55 +1,46 @@
 #!/usr/bin/env bash
+
+# ===== auto-daemon =====
+if [[ -z "$DAEMONIZED" ]]; then
+  export DAEMONIZED=1
+
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+
+  mkdir -p "$SCRIPT_DIR/debug"
+
+  nohup bash "$SCRIPT_PATH" "$@" > "$SCRIPT_DIR/debug/pipeline.out" 2>&1 &
+  echo "🚀 Pipeline started in background"
+  exit 0
+fi
+# ======================
+
+
 set -e
 set -o pipefail
 
 ########################################
-# auto-daemon（第一件事）
-########################################
-if [[ -z "$DAEMONIZED" ]]; then
-  export DAEMONIZED=1
-
-  nohup bash "$0" "$@" > debug/pipeline.out 2>&1 &
-  echo "🚀 Pipeline started in background"
-  exit 0
-fi
-
-########################################
-# 固定 Git 状态（只在启动时）
-########################################
-GIT_COMMIT=$(git rev-parse HEAD)
-GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-
-SNAPSHOT_ROOT="/data2/jian/envsnapshot"
-SNAPSHOT_DIR="$SNAPSHOT_ROOT/${GIT_BRANCH}_${GIT_COMMIT:0:8}"
-
-echo "📌 Fixed branch : $GIT_BRANCH"
-echo "📌 Fixed commit : $GIT_COMMIT"
-echo "📌 Snapshot dir : $SNAPSHOT_DIR"
-
-if [[ ! -d "$SNAPSHOT_DIR" ]]; then
-  echo "📦 Creating code snapshot..."
-  mkdir -p "$SNAPSHOT_DIR"
-  rsync -a \
-    --exclude .git \
-    --exclude output \
-    --exclude debug \
-    ./ "$SNAPSHOT_DIR/"
-fi
-
-########################################
 # 配置区
 ########################################
+
+# GPU 与 scene 对应关系（一个 GPU 一个队列）
 GPUS=(0 1 2 3)
 SCENES=(bicycle kitchen room bonsai)
 
-DATA_ROOT=/data2/jian/data/mip360
-OUT_ROOT="$SNAPSHOT_DIR/output/mip360"
-LOG_ROOT="$SNAPSHOT_DIR/debug"
 
-mkdir -p "$OUT_ROOT" "$LOG_ROOT"
+DATA_ROOT=/data2/jian/data/mip360
+OUT_ROOT=output/mip360
+LOG_ROOT=debug
+
+mkdir -p "$LOG_ROOT"
+
+
+
+
+
 
 ########################################
-# 单 GPU pipeline（完全不碰 git）
+# 单 GPU 队列：完整 pipeline
 ########################################
 run_pipeline() {
   local gpu=$1
@@ -60,40 +51,66 @@ run_pipeline() {
   local data_path="$DATA_ROOT/$scene"
   local model_path="$OUT_ROOT/$scene"
 
+  ########################################
+  # Git info
+  ########################################
+  GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
+  echo "🌿 Git branch: $GIT_BRANCH"
+
   echo "========================================"
   echo "GPU   : $gpu"
   echo "Scene : $scene"
   echo "Time  : $(date)"
-  echo "Code  : $SNAPSHOT_DIR"
+  echo "Branch: $GIT_BRANCH"
   echo "========================================"
 
-  python "$SNAPSHOT_DIR/train.py" \
+
+
+  ####################
+  # 1. TRAIN
+  ####################
+  python train.py \
     -s "$data_path" \
     --model_path "$model_path" \
     --git_branch "$GIT_BRANCH" \
     --eval \
-    > "$LOG_ROOT/train_${scene}.log" 2>&1
+    > "$LOG_ROOT/train_${scene}_$GIT_BRANCH.log" 2>&1
 
-  python "$SNAPSHOT_DIR/render_p.py" \
+  ####################
+  # 2. RENDER_P
+  ####################
+  python render_p.py \
     -m "$model_path" \
+    --git_branch "$GIT_BRANCH" \
     --skip_train \
-    > "$LOG_ROOT/render_p_${scene}.log" 2>&1
+    > "$LOG_ROOT/render_p_${scene}_$GIT_BRANCH.log" 2>&1
 
-  python "$SNAPSHOT_DIR/metrics_p.py" \
+  ####################
+  # 3. METRICS_P
+  ####################
+  python metrics_p.py \
     -m "$model_path" \
-    > "$LOG_ROOT/metrics_p_${scene}.log" 2>&1
+    --git_branch "$GIT_BRANCH" \
+    > "$LOG_ROOT/metrics_p_${scene}_$GIT_BRANCH.log" 2>&1
 
   echo "✅ Finished $scene on GPU $gpu"
 }
 
 ########################################
-# 启动并发
+# 启动 4 个并发队列
 ########################################
-echo "🚀 Launching GPU pipelines..."
+echo "🚀 Launching 4 GPU queues..."
+echo ""
 
 for i in "${!GPUS[@]}"; do
-  run_pipeline "${GPUS[$i]}" "${SCENES[$i]}" &
+  (
+    run_pipeline "${GPUS[$i]}" "${SCENES[$i]}"
+  ) &
 done
 
+########################################
+# 等待所有队列完成
+########################################
 wait
+echo ""
 echo "🎉 All pipelines finished."
