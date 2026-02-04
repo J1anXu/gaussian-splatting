@@ -79,18 +79,29 @@ class GaussianModel:
         
         self.setup_functions()
         
-    def dump_to_cpu(self):
+    def dump_to_cpu(self, free_gpu=True):
         """
-        Create a frozen CPU snapshot that only serves as
-        initialization source for get_kid().
+        Create a frozen CPU snapshot and optionally
+        free GPU tensors from the original object.
         """
         new = copy.copy(self)
 
-        for k, v in self.__dict__.items():
+        for k, v in list(self.__dict__.items()):
             if torch.is_tensor(v):
+                # CPU snapshot
                 setattr(new, k, v.detach().cpu())
+
+                if free_gpu:
+                    # 🔥 关键：切断原对象对 GPU tensor 的引用
+                    setattr(self, k, None)
+
             elif k == "optimizer":
                 setattr(new, k, None)
+                if free_gpu:
+                    self.optimizer = None
+
+        if free_gpu:
+            torch.cuda.empty_cache()
 
         return new
 

@@ -70,6 +70,15 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     prepare_output_and_logger(dataset)
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
+    
+    
+    # TODO
+    scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+
+    return scene, 1000, 0, 0, progress_bar, None
+    
+    
     initial_gaussians.training_setup(opt)
     
     if checkpoint:
@@ -476,7 +485,6 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 15_000, 30_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument('--git_branch', type=str, default=None)
-    parser.add_argument('--data_device', type=str, default="cpu")
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
