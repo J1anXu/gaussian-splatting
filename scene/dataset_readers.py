@@ -162,10 +162,12 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
         cam_extrinsics = read_extrinsics_text(cameras_extrinsics)
         cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
+    DEBUG_MODE = sys.gettrace() is not None
+
     # -----------------------
     # DEBUG MODE : 限制相机数量
     # -----------------------
-    if config.LIMITED_DATASIZE:
+    if config.LIMITED_DATASIZE and DEBUG_MODE:
         LIMIT = config.DATASIZE_LIMIT
         print(f"[DEBUG] DEBUG_MODE=True → limiting extrinsics to first {LIMIT} cameras")
 
@@ -240,7 +242,7 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     )
 
     # DEBUG：进一步限制数量（保险）
-    if config.LIMITED_DATASIZE and len(cam_infos_unsorted) > config.DATASIZE_LIMIT:
+    if config.LIMITED_DATASIZE and DEBUG_MODE and len(cam_infos_unsorted) > config.DATASIZE_LIMIT:
         cam_infos_unsorted = cam_infos_unsorted[:config.DATASIZE_LIMIT]
 
     # -----------------------
