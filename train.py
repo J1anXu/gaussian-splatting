@@ -337,7 +337,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = merge_res["bg_rgb"]
         
-        
+
+        with timer.scope("send gt"):
+            gt_image = viewpoint_cam.original_image.cuda()
+            
         # 遍历所有可见block 轮流当active block
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
@@ -368,13 +371,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
                 composed_img = C_base + prefix_T_k * C_active
             
-            if viewpoint_cam.alpha_mask is not None:
-                alpha_mask = viewpoint_cam.alpha_mask.cuda()
-                composed_img *= alpha_mask
+            # if viewpoint_cam.alpha_mask is not None:
+            #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            #     composed_img *= alpha_mask
                 
             # Loss
-            with timer.scope("send gt"):
-                gt_image = viewpoint_cam.original_image.cuda()
+
             
             with timer.scope("loss"):
                 Ll1 = l1_loss(composed_img, gt_image)
