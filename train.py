@@ -24,6 +24,8 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+import diff_gaussian_rasterization
+
 import wandb
 import time
 from logger import get_logger
@@ -144,8 +146,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = Ll1depth.item()
         else:
             Ll1depth = 0
-        img_name = viewpoint_cam.image_name.split('.')[0]
-        image_rgb = image
+
+        
+        colors_bg = torch.zeros(image.shape, device="cuda")
+        diff_gaussian_rasterization.set_colors_bg(colors_bg)
         loss.backward()
 
         iter_end.record()
@@ -303,7 +307,21 @@ if __name__ == "__main__":
         wandb.define_metric("iteration")  # 
 
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
+    
+    time_start = time.time()
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
-
-    # All done
+    time_end = time.time()
+    
+    cost = time_end - time_start
+    hours = int(cost // 3600)
+    minutes = int((cost % 3600) // 60)
+    hhmm = f"{hours:02d}:{minutes:02d}"
     print("\nTraining complete.")
+
+    print(f"\nTraining complete. Total time: {hhmm}")
+    LOGGER.info(f"\nTraining complete. Total time: {hhmm}")
+    if WANDB and not DEBUG_MODE:
+        wandb.log({"time_cost": hhmm})
+        run.finish()    
+        
+
