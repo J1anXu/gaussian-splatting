@@ -8,7 +8,7 @@ set -o pipefail
 if [[ -z "$DAEMONIZED" ]]; then
   export DAEMONIZED=1
 
-  nohup bash "$0" "$@" > pipeline.out 2>&1 &
+  nohup bash "$0" "$@" > debug/pipeline.out 2>&1 &
   echo "🚀 Pipeline started in background"
   exit 0
 fi
