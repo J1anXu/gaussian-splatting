@@ -160,6 +160,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
         # Depth regularization
         Ll1depth = 0
+        # TODO 这个不需要每个循环都做 
         diff_gaussian_rasterization.set_colors_bg(colors_bg)
         loss.backward()
 
