@@ -11,7 +11,6 @@
 
 from pathlib import Path
 import os
-from sre_constants import BRANCH
 from PIL import Image
 import torch
 import torchvision.transforms.functional as tf
@@ -22,6 +21,7 @@ import json
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser
+BRANCH = None
 
 def readImages(renders_dir, gt_dir):
     renders = []
@@ -42,7 +42,6 @@ def evaluate(model_paths):
     full_dict_polytopeonly = {}
     per_view_dict_polytopeonly = {}
     print("")
-    BRANCH = get_git_branch()
 
     for scene_dir in model_paths:
         scene_dir = scene_dir + f"/rendered/{BRANCH}"
@@ -102,5 +101,13 @@ if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     parser.add_argument('--model_paths', '-m', required=True, nargs="+", type=str, default=[])
+    parser.add_argument('--git_branch', type=str, default=None)
+
     args = parser.parse_args()
+    
+    if args.git_branch is not None:
+        BRANCH = args.git_branch
+    else:
+        BRANCH = get_git_branch()
+    
     evaluate(args.model_paths)
