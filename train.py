@@ -285,11 +285,16 @@ if __name__ == "__main__":
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 15_000, 30_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument('--git_branch', type=str, default=None)
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
-    BRANCH = get_git_branch()
+    if args.git_branch is not None:
+        BRANCH = args.git_branch
+    else:
+        BRANCH = get_git_branch()
 
     # Initialize system state (RNG)
     safe_state(args.quiet)

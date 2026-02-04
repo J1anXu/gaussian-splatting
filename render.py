@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import sys
 import torch
 from scene import Scene
 import os
@@ -20,6 +21,8 @@ from utils.general_utils import get_git_branch, safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
+BRANCH = None
+
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
@@ -28,7 +31,6 @@ except:
 
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background, train_test_exp, separate_sh):
-    BRANCH = get_git_branch()
     render_path = os.path.join(model_path, "rendered", BRANCH, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, "rendered", BRANCH, name, "ours_{}".format(iteration), "gt")
 
@@ -69,9 +71,16 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument('--git_branch', type=str, default=None)
+
+    args_raw = parser.parse_args(sys.argv[1:])
+
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
-
+    if args_raw.git_branch is not None:
+        BRANCH = args_raw.git_branch
+    else:
+        BRANCH = get_git_branch()
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
