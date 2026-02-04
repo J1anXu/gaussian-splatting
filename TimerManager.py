@@ -58,6 +58,8 @@ class TimerManager:
         lines.append("-" * 90)
         lines.append(f"{'TOTAL':30s} {total_ms:12.3f} 100.00%")
         lines.append("=" * 90)
+        lines.append("\n")
+
         res = "\n".join(lines)
         print(res)
         return res
