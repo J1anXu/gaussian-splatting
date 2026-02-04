@@ -297,7 +297,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = cpu_merge_result["bg_rgb"]
 
-        
+        gt_image = viewpoint_cam.original_image.cuda()
         
         # 遍历所有可见block 轮流当active block
         for index, model_id in enumerate(visible_model_id_list):
@@ -337,7 +337,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 image_with_block_grad *= alpha_mask
                 
             # Loss
-            gt_image = viewpoint_cam.original_image.cuda()
             Ll1 = l1_loss(image_with_block_grad, gt_image)
             ssim_value = ssim(image_with_block_grad, gt_image)
             loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
