@@ -70,6 +70,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     prepare_output_and_logger(dataset)
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
+    
     initial_gaussians.training_setup(opt)
     
     if checkpoint:
@@ -90,10 +91,11 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     
     colors_bg = None
     
+    
     for iteration in range(first_iter, opt.iterations + 1):
         # partition
         if config.PARTITIONING_ENABLED:
-            if initial_gaussians._xyz.shape[0] > 300_000:
+            if initial_gaussians._xyz.shape[0] > config.SPLIT_SIZE:
                 print(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
                 LOGGER.info(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
                 return scene, iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg
@@ -118,23 +120,23 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         
-        # frustum culling
+        # frustum culling (cuda)
         if config.FRUSTUM_CULLING_ENABLED:
             visible_mask = frustum_culling(initial_gaussians._xyz, viewpoint_cam.full_proj_transform)
-            initial_gaussians.visible_idx = torch.nonzero(visible_mask, as_tuple=True)[0]
+            initial_gaussians.visible_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
         else:
-            initial_gaussians.visible_idx = torch.arange(initial_gaussians._xyz.shape[0], device="cuda")
+            initial_gaussians.visible_indices = torch.arange(initial_gaussians._xyz.shape[0], device="cuda")
         
 
         visible_pts = 0        
         pts_total = 0
 
         pts_total += initial_gaussians._xyz.shape[0]
-        visible_pts += initial_gaussians.visible_idx.shape[0]
+        visible_pts += initial_gaussians.visible_indices.shape[0]
         
-        initial_gaussians.set_subset(initial_gaussians.visible_idx)
+        initial_gaussians.activate_subset()
         render_pkg = render(viewpoint_cam, initial_gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-        initial_gaussians.clear_subset()
+        initial_gaussians.deactivate_subset()
         
         # pixel level 
         image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
@@ -183,8 +185,8 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             # Densification
             if iteration < opt.densify_until_iter:
                 global_viewspace_points_grad = torch.zeros(initial_gaussians.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
-                global_viewspace_points_grad[initial_gaussians.visible_idx] = viewspace_point_tensor.grad
-                global_visibility_filter = initial_gaussians.visible_idx[visibility_filter]
+                global_viewspace_points_grad[initial_gaussians.visible_indices] = viewspace_point_tensor.grad
+                global_visibility_filter = initial_gaussians.visible_indices[visibility_filter]
                 
                 initial_gaussians.max_radii2D[global_visibility_filter] = torch.max(initial_gaussians.max_radii2D[global_visibility_filter], radii[visibility_filter])
                 initial_gaussians.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
@@ -218,29 +220,33 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
     first_iter = old_iteration
     
-    initial_gaussians = scene.gaussians
+    gaussians: GaussianModel = scene.gaussians
+    
+    # generate a initialized gs copy
+    gaussians = gaussians.dump_to_cpu()
     
     # partition
-    initial_gaussians.partition() 
-    # initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
+    gaussians.build_split_indices()
+    # gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
     
-    model_list: List[GaussianModel] = []
-    
-    for idx in range(len(initial_gaussians.block_idx_list)):
-        model = initial_gaussians.get_kid(idx, opt)
-        model_list.append(model)
-        print(f"GS {idx} size: {model._xyz.shape[0]}")
-        LOGGER.info(f"GS {idx} size: {model._xyz.shape[0]}")  
+    submodel_list: List[GaussianModel] = gaussians.split()
+        
+    for submodel in submodel_list:
+        submodel.training_setup(opt, device = "cpu")
+        
+    cpu_full_proj_transform_dict = {}
+    for cam in scene.getTrainCameras():
+        cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
         
     for iteration in range(first_iter, opt.iterations + 1):
         
-        for model in model_list:
-            model.update_learning_rate(iteration)
+        for submodel in submodel_list:
+            submodel.update_learning_rate(iteration)
         
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
-            for model in model_list:
-                model.oneupSHdegree()
+            for submodel in submodel_list:
+                submodel.oneupSHdegree()
 
         # Pick a random Camera
         if not viewpoint_stack:
@@ -258,83 +264,98 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         
         # frustum culling
         if config.FRUSTUM_CULLING_ENABLED:
-            for model in model_list:
-                visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
-                model.visible_idx = torch.nonzero(visible_mask, as_tuple=True)[0]
+            for model in submodel_list:
+                # TODO 可以做一个懒加载设计 每隔一段时间做一次 fc 不必每次都做 节约时间 成为一个contribution
+                if model._xyz.is_cuda:
+                    visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
+                else:
+                    visible_mask = frustum_culling(model._xyz, cpu_full_proj_transform_dict[viewpoint_cam.image_name])
+                model.visible_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
         else:
-            for model in model_list:
-                model.visible_idx = torch.arange(model._xyz.shape[0], device="cuda")
+            for model in submodel_list:
+                model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
         
         # 无渲染全部结果 为计算Loss做准备
         rendered_list, depth_list, alpha_list = [], [], []
-        visible_model_id_list = []
+        visible_submodel_id_list = []
         visible_pts = 0
+        
         with torch.no_grad():
-            for idx, model in enumerate(model_list):
+            for submodel_id, submodel in enumerate(submodel_list):
                 
-                if model.visible_idx.shape[0] == 0:
+                if submodel.visible_indices.shape[0] == 0:
                     continue
                 
-                visible_pts += model.visible_idx.shape[0]
-                visible_model_id_list.append(idx)
-                
-                model.set_subset(model.visible_idx)
-                render_pkg = render(viewpoint_cam, model, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                model.clear_subset()
+                visible_pts += submodel.visible_indices.shape[0]
+                                
+                submodel.move_and_activate_subset()
+                render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                submodel.deactivate_subset()
                 
                 # pixel level 
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
+                
+                # 能被视锥看见并不一定真的有贡献
+                # image: [3, H, W]
+                valid_mask = (image > 0).any(dim=0)   # [H, W] bool
+                valid_pixels = valid_mask.sum().item()
+                total_pixels = valid_mask.numel()
+                contributed_percent = valid_pixels / total_pixels
+                if contributed_percent < 0.05:
+                    continue
                 
                 rendered_list.append(image)
                 depth_list.append(depth)
                 alpha_list.append(alphaLeft)
                 
+                visible_submodel_id_list.append(submodel_id)
+
                 
-        cpu_merge_result = merge_opt_kid(rendered_list, depth_list, alpha_list)
-        C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
-        prefix_T = cpu_merge_result["prefix_T"]
-        block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
+        # execute merge 
+        merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
+        C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
+        prefix_T = merge_res["prefix_T"]
+        block_rank = merge_res["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
         K, C, H, W = C_sorted.shape   
         colors_bg = cpu_merge_result["bg_rgb"]
 
         gt_image = viewpoint_cam.original_image.cuda()
         
         # 遍历所有可见block 轮流当active block
-        for index, model_id in enumerate(visible_model_id_list):
-            model: GaussianModel = model_list[model_id]
-            
-            model.set_subset(model.visible_idx)
-            render_pkg = render(viewpoint_cam, model, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-            model.clear_subset()
+        for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
+            submodel: GaussianModel = submodel_list[submodel_id]
+                        
+            submodel.move_and_activate_subset()
+            render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            submodel.deactivate_subset()
             
             # pixel level 
-            image2 = render_pkg["render"]
+            sub_img = render_pkg["render"]
             
             # gaussian points level
-            viewspace_point_tensor2, visibility_filter2, radii2 = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+            sub_viewspace_point_tensor, sub_visibility_filter, sub_radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             
-            rank_map = block_rank[index]  # [H,W]，当前block的渲染结果在每个像素上的排序位置
-            idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
-            idx = idx.expand(1, C, H, W)               # [1,3,H,W]
+           # 当前subset的渲染结果在每个像素上的排序位置
+            submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
             
             # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
             prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
 
             # 4. 当前块(index = idx)块提供的颜色
-            C_sorted_k = C_sorted.gather(dim=0, index=idx).squeeze(0)   # [3,H,W]   
+            C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]   
             
             # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
-            C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k                  
+            C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k                  
             
             # 6. 带梯度的渲染结果
-            C_active = image2      # [3,H,W], has grad   
+            C_active = sub_img      # [3,H,W], has grad   
             
             # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
-            image_with_block_grad = C_base + prefix_T_k * C_active
+            composed_img = C_base + prefix_T_k * C_active
             
             if viewpoint_cam.alpha_mask is not None:
                 alpha_mask = viewpoint_cam.alpha_mask.cuda()
-                image_with_block_grad *= alpha_mask
+                composed_img *= alpha_mask
                 
             # Loss
             Ll1 = l1_loss(image_with_block_grad, gt_image)
@@ -349,24 +370,27 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with torch.no_grad():
                 # Densification
                 if iteration < opt.densify_until_iter:
-                    global_viewspace_points_grad = torch.zeros(model.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
-                    global_viewspace_points_grad[model.visible_idx] = viewspace_point_tensor2.grad
-                    global_visibility_filter = model.visible_idx[visibility_filter2]
+                    sub_visibility_filter = sub_visibility_filter.cpu()
+                    sub_radii = sub_radii.cpu()
+                    global_viewspace_points_grad = torch.zeros(submodel.get_xyz.shape[0], 3, device="cpu", requires_grad=False )
+                    global_viewspace_points_grad[submodel.visible_indices] = sub_viewspace_point_tensor.grad.cpu()
                     
-                    model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii2[visibility_filter2])
-                    model.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
+                    global_visibility_filter = submodel.visible_indices[sub_visibility_filter]
+                    
+                    submodel.max_radii2D[global_visibility_filter] = torch.max(submodel.max_radii2D[global_visibility_filter], sub_radii[sub_visibility_filter])
+                    submodel.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
                     
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                        submodel.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
                         
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        model.reset_opacity()
+                        submodel.reset_opacity()
                         
                 # Optimizer step
                 if iteration < opt.iterations:
-                        model.optimizer.step()
-                        model.optimizer.zero_grad(set_to_none = True)
+                        submodel.optimizer.step()
+                        submodel.optimizer.zero_grad(set_to_none = True)
                         
                         
         with torch.no_grad():
@@ -375,8 +399,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
             
             pts_total = 0
-            for model in model_list:
-                pts_total += model._xyz.shape[0]
+            for submodel in submodel_list:
+                pts_total += submodel._xyz.shape[0]
             
             
             if iteration % 10 == 0:
@@ -394,18 +418,18 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 # wandb logging
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
-                    wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
+                    wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(submodel_list)}, step=iteration)
             
         # saving Gaussians ply    
         if (iteration in saving_iterations):
             print("\n[ITER {}] Saving Gaussians".format(iteration))
             point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}")
-            for idx, model in enumerate(model_list):
-                model.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{idx}.ply"), include_block=False)
+            for submodel_id, submodel in enumerate(submodel_list):
+                submodel.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{submodel_id}.ply"), include_block=False)
                 
         # save debug image
         if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(image_with_block_grad, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+            torchvision.utils.save_image(composed_img, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
                     
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -453,6 +477,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 15_000, 30_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument('--git_branch', type=str, default=None)
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -484,8 +509,20 @@ if __name__ == "__main__":
     os.makedirs("debug", exist_ok=True)
     IMG_PATH_IN_DEBUG = os.path.join("/data/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
     os.makedirs(IMG_PATH_IN_DEBUG, exist_ok=True)
+    time_start = time.time()
     res = training_phase_1(lp.extract(args), op.extract(args), pp.extract(args), args.start_checkpoint, args.debug_from)
     training_phase_2(lp.extract(args), op.extract(args), pp.extract(args), args.save_iterations, args.debug_from, res)
-
-    # All done
+    time_end = time.time()
+    
+    cost = time_end - time_start
+    hours = int(cost // 3600)
+    minutes = int((cost % 3600) // 60)
+    hhmm = f"{hours:02d}:{minutes:02d}"
     print("\nTraining complete.")
+
+    print(f"\nTraining complete. Total time: {hhmm}")
+    LOGGER.info(f"\nTraining complete. Total time: {hhmm}")
+    if WANDB and not DEBUG_MODE:
+        wandb.log({"time_cost": hhmm})
+        run.finish()    
+        
