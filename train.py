@@ -274,7 +274,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         
         # frustum culling
-        with timer.scope("frustum_culling"):
+        with torch.no_grad(), timer.scope("frustum_culling"):
             if config.FRUSTUM_CULLING_ENABLED:
                 for model in submodel_list:
                     # TODO 可以做一个懒加载设计 每隔一段时间做一次 fc 不必每次都做 节约时间 成为一个contribution
@@ -328,7 +328,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 
         # execute merge 
-        with timer.scope("merge"):
+        with torch.no_grad(), timer.scope("merge"):
             merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
             
         C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
@@ -338,7 +338,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         colors_bg = merge_res["bg_rgb"]
         
 
-        with timer.scope("send gt"):
+        with torch.no_grad(), timer.scope("send gt"):
             gt_image = viewpoint_cam.original_image.cuda()
             
         # 遍历所有可见block 轮流当active block
@@ -347,8 +347,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             
             with timer.scope("send2"):
                 submodel.move_and_activate_subset()
+                
             with timer.scope("render2"):
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                
             submodel.deactivate_subset()
             
             # pixel level 
@@ -357,7 +359,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # gaussian points level
             sub_viewspace_point_tensor, sub_visibility_filter, sub_radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             
-            with timer.scope("cal"):
+            with torch.no_grad(), timer.scope("cal"):
                 # 当前subset的渲染结果在每个像素上的排序位置
                 submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
                 # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
@@ -368,8 +370,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k                  
                 # 6. 带梯度的渲染结果
                 C_active = sub_img      # [3,H,W], has grad   
-                # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
-                composed_img = C_base + prefix_T_k * C_active
+                
+            # 把带梯度的渲染结果拼到背景上 用于计算loss
+            composed_img = C_base + prefix_T_k * C_active
             
             # if viewpoint_cam.alpha_mask is not None:
             #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
@@ -385,7 +388,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             # Depth regularization
             Ll1depth = 0
-            with timer.scope("set_colors_bg"):
+            
+            with torch.no_grad(), timer.scope("set_colors_bg"):
                 diff_gaussian_rasterization.set_colors_bg(colors_bg)
                 
             with timer.scope("backward"):
