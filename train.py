@@ -317,7 +317,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         prefix_T = merge_res["prefix_T"]
         block_rank = merge_res["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
         K, C, H, W = C_sorted.shape   
-        colors_bg = cpu_merge_result["bg_rgb"]
+        colors_bg = merge_res["bg_rgb"]
 
         gt_image = viewpoint_cam.original_image.cuda()
         
@@ -358,8 +358,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 composed_img *= alpha_mask
                 
             # Loss
-            Ll1 = l1_loss(image_with_block_grad, gt_image)
-            ssim_value = ssim(image_with_block_grad, gt_image)
+            Ll1 = l1_loss(composed_img, gt_image)
+            ssim_value = ssim(composed_img, gt_image)
             loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
             # Depth regularization
