@@ -248,7 +248,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     cpu_full_proj_transform_dict = {}
     for cam in scene.getTrainCameras():
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
-        
+    
+    time_start = time.time()
     for iteration in range(first_iter, opt.iterations + 1):
         
         for submodel in submodel_list:
@@ -463,7 +464,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         # # save debug image
         # if viewpoint_cam.image_name == debug_image_name:
         #     torchvision.utils.save_image(composed_img, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
-        
+    time_end = time.time()
+    cost = time_end - time_start
+    print(f"Phase 2 training time cost: [{cost:.2f}] seconds.")
+    
     timer.summary()
         
     # if (iteration in checkpoint_iterations):
