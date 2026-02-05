@@ -277,7 +277,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         with torch.no_grad(), timer.scope("frustum_culling"):
             if config.FRUSTUM_CULLING_ENABLED:
                 for model in submodel_list:
-                    # TODO 可以做一个懒加载设计 每隔一段时间做一次 fc 不必每次都做 节约时间 成为一个contribution
+                    # TODO 不再增点之后不必频繁更新视锥剔除
                     if model._xyz.is_cuda:
                         visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
                     else:
@@ -301,7 +301,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 visible_pts += submodel.visible_indices.shape[0]
                 
                 with timer.scope("send1"):
-                    submodel.move_and_activate_subset()
+                    submodel.move_and_activate_subset(requires_grad = False)
                     
                 with timer.scope("render1"):
                     render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -406,6 +406,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         global_visibility_filter = submodel.visible_indices[sub_visibility_filter]
                     
                     with timer.scope("update stats"):
+                        # TODO 这个是否可以增加间隔
                         submodel.max_radii2D[global_visibility_filter] = torch.max(submodel.max_radii2D[global_visibility_filter], sub_radii[sub_visibility_filter])
                         submodel.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
                     
