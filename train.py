@@ -550,18 +550,8 @@ if __name__ == "__main__":
     os.makedirs(IMG_PATH_IN_DEBUG, exist_ok=True)
     time_start = time.time()
     res = training_phase_1(lp.extract(args), op.extract(args), pp.extract(args), args.start_checkpoint, args.debug_from)
+    
     training_phase_2(lp.extract(args), op.extract(args), pp.extract(args), args.save_iterations, args.debug_from, res)
     time_end = time.time()
-    
     cost = time_end - time_start
-    hours = int(cost // 3600)
-    minutes = int((cost % 3600) // 60)
-    hhmm = f"{hours:02d}:{minutes:02d}"
-    print("\nTraining complete.")
-
-    print(f"\nTraining complete. Total time: {hhmm}")
-    LOGGER.info(f"\nTraining complete. Total time: {hhmm}")
-    if WANDB and not DEBUG_MODE:
-        wandb.log({"time_cost": hhmm})
-        run.finish()    
-        
+    print(f"\nTraining complete. Total time: {cost}")
