@@ -298,6 +298,7 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
+    SCENE_NAME = args.source_path.strip('/').split('/')[-1]
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
     DEBUG_MODE = sys.gettrace() is not None
     
