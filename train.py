@@ -298,15 +298,14 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
-    SCENE_NAME = args.source_path.strip('/').split('/')[-1]
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
+    DEBUG_MODE = sys.gettrace() is not None
+    
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
             project = "partgs", 
-            name = f"{BRANCH}_{time.strftime('%m%d%H%M')}", 
-            job_type = "train", 
-            group = SCENE_NAME,
+            name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
             config = vars(op.extract(args)) 
         )
         wandb.define_metric("iteration")  # 
