@@ -73,10 +73,13 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     
     
     # TODO
-    # scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
-    scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+    if dataset.sh_degree == 3:
+        scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+    else:
+        scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/sh2_iteration_30000/point_cloud.ply")
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
-
+    print(scene.gaussians._features_dc.shape)
+    print(scene.gaussians._features_rest.shape)
     return scene, 1000, 0, 0, progress_bar, None
     
     
