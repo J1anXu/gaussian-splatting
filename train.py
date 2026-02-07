@@ -84,6 +84,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     os.makedirs(img_path_in_debug, exist_ok=True)
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    start_time = time.time()
     for iteration in range(first_iter, opt.iterations + 1):
 
         iter_start.record()
@@ -164,7 +165,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
-            log = {"iter": iteration,"loss": ema_loss_for_log,"pts": total_points}
+            time_elapsed = time.time() - start_time
+            log = {"iter": iteration,"loss": ema_loss_for_log, "cost": time_elapsed, "pts": total_points}
             LOGGER.info(log)
             if WANDB:
                 wandb.log(log, step=iteration)
@@ -298,7 +300,7 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
     scene_name = args.source_path.split('/')[-1]
-    dataset_name = args.source_path.split('/')[-1]
+    dataset_name = args.source_path.split('/')[-2]
     LOGGER = get_logger(scene_name, os.path.join("./logs", "train", BRANCH, scene_name))
     DEBUG_MODE = sys.gettrace() is not None
     
