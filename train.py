@@ -302,11 +302,12 @@ if __name__ == "__main__":
     LOGGER = get_logger(scene_name, os.path.join("./logs", "train", BRANCH, scene_name))
     DEBUG_MODE = sys.gettrace() is not None
     
+    project_name = "partgs"
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
             project = f"3DGS-{dataset_name}", 
-            name = f"{BRANCH}", 
+            name = f"{project_name}_{BRANCH}", 
             group = scene_name,
             settings=wandb.Settings(start_method="fork",code_dir="."),
             config=vars(args)
