@@ -33,6 +33,7 @@ from logger import get_logger
 DEBUG_MODE = False
 WANDB = True
 LOGGER = None
+BRANCH = None
 
 try:
     from torch.utils.tensorboard import SummaryWriter
