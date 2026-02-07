@@ -29,8 +29,7 @@ import diff_gaussian_rasterization
 import wandb
 import time
 from logger import get_logger
-SCENE_NAME = "unknown_scene"
-BRANCH = "unknown_branch"
+
 DEBUG_MODE = False
 WANDB = True
 LOGGER = None
@@ -298,16 +297,19 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
-    SCENE_NAME = args.source_path.strip('/').split('/')[-1]
-    LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
+    scene_name = args.source_path.split('/')[-1]
+    dataset_name = args.source_path.split('/')[-1]
+    LOGGER = get_logger(scene_name, os.path.join("./logs", "train", BRANCH, scene_name))
     DEBUG_MODE = sys.gettrace() is not None
     
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
-            project = "partgs", 
-            name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
-            config = vars(op.extract(args)) 
+            project = f"3DGS-{dataset_name}", 
+            name = f"{BRANCH}", 
+            group = scene_name,
+            settings=wandb.Settings(start_method="fork",code_dir="."),
+            config=vars(args)
         )
         wandb.define_metric("iteration")  # 
 
