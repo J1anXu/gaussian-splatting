@@ -169,7 +169,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             time_elapsed = time.time() - start_time
             log = {"iter": iteration,"loss": ema_loss_for_log, "cost": time_elapsed, "pts": total_points}
             LOGGER.info(log)
-            if WANDB:
+            if WANDB and not DEBUG_MODE:
                 wandb.log(log, step=iteration)
             
             # Log and save
