@@ -4,7 +4,7 @@
 [submodule "submodules/diff-gaussian-rasterization"]
 	path = submodules/diff-gaussian-rasterization
 	url = https://github.com/J1anXu/diff-gaussian-rasterization.git
-	branch = partition-gs
+	branch = partgs
 [submodule "SIBR_viewers"]
 	path = SIBR_viewers
 	url = https://gitlab.inria.fr/sibr/sibr_core.git
