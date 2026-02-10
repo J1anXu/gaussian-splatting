@@ -31,7 +31,7 @@ import wandb
 import time
 from logger import get_logger
 import config
-import diff_gaussian_rasterization
+import rasterizer_tam
 
 SCENE_NAME = None
 BRANCH = None
@@ -47,7 +47,7 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 try:
-    from diff_gaussian_rasterization import SparseGaussianAdam
+    from rasterizer_tam import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
@@ -133,7 +133,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         visible_pts += initial_gaussians.visible_idx.shape[0]
         
         initial_gaussians.set_subset(initial_gaussians.visible_idx)
-        render_pkg = render(viewpoint_cam, initial_gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        render_pkg = render(viewpoint_cam, initial_gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=True) # 老旧的代码必须分开
         initial_gaussians.clear_subset()
         
         # pixel level 
@@ -161,7 +161,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         # Depth regularization
         Ll1depth = 0
         # TODO 这个不需要每个循环都做 
-        diff_gaussian_rasterization.set_colors_bg(colors_bg)
+        rasterizer_tam.set_colors_bg(colors_bg)
         loss.backward()
 
         with torch.no_grad():
@@ -364,7 +364,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             # Depth regularization
             Ll1depth = 0
-            diff_gaussian_rasterization.set_colors_bg(colors_bg)
+            rasterizer_tam.set_colors_bg(colors_bg)
             loss.backward()
 
             with torch.no_grad():

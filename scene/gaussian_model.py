@@ -25,7 +25,7 @@ from partition import generate_octant_blocks, generate_octant_blocks_kdtree, gen
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 try:
-    from diff_gaussian_rasterization import SparseGaussianAdam
+    from rasterizer_tam import SparseGaussianAdam
 except:
     pass
 

@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
 try:
-    from diff_gaussian_rasterization._C import fusedssim, fusedssim_backward
+    from rasterizer_tam._C import fusedssim, fusedssim_backward
 except:
     pass
 

@@ -29,7 +29,7 @@ from typing import List
 
 import config
 try:
-    from diff_gaussian_rasterization import SparseGaussianAdam
+    from rasterizer_tam import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False

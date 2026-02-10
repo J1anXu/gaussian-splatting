@@ -23,7 +23,7 @@ from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 import config
 try:
-    from diff_gaussian_rasterization import SparseGaussianAdam
+    from rasterizer_tam import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
