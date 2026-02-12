@@ -439,23 +439,28 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
-    SCENE_NAME = args.source_path.strip('/').split('/')[-1]
-    
+    SCENE_NAME = args.source_path.split('/')[-1]
+    dataset_name = args.source_path.split('/')[-2]
+    DEBUG_MODE = sys.gettrace() is not None
+
     if args.git_branch is not None:
         BRANCH = args.git_branch
     else:
         BRANCH = get_git_branch()
-    
+
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
     DEBUG_MODE = sys.gettrace() is not None
     print_config()
     
+    project_name = "partgs"
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
-            project = "partgs", 
-            name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
-            config = vars(op.extract(args)) 
+            project = f"3DGS-{dataset_name}", 
+            name = f"{project_name}_{BRANCH}", 
+            group = SCENE_NAME,
+            settings=wandb.Settings(start_method="fork",code_dir="."),
+            config=vars(args)
         )
         wandb.define_metric("iteration")  # 
         
@@ -463,20 +468,11 @@ if __name__ == "__main__":
     os.makedirs("debug", exist_ok=True)
     IMG_PATH_IN_DEBUG = os.path.join("/data/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
     os.makedirs(IMG_PATH_IN_DEBUG, exist_ok=True)
-    time_start = time.time()
+
     res = training_phase_1(lp.extract(args), op.extract(args), pp.extract(args), args.start_checkpoint, args.debug_from)
     training_phase_2(lp.extract(args), op.extract(args), pp.extract(args), args.save_iterations, args.debug_from, res)
-    time_end = time.time()
     
-    cost = time_end - time_start
-    hours = int(cost // 3600)
-    minutes = int((cost % 3600) // 60)
-    hhmm = f"{hours:02d}:{minutes:02d}"
-    print("\nTraining complete.")
 
-    print(f"\nTraining complete. Total time: {hhmm}")
-    LOGGER.info(f"\nTraining complete. Total time: {hhmm}")
     if WANDB and not DEBUG_MODE:
-        wandb.log({"time_cost": hhmm})
         run.finish()    
         
