@@ -273,7 +273,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         # 无渲染全部结果 为计算Loss做准备
         rendered_list, depth_list, alpha_list = [], [], []
         visible_model_id_list = []
-        act_contribution_list = [] # 真的有渲染结果的 block
         visible_pts = 0
 
         viewspace_point_tensor_list, visibility_filter_list, radii_list = [], [], []
@@ -306,7 +305,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             radii_list.append(render_pkg["radii"])
 
         cpu_merge_result = merge_opt_kid(rendered_list, depth_list, alpha_list)
-        img = render_pkg["render"]
+        img = cpu_merge_result["final_rgb"]
         colors_bg = cpu_merge_result["bg_rgb"]
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
@@ -324,16 +323,16 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         for index, model_id in enumerate(visible_model_id_list):
             model: GaussianModel = model_list[model_id]
             viewspace_point_tensor = viewspace_point_tensor_list[index]
-            visibility_filter = model.visible_idx[visibility_filter_list[index]]
+            local_visibility_filter = visibility_filter_list[index]  # Local indices within visible_idx
+            global_visibility_filter = model.visible_idx[local_visibility_filter]  # Global indices
             radii = radii_list[index]
             with torch.no_grad():
                 # Densification
                 if iteration < opt.densify_until_iter:
                     global_viewspace_points_grad = torch.zeros(model.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
                     global_viewspace_points_grad[model.visible_idx] = viewspace_point_tensor.grad
-                    global_visibility_filter = model.visible_idx[visibility_filter]
-                    
-                    model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii[visibility_filter])
+
+                    model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii[local_visibility_filter])
                     model.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
                     
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
