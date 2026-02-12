@@ -275,106 +275,65 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         visible_model_id_list = []
         act_contribution_list = [] # 真的有渲染结果的 block
         visible_pts = 0
-        with torch.no_grad():
-            for idx, model in enumerate(model_list):
-                
-                if model.visible_idx.shape[0] == 0:
-                    continue
-                
-                visible_pts += model.visible_idx.shape[0]
-                
-                model.set_subset(model.visible_idx)
-                render_pkg = render(viewpoint_cam, model, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                model.clear_subset()
-                
-                # pixel level 
-                image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
-                
-                
-                # 能被视锥看见并不一定真的有贡献
-                # image: [3, H, W]
-                valid_mask = (image > 0).any(dim=0)   # [H, W] bool
-                valid_pixels = valid_mask.sum().item()
-                total_pixels = valid_mask.numel()
-                contributed_percent = valid_pixels / total_pixels
-                if contributed_percent < 0.05:
-                    continue
-                if viewpoint_cam.image_name == debug_image_name:
-                    torchvision.utils.save_image(image, os.path.join(detail_path, f"block_{idx}_contri_{contributed_percent}" + ".png"))
-                
-                
-                rendered_list.append(image)
-                depth_list.append(depth)
-                alpha_list.append(alphaLeft)
-                
-                    
-                visible_model_id_list.append(idx)
-                
-        cpu_merge_result = merge_opt_kid(rendered_list, depth_list, alpha_list)
-        C_sorted = cpu_merge_result["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
-        prefix_T = cpu_merge_result["prefix_T"]
-        block_rank = cpu_merge_result["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
-        K, C, H, W = C_sorted.shape   
-        colors_bg = cpu_merge_result["bg_rgb"]
 
+        viewspace_point_tensor_list, visibility_filter_list, radii_list = [], [], []
         
-        
-        # 遍历所有可见block 轮流当active block
-        for index, model_id in enumerate(visible_model_id_list):
-            model: GaussianModel = model_list[model_id]
-            
+        for idx, model in enumerate(model_list):
+            if model.visible_idx.shape[0] == 0:
+                continue
+            visible_pts += model.visible_idx.shape[0]
             model.set_subset(model.visible_idx)
             render_pkg = render(viewpoint_cam, model, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             model.clear_subset()
-            
             # pixel level 
-            image2 = render_pkg["render"]
-            
-            # gaussian points level
-            viewspace_point_tensor2, visibility_filter2, radii2 = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-            
-            rank_map = block_rank[index]  # [H,W]，当前block的渲染结果在每个像素上的排序位置
-            idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
-            idx = idx.expand(1, C, H, W)               # [1,3,H,W]
-            
-            # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
-            prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
+            image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
+            # 能被视锥看见并不一定真的有贡献
+            # image: [3, H, W]
+            valid_mask = (image > 0).any(dim=0)   # [H, W] bool
+            valid_pixels = valid_mask.sum().item()
+            total_pixels = valid_mask.numel()
+            contributed_percent = valid_pixels / total_pixels
+            if contributed_percent < 0.05:
+                continue
+            if viewpoint_cam.image_name == debug_image_name:
+                torchvision.utils.save_image(image, os.path.join(detail_path, f"block_{idx}_contri_{contributed_percent}" + ".png"))
+            rendered_list.append(image)
+            depth_list.append(depth)
+            alpha_list.append(alphaLeft)
+            visible_model_id_list.append(idx)
+            viewspace_point_tensor_list.append(render_pkg["viewspace_points"])
+            visibility_filter_list.append(render_pkg["visibility_filter"])
+            radii_list.append(render_pkg["radii"])
 
-            # 4. 当前块(index = idx)块提供的颜色
-            C_sorted_k = C_sorted.gather(dim=0, index=idx).squeeze(0)   # [3,H,W]   
-            
-            # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
-            C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k                  
-            
-            # 6. 带梯度的渲染结果
-            C_active = image2      # [3,H,W], has grad   
-            
-            # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
-            image_with_block_grad = C_base + prefix_T_k * C_active
-            
-            if viewpoint_cam.alpha_mask is not None:
-                alpha_mask = viewpoint_cam.alpha_mask.cuda()
-                image_with_block_grad *= alpha_mask
-                
-            # Loss
-            gt_image = viewpoint_cam.original_image.cuda()
-            Ll1 = l1_loss(image_with_block_grad, gt_image)
-            ssim_value = ssim(image_with_block_grad, gt_image)
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        cpu_merge_result = merge_opt_kid(rendered_list, depth_list, alpha_list)
+        img = render_pkg["render"]
+        colors_bg = cpu_merge_result["bg_rgb"]
+        if viewpoint_cam.alpha_mask is not None:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            img *= alpha_mask
+    
+        # Loss
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(img, gt_image)
+        ssim_value = ssim(img, gt_image)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        Ll1depth = 0
+        diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
+        loss.backward()
 
-            # Depth regularization
-            Ll1depth = 0
-            diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
-            loss.backward()
-
+        for index, model_id in enumerate(visible_model_id_list):
+            model: GaussianModel = model_list[model_id]
+            viewspace_point_tensor = viewspace_point_tensor_list[index]
+            visibility_filter = model.visible_idx[visibility_filter_list[index]]
+            radii = radii_list[index]
             with torch.no_grad():
                 # Densification
                 if iteration < opt.densify_until_iter:
                     global_viewspace_points_grad = torch.zeros(model.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
-                    global_viewspace_points_grad[model.visible_idx] = viewspace_point_tensor2.grad
-                    global_visibility_filter = model.visible_idx[visibility_filter2]
+                    global_viewspace_points_grad[model.visible_idx] = viewspace_point_tensor.grad
+                    global_visibility_filter = model.visible_idx[visibility_filter]
                     
-                    model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii2[visibility_filter2])
+                    model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii[visibility_filter])
                     model.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
                     
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
@@ -426,7 +385,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 
         # save debug image
         if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(image_with_block_grad, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+            torchvision.utils.save_image(img, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
                     
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
