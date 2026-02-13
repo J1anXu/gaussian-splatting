@@ -317,7 +317,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = cpu_merge_result["bg_rgb"]
 
-        
+        start = time.time()
+
         
         # 遍历所有可见block 轮流当active block
         for index, model_id in enumerate(visible_model_id_list):
@@ -399,7 +400,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             for model in model_list:
                 pts_total += model._xyz.shape[0]
             
-            
+            time_elapsed = time.time() - start
+            log = {"iter": iteration, "loss": ema_loss_for_log, "cost": time_elapsed, "pts": pts_total}
             if iteration % 10 == 0:
                 # progress bar
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
@@ -425,8 +427,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 model.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{idx}.ply"), include_block=False)
                 
         # save debug image
-        if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(image_with_block_grad, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+        # if viewpoint_cam.image_name == debug_image_name:
+        #     torchvision.utils.save_image(image_with_block_grad, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
                     
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
