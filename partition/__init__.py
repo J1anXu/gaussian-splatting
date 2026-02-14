@@ -128,7 +128,19 @@ def generate_octant_blocks_kdtree(xyz: torch.Tensor, inflate_ratio: float = 0.05
 
 
 
-def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05):
+def generate_space_kdtree_blocks(xyz: torch.Tensor, num_blocks: int = 8, inflate_ratio: float = 0.05):
+    """
+    灵活的 KD-tree 分块，支持任意数量的块（不限于2的次方）
+
+    Args:
+        xyz: 点云坐标 [N, 3]
+        num_blocks: 目标分块数量，可以是任意正整数（如 3, 5, 7, 8, 10 等）
+        inflate_ratio: 边界膨胀比例，防止边界点遗漏
+
+    Returns:
+        block_bounds: 每个块的边界 [(min, max), ...]
+        block_indices: 每个块包含的点索引 [idx_tensor, ...]
+    """
     device = xyz.device
     dtype  = xyz.dtype
     N = xyz.shape[0]
@@ -144,50 +156,67 @@ def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05)
     root_min = center - extent
     root_max = center + extent
 
-    block_bounds  = []
-    block_indices = []
+    # ---------- 2) 初始化：一个包含所有点的块 ----------
+    class BlockNode:
+        def __init__(self, idx, bmin, bmax):
+            self.idx = idx
+            self.bmin = bmin
+            self.bmax = bmax
 
-    # ---------- 2) KD-tree recursion: 3 levels => 8 leaves ----------
-    def recurse(idx: torch.Tensor, bmin: torch.Tensor, bmax: torch.Tensor, depth: int):
-        if depth == 3:
-            # 叶子：bounds 必须是 “由 split 平面传下来的” bmin/bmax，保证不重叠
-            # 为了和你原 octant 一样“不会进 autograd / 可视化安全”，这里用 torch.tensor 重建
-            min_xyz = torch.tensor([bmin[0], bmin[1], bmin[2]], device=device, dtype=dtype)
-            max_xyz = torch.tensor([bmax[0], bmax[1], bmax[2]], device=device, dtype=dtype)
-            block_bounds.append((min_xyz, max_xyz))
-            block_indices.append(idx)
-            return
+    blocks = [BlockNode(all_idx, root_min, root_max)]
 
-        axis = depth % 3
+    # ---------- 3) 贪心分割：每次分割点数最多的块，直到达到目标数量 ----------
+    while len(blocks) < num_blocks:
+        # 找到点数最多的块
+        max_idx = max(range(len(blocks)), key=lambda i: blocks[i].idx.numel())
+        block = blocks.pop(max_idx)
 
-        # 按该轴排序，按点数对半分（严格均分靠这里）
-        coords = xyz[idx, axis]
+        # 如果这个块只有1个点或0个点，无法继续分割
+        if block.idx.numel() <= 1:
+            blocks.insert(max_idx, block)
+            print(f"[Warning] 无法继续分割，当前块数: {len(blocks)}, 目标: {num_blocks}")
+            break
+
+        # 选择最长的维度进行分割
+        extent = block.bmax - block.bmin
+        axis = torch.argmax(extent).item()
+
+        # 按该轴排序，按点数对半分
+        coords = xyz[block.idx, axis]
         _, order = torch.sort(coords)
-        sorted_idx = idx[order]
+        sorted_idx = block.idx[order]
         mid = sorted_idx.numel() // 2
 
         left_idx  = sorted_idx[:mid]
         right_idx = sorted_idx[mid:]
 
-        # split plane 取“切分值”
-        # 用排序后的中位坐标作为分割面（左: < split, 右: >= split 的空间意义）
-        split_val = xyz[sorted_idx[mid], axis] if sorted_idx.numel() > 0 else (bmin[axis] + bmax[axis]) * 0.5
+        # split plane 取中位坐标
+        split_val = xyz[sorted_idx[mid], axis]
 
-        # 构造非重叠 bounds（核心：由 split 平面更新父 bounds）
-        left_min = bmin
-        left_max = bmax.clone()
+        # 构造非重叠 bounds
+        left_min = block.bmin
+        left_max = block.bmax.clone()
         left_max[axis] = split_val
 
-        right_min = bmin.clone()
+        right_min = block.bmin.clone()
         right_min[axis] = split_val
-        right_max = bmax
+        right_max = block.bmax
 
-        recurse(left_idx,  left_min,  left_max,  depth + 1)
-        recurse(right_idx, right_min, right_max, depth + 1)
+        # 添加两个新块
+        blocks.append(BlockNode(left_idx, left_min, left_max))
+        blocks.append(BlockNode(right_idx, right_min, right_max))
 
-    recurse(all_idx, root_min, root_max, depth=0)
+    # ---------- 4) 转换为输出格式 ----------
+    block_bounds  = []
+    block_indices = []
 
-    # ---------- 3) 打印统计 ----------
+    for block in blocks:
+        min_xyz = torch.tensor([block.bmin[0], block.bmin[1], block.bmin[2]], device=device, dtype=dtype)
+        max_xyz = torch.tensor([block.bmax[0], block.bmax[1], block.bmax[2]], device=device, dtype=dtype)
+        block_bounds.append((min_xyz, max_xyz))
+        block_indices.append(block.idx)
+
+    # ---------- 5) 打印统计 ----------
     for i, idx in enumerate(block_indices):
         print(f"Block {i:2d}: {idx.numel():7d} points")
 
