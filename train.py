@@ -21,6 +21,7 @@ from gaussian_renderer import render, merge_opt, merge_opt_kid
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import get_git_branch, safe_state, get_expon_lr_func, get_git_branch
+
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -214,36 +215,57 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
                 initial_gaussians.optimizer.step()
                 initial_gaussians.optimizer.zero_grad(set_to_none = True)
 
-def stat(model_list):
-    print("=" * 60)
-    print("Gradient Statistics for model._xyz")
-    print("=" * 60)
+import json
+import os
+
+def stat(model_list, test_mode, save_dir="./logs"):
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    result = {
+        "test_mode": test_mode,
+        "blocks": []
+    }
 
     for i, model in enumerate(model_list):
 
-        xyz = model._xyz  # 假设这是 Parameter
+        xyz = model._xyz
         
+        block_info = {
+            "block_id": i,
+            "has_grad": False
+        }
+
         if xyz.grad is None:
-            print(f"[Block {i}] ❌ No grad")
+            result["blocks"].append(block_info)
             continue
-        
+
         grad = xyz.grad
-        
+
         grad_sum = grad.abs().sum().item()
         grad_mean = grad.abs().mean().item()
         grad_l2 = grad.norm().item()
         grad_max = grad.abs().max().item()
-        
-        is_zero = (grad.abs().sum() == 0).item()
-        
-        print(f"[Block {i}]")
-        print(f"    has_grad      : True")
-        print(f"    grad_sum      : {grad_sum:.6e}")
-        print(f"    grad_mean     : {grad_mean:.6e}")
-        print(f"    grad_l2_norm  : {grad_l2:.6e}")
-        print(f"    grad_max      : {grad_max:.6e}")
-        print(f"    all_zero_grad : {bool(is_zero)}")
-        print("-" * 40)
+        is_zero = bool((grad.abs().sum() == 0).item())
+
+        block_info.update({
+            "has_grad": True,
+            "grad_sum": grad_sum,
+            "grad_mean": grad_mean,
+            "grad_l2_norm": grad_l2,
+            "grad_max": grad_max,
+            "all_zero_grad": is_zero
+        })
+
+        result["blocks"].append(block_info)
+
+    # 保存文件
+    save_path = os.path.join(save_dir, f"xyz_grad_test_mode_{test_mode}.json")
+    with open(save_path, "w") as f:
+        json.dump(result, f, indent=4)
+
+    print(f"Gradient stats saved to: {save_path}")
+
 
 test_mode = config.TEST_MODE
 
@@ -477,8 +499,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
                 loss.backward()
                 
-        print(f"test mode = {test_mode}")
-        stat(model_list)
+        stat(model_list, test_mode)
         with torch.no_grad():
             # Densification
             if iteration < opt.densify_until_iter:
@@ -511,7 +532,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         
                         
         time_elapsed = time.time() - start
-          
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
