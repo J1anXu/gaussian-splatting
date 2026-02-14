@@ -405,7 +405,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             for model in model_list:
                 pts_total += model._xyz.shape[0]
             
-            log = {"iter": iteration, "loss": ema_loss_for_log, "cost": time_elapsed, "pts": pts_total}
             if iteration % 10 == 0:
                 # progress bar
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
@@ -413,8 +412,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if iteration == opt.iterations:
                     progress_bar.close()
                 
-                log = {"iter": iteration, "loss": ema_loss_for_log, "visible_blocks": len(visible_model_id_list), "pts_in_frustum": visible_pts, "pts": pts_total}
-                
+                log = {"iter": iteration, "loss": ema_loss_for_log, "cost": time_elapsed, "pts": pts_total}
+
                 # logging
                 LOGGER.info(log)
                 
