@@ -636,8 +636,14 @@ class GaussianModel:
         self.visible_indices = None    
         
         
-    def partition(self):
-        block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz)
+    def partition(self, num_blocks=8):
+        """
+        将点云分割成多个块
+
+        Args:
+            num_blocks: 分块数量，可以是任意正整数（如 3, 5, 8, 10 等）
+        """
+        block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz, num_blocks=num_blocks)
         self.block_bounds = block_bounds
         self.block_idx_list = block_indices
     

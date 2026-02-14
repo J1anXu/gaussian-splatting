@@ -219,11 +219,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
     first_iter = old_iteration
     
-    initial_gaussians = scene.gaussians
+    initial_gaussians: GaussianModel = scene.gaussians
     
     # partition
-    initial_gaussians.partition() 
-    # initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
+    initial_gaussians.partition(num_blocks=4) 
+    initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
     
     model_list: List[GaussianModel] = []
     
