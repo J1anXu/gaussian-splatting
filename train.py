@@ -218,7 +218,52 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 import json
 import os
 
-def stat(model_list, test_mode, save_dir="./logs"):
+def stat_viewspace_grad(viewspace_point_tensor_list, test_mode, save_dir="./logs"):
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    result = {
+        "test_mode": test_mode,
+        "blocks": []
+    }
+
+    for i, tensor in enumerate(viewspace_point_tensor_list):
+
+        block_info = {
+            "block_id": i,
+            "has_grad": False
+        }
+
+        if tensor.grad is None:
+            result["blocks"].append(block_info)
+            continue
+
+        grad = tensor.grad
+
+        grad_sum = grad.abs().sum().item()
+        grad_mean = grad.abs().mean().item()
+        grad_l2 = grad.norm().item()
+        grad_max = grad.abs().max().item()
+        is_zero = bool((grad.abs().sum() == 0).item())
+
+        block_info.update({
+            "has_grad": True,
+            "grad_sum": grad_sum,
+            "grad_mean": grad_mean,
+            "grad_l2_norm": grad_l2,
+            "grad_max": grad_max,
+            "all_zero_grad": is_zero,
+            "tensor_shape": list(tensor.shape)
+        })
+
+        result["blocks"].append(block_info)
+
+    save_path = os.path.join(save_dir, f"viewspace_grad_test_mode_{test_mode}.json")
+    with open(save_path, "w") as f:
+        json.dump(result, f, indent=4)
+
+    print(f"Viewspace grad stats saved to: {save_path}")
+def stat_xyz(model_list, test_mode, save_dir="./logs"):
 
     os.makedirs(save_dir, exist_ok=True)
 
@@ -499,7 +544,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
                 loss.backward()
                 
-        stat(model_list, test_mode)
+        stat_xyz(model_list, test_mode)
+        stat_viewspace_grad(viewspace_point_tensor_list, test_mode)
+        
         with torch.no_grad():
             # Densification
             if iteration < opt.densify_until_iter:

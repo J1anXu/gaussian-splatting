@@ -19,4 +19,4 @@ PARTITIONING_ENABLED = True  # 是否启用分块处理
 FRUSTUM_CULLING_ENABLED = True  # 是否启用视锥剔除
 
 
-TEST_MODE = 2
+TEST_MODE = 1
