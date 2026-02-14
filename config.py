@@ -17,3 +17,6 @@ SAVE_DEPTH_LIST = True  # 是否保存各个block的深度图
 
 PARTITIONING_ENABLED = True  # 是否启用分块处理
 FRUSTUM_CULLING_ENABLED = True  # 是否启用视锥剔除
+
+
+TEST_MODE = 2

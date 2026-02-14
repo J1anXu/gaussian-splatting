@@ -70,6 +70,17 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     prepare_output_and_logger(dataset)
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
+    
+    
+    # TODO
+    # scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+    scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+
+    return scene, 1000, 0, 0, progress_bar, None
+
+    initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
+    scene = Scene(dataset, initial_gaussians, on_cpu=True)
     initial_gaussians.training_setup(opt)
     
     if checkpoint:
@@ -203,7 +214,38 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
                 initial_gaussians.optimizer.step()
                 initial_gaussians.optimizer.zero_grad(set_to_none = True)
 
+def stat(model_list):
+    print("=" * 60)
+    print("Gradient Statistics for model._xyz")
+    print("=" * 60)
 
+    for i, model in enumerate(model_list):
+
+        xyz = model._xyz  # 假设这是 Parameter
+        
+        if xyz.grad is None:
+            print(f"[Block {i}] ❌ No grad")
+            continue
+        
+        grad = xyz.grad
+        
+        grad_sum = grad.abs().sum().item()
+        grad_mean = grad.abs().mean().item()
+        grad_l2 = grad.norm().item()
+        grad_max = grad.abs().max().item()
+        
+        is_zero = (grad.abs().sum() == 0).item()
+        
+        print(f"[Block {i}]")
+        print(f"    has_grad      : True")
+        print(f"    grad_sum      : {grad_sum:.6e}")
+        print(f"    grad_mean     : {grad_mean:.6e}")
+        print(f"    grad_l2_norm  : {grad_l2:.6e}")
+        print(f"    grad_max      : {grad_max:.6e}")
+        print(f"    all_zero_grad : {bool(is_zero)}")
+        print("-" * 40)
+
+test_mode = config.TEST_MODE
 
 def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     scene, old_iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg = res
@@ -222,7 +264,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     initial_gaussians: GaussianModel = scene.gaussians
     
     # partition
-    initial_gaussians.partition(num_blocks=4) 
+    initial_gaussians.partition(num_blocks=8) 
     initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
     
     model_list: List[GaussianModel] = []
@@ -325,63 +367,118 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         visibility_filter_list = []
         radii_list = []
 
-        total_loss = torch.tensor(0.0, device="cuda")
-        # 遍历所有可见block 轮流当active block
-        for index, model_id in enumerate(visible_model_id_list):
-            model: GaussianModel = model_list[model_id]
-            
-            model.set_subset(model.visible_idx)
-            render_pkg = render(viewpoint_cam, model, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-            model.clear_subset()
-            
-            # pixel level 
-            image2 = render_pkg["render"]
-            
-            # gaussian points level
-            viewspace_point_tensor2, visibility_filter2, radii2 = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-            
-            viewspace_point_tensor_list.append(viewspace_point_tensor2)
-            visibility_filter_list.append(visibility_filter2)
-            radii_list.append(radii2)
-
-            rank_map = block_rank[index]  # [H,W]，当前block的渲染结果在每个像素上的排序位置
-            idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
-            idx = idx.expand(1, C, H, W)               # [1,3,H,W]
-            
-            # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
-            prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
-
-            # 4. 当前块(index = idx)块提供的颜色
-            C_sorted_k = C_sorted.gather(dim=0, index=idx).squeeze(0)   # [3,H,W]   
-            
-            # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
-            C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k                  
-            
-            # 6. 带梯度的渲染结果
-            C_active = image2      # [3,H,W], has grad   
-            
-            # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
-            image_with_block_grad = C_base + prefix_T_k * C_active
-            
-            if viewpoint_cam.alpha_mask is not None:
-                alpha_mask = viewpoint_cam.alpha_mask.cuda()
-                image_with_block_grad *= alpha_mask
+        loss_list = []
+        
+        if test_mode == 1:
+            # 遍历所有可见block 轮流当active block
+            for index, model_id in enumerate(visible_model_id_list):
+                model: GaussianModel = model_list[model_id]
                 
-            # Loss
-            gt_image = viewpoint_cam.original_image.cuda()
-            Ll1 = l1_loss(image_with_block_grad, gt_image)
-            ssim_value = ssim(image_with_block_grad, gt_image)
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
-            total_loss += loss
+                model.set_subset(model.visible_idx)
+                render_pkg = render(viewpoint_cam, model, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                model.clear_subset()
+                
+                # pixel level 
+                image2 = render_pkg["render"]
+                
+                # gaussian points level
+                viewspace_point_tensor2, visibility_filter2, radii2 = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+                
+                viewspace_point_tensor_list.append(viewspace_point_tensor2)
+                visibility_filter_list.append(visibility_filter2)
+                radii_list.append(radii2)
 
-            # Depth regularization
-            Ll1depth = 0
+                rank_map = block_rank[index]  # [H,W]，当前block的渲染结果在每个像素上的排序位置
+                idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
+                idx = idx.expand(1, C, H, W)               # [1,3,H,W]
+                
+                # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
+                prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
+
+                # 4. 当前块(index = idx)块提供的颜色
+                C_sorted_k = C_sorted.gather(dim=0, index=idx).squeeze(0)   # [3,H,W]   
+                
+                # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
+                C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k                  
+                
+                # 6. 带梯度的渲染结果
+                C_active = image2      # [3,H,W], has grad   
+                
+                # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
+                image_with_block_grad = C_base + prefix_T_k * C_active
+                
+                if viewpoint_cam.alpha_mask is not None:
+                    alpha_mask = viewpoint_cam.alpha_mask.cuda()
+                    image_with_block_grad *= alpha_mask
+                    
+                # Loss
+                gt_image = viewpoint_cam.original_image.cuda()
+                Ll1 = l1_loss(image_with_block_grad, gt_image)
+                ssim_value = ssim(image_with_block_grad, gt_image)
+                loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+                loss_list.append(loss)
+
+                # Depth regularization
+                Ll1depth = 0
 
 
-        diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
-        total_loss = total_loss / len(visible_model_id_list)  # 平均到每个 block 上
-        total_loss.backward()
+            diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
+            total_loss = torch.stack(loss_list).sum()  # 所有 block 的 loss 之和
+            total_loss.backward()
+        elif test_mode == 2:
+            # 遍历所有可见block 轮流当active block
+            for index, model_id in enumerate(visible_model_id_list):
+                model: GaussianModel = model_list[model_id]
+                
+                model.set_subset(model.visible_idx)
+                render_pkg = render(viewpoint_cam, model, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                model.clear_subset()
+                
+                # pixel level 
+                image2 = render_pkg["render"]
+                
+                # gaussian points level
+                viewspace_point_tensor2, visibility_filter2, radii2 = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+                
+                viewspace_point_tensor_list.append(viewspace_point_tensor2)
+                visibility_filter_list.append(visibility_filter2)
+                radii_list.append(radii2)
 
+                rank_map = block_rank[index]  # [H,W]，当前block的渲染结果在每个像素上的排序位置
+                idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
+                idx = idx.expand(1, C, H, W)               # [1,3,H,W]
+                
+                # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
+                prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
+
+                # 4. 当前块(index = idx)块提供的颜色
+                C_sorted_k = C_sorted.gather(dim=0, index=idx).squeeze(0)   # [3,H,W]   
+                
+                # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
+                C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k                  
+                
+                # 6. 带梯度的渲染结果
+                C_active = image2      # [3,H,W], has grad   
+                
+                # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
+                image_with_block_grad = C_base + prefix_T_k * C_active
+                
+                if viewpoint_cam.alpha_mask is not None:
+                    alpha_mask = viewpoint_cam.alpha_mask.cuda()
+                    image_with_block_grad *= alpha_mask
+                    
+                # Loss
+                gt_image = viewpoint_cam.original_image.cuda()
+                Ll1 = l1_loss(image_with_block_grad, gt_image)
+                ssim_value = ssim(image_with_block_grad, gt_image)
+                loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+                # Depth regularization
+                Ll1depth = 0
+                diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
+                loss.backward()
+                
+        print(f"test mode = {test_mode}")
+        stat(model_list)
         with torch.no_grad():
             # Densification
             if iteration < opt.densify_until_iter:
