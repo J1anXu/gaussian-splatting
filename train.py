@@ -321,8 +321,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = cpu_merge_result["bg_rgb"]
 
+        viewspace_point_tensor_list = []        
+        visibility_filter_list = []
+        radii_list = []
 
-        
+        total_loss = torch.tensor(0.0, device="cuda")
         # 遍历所有可见block 轮流当active block
         for index, model_id in enumerate(visible_model_id_list):
             model: GaussianModel = model_list[model_id]
@@ -337,6 +340,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # gaussian points level
             viewspace_point_tensor2, visibility_filter2, radii2 = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             
+            viewspace_point_tensor_list.append(viewspace_point_tensor2)
+            visibility_filter_list.append(visibility_filter2)
+            radii_list.append(radii2)
+
             rank_map = block_rank[index]  # [H,W]，当前block的渲染结果在每个像素上的排序位置
             idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
             idx = idx.expand(1, C, H, W)               # [1,3,H,W]
@@ -365,33 +372,45 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             Ll1 = l1_loss(image_with_block_grad, gt_image)
             ssim_value = ssim(image_with_block_grad, gt_image)
             loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+            total_loss += loss
 
             # Depth regularization
             Ll1depth = 0
-            diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
-            loss.backward()
 
-            with torch.no_grad():
-                # Densification
-                if iteration < opt.densify_until_iter:
+
+        diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
+        total_loss = total_loss / len(visible_model_id_list)  # 平均到每个 block 上
+        total_loss.backward()
+
+        with torch.no_grad():
+            # Densification
+            if iteration < opt.densify_until_iter:
+                for idx, model_id in enumerate(visible_model_id_list):
+                    model: GaussianModel = model_list[model_id]
+                    viewspace_point_tensor = viewspace_point_tensor_list[idx]
+                    visibility_filter = visibility_filter_list[idx]
+                    radii = radii_list[idx]
+                    
                     global_viewspace_points_grad = torch.zeros(model.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
-                    global_viewspace_points_grad[model.visible_idx] = viewspace_point_tensor2.grad
-                    global_visibility_filter = model.visible_idx[visibility_filter2]
-                    
-                    model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii2[visibility_filter2])
+                    global_viewspace_points_grad[model.visible_idx] = viewspace_point_tensor.grad
+                    global_visibility_filter = model.visible_idx[visibility_filter]
+                
+                    model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii[visibility_filter])
                     model.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
-                    
+                
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
                         
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         model.reset_opacity()
-                        
-                # Optimizer step
-                if iteration < opt.iterations:
-                        model.optimizer.step()
-                        model.optimizer.zero_grad(set_to_none = True)
+                    
+            # Optimizer step
+            if iteration < opt.iterations:
+                for model_id in visible_model_id_list:
+                    model = model_list[model_id]
+                    model.optimizer.step()
+                    model.optimizer.zero_grad(set_to_none = True)
                         
                         
         time_elapsed = time.time() - start
