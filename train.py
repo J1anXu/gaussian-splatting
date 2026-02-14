@@ -31,7 +31,7 @@ import wandb
 import time
 from logger import get_logger
 import config
-import diff_gaussian_rasterization
+import diff_gaussian_rasterization_jian
 from TimerManager import TimerManager
 SCENE_NAME = None
 BRANCH = None
@@ -391,7 +391,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             Ll1depth = 0
             
             with torch.no_grad(), timer.scope("set_colors_bg"):
-                diff_gaussian_rasterization.set_colors_bg(colors_bg)
+                diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
                 
             with timer.scope("backward"):
                 loss.backward()
