@@ -233,6 +233,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         print(f"GS {idx} size: {model._xyz.shape[0]}")
         LOGGER.info(f"GS {idx} size: {model._xyz.shape[0]}")  
         
+
+    start = time.time()
+
+
     for iteration in range(first_iter, opt.iterations + 1):
         
         for model in model_list:
@@ -317,7 +321,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = cpu_merge_result["bg_rgb"]
 
-        start = time.time()
 
         
         # 遍历所有可见block 轮流当active block
@@ -391,6 +394,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         model.optimizer.zero_grad(set_to_none = True)
                         
                         
+        time_elapsed = time.time() - start
+          
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -400,7 +405,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             for model in model_list:
                 pts_total += model._xyz.shape[0]
             
-            time_elapsed = time.time() - start
             log = {"iter": iteration, "loss": ema_loss_for_log, "cost": time_elapsed, "pts": pts_total}
             if iteration % 10 == 0:
                 # progress bar
