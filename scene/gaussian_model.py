@@ -66,7 +66,7 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         # visible_indices should keep None unless set by set_subset
-        self.visible_indices = None
+        self.subset_indices = None
         self.block_bounds = []
         self.block_idx_list = []
         self.visible_idx = []
@@ -111,27 +111,27 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        if self.visible_indices is not None:
-            return self.scaling_activation(self._scaling[self.visible_indices])
+        if self.subset_indices is not None:
+            return self.scaling_activation(self._scaling[self.subset_indices])
         return self.scaling_activation(self._scaling)
     
     @property
     def get_rotation(self):
-        if self.visible_indices is not None:
-            return self.rotation_activation(self._rotation[self.visible_indices])
+        if self.subset_indices is not None:
+            return self.rotation_activation(self._rotation[self.subset_indices])
         return self.rotation_activation(self._rotation)
     
     @property
     def get_xyz(self):
-        if self.visible_indices is not None:
-            return self._xyz[self.visible_indices]
+        if self.subset_indices is not None:
+            return self._xyz[self.subset_indices]
         return self._xyz
     
     @property
     def get_features(self):
-        if self.visible_indices is not None:
-            features_dc = self._features_dc[self.visible_indices]
-            features_rest = self._features_rest[self.visible_indices]
+        if self.subset_indices is not None:
+            features_dc = self._features_dc[self.subset_indices]
+            features_rest = self._features_rest[self.subset_indices]
             return torch.cat((features_dc, features_rest), dim=1)
         features_dc = self._features_dc
         features_rest = self._features_rest
@@ -139,20 +139,20 @@ class GaussianModel:
     
     @property
     def get_features_dc(self):
-        if self.visible_indices is not None:
-            return self._features_dc[self.visible_indices]
+        if self.subset_indices is not None:
+            return self._features_dc[self.subset_indices]
         return self._features_dc
     
     @property
     def get_features_rest(self):
-        if self.visible_indices is not None:
-            return self._features_rest[self.visible_indices]
+        if self.subset_indices is not None:
+            return self._features_rest[self.subset_indices]
         return self._features_rest
     
     @property
     def get_opacity(self):
-        if self.visible_indices is not None:
-            return self.opacity_activation(self._opacity[self.visible_indices])
+        if self.subset_indices is not None:
+            return self.opacity_activation(self._opacity[self.subset_indices])
         return self.opacity_activation(self._opacity)
     
     @property
@@ -166,8 +166,8 @@ class GaussianModel:
     #         return self.pretrained_exposures[image_name]
     
     def get_covariance(self, scaling_modifier = 1):
-        if self.visible_indices is not None:
-            return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation[self.visible_indices])
+        if self.subset_indices is not None:
+            return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation[self.subset_indices])
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
     def oneupSHdegree(self):
@@ -462,7 +462,7 @@ class GaussianModel:
         kid.block_bounds = None
         kid.block_idx_list = None
         kid.partitioned = False
-        kid.visible_indices = None
+        kid.subset_indices = None
 
         # ====== 初始化 optimizer（step = 0） ======
         kid.training_setup(training_args)
@@ -630,10 +630,10 @@ class GaussianModel:
         self.denom[update_filter] += 1
 
     def set_subset(self, visible_indices):
-        self.visible_indices = visible_indices
+        self.subset_indices = visible_indices
         
     def clear_subset(self):
-        self.visible_indices = None    
+        self.subset_indices = None    
         
         
     def partition(self):

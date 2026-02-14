@@ -25,7 +25,8 @@ set -o pipefail
 
 # GPU 与 scene 对应关系（一个 GPU 一个队列）
 GPUS=(0 1 2 3)
-SCENES=(bicycle kitchen room bonsai)
+# SCENES=(bicycle kitchen room bonsai)
+SCENES=(bicycle)
 
 
 DATA_ROOT=/data2/jian/data/mip360
@@ -69,12 +70,12 @@ run_pipeline() {
   ####################
   # 1. TRAIN
   ####################
-  python train.py \
-    -s "$data_path" \
-    --model_path "$model_path" \
-    --git_branch "$GIT_BRANCH" \
-    --eval \
-    > "$LOG_ROOT/train_${scene}_$GIT_BRANCH.log" 2>&1
+  # python train.py \
+  #   -s "$data_path" \
+  #   --model_path "$model_path" \
+  #   --git_branch "$GIT_BRANCH" \
+  #   --eval \
+  #   > "$LOG_ROOT/train_${scene}_$GIT_BRANCH.log" 2>&1
 
   ####################
   # 2. RENDER_P
