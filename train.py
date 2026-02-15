@@ -347,12 +347,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             submodel: GaussianModel = submodel_list[submodel_id]
             
             with timer.scope("send2"):
-                submodel.move_and_activate_subset()
+                submodel.move_and_activate_subset(requires_grad = True)
                 
             with timer.scope("render2"):
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
                 
-            submodel.deactivate_subset()
+            # submodel.deactivate_subset()
             
             # pixel level 
             sub_img = render_pkg["render"]
@@ -396,6 +396,31 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with timer.scope("backward"):
                 loss.backward()
 
+            with timer.scope("copy grad"):
+
+                idx = submodel.visible_indices.to("cpu")
+
+                def scatter_grad(cpu_param, gpu_param):
+                    grad_gpu = gpu_param.grad
+                    if grad_gpu is None:
+                        return
+
+                    grad_cpu = grad_gpu.detach().cpu()
+
+                    if cpu_param.grad is None:
+                        cpu_param.grad = torch.zeros_like(cpu_param)
+
+                    cpu_param.grad[idx] += grad_cpu
+
+                scatter_grad(submodel._xyz, submodel._xyz_gpu)
+                scatter_grad(submodel._features_dc, submodel._features_dc_gpu)
+                scatter_grad(submodel._features_rest, submodel._features_rest_gpu)
+                scatter_grad(submodel._scaling, submodel._scaling_gpu)
+                scatter_grad(submodel._rotation, submodel._rotation_gpu)
+                scatter_grad(submodel._opacity, submodel._opacity_gpu)
+            submodel.deactivate_subset()
+
+
             with torch.no_grad():
                 # Densification
                 if iteration < opt.densify_until_iter:
@@ -419,12 +444,21 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         with timer.scope("reset opacity"):
                             submodel.reset_opacity()
-                        
+                
+                diff = False
                 # Optimizer step
                 if iteration < opt.iterations:
                     with timer.scope("opt step"):
-                        submodel.optimizer.step()
-                        submodel.optimizer.zero_grad(set_to_none = True)
+                        if diff:
+                            before = submodel._xyz.detach().clone()
+                            submodel.optimizer.step()
+                            after = submodel._xyz.detach()
+                            diff = (after - before).abs().max().item()
+                            print(f"xyz max update: {diff:.6e}")
+                            submodel.optimizer.zero_grad(set_to_none = True)
+                        else:
+                            submodel.optimizer.step()
+                            submodel.optimizer.zero_grad(set_to_none = True)
                         
                         
         with torch.no_grad():

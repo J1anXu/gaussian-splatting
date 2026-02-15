@@ -698,6 +698,7 @@ class GaussianModel:
             return idx.to("cpu")
         
         idx = _to_cpu_index(self.visible_indices)
+        
         # 截断梯度回传 统一处理
         def send_subset_to_gpu(tensor):
             subset = tensor[idx].detach().cuda(non_blocking=True)
