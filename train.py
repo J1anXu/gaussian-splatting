@@ -153,6 +153,9 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         
         # gaussian points level
         viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+
+        # 将mask转换为indices（在需要时才同步）
+        visibility_filter = visibility_filter.nonzero(as_tuple=True)[0]
         
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
@@ -298,40 +301,56 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         rendered_list, depth_list, alpha_list = [], [], []
         visible_submodel_id_list = []
         visible_pts = 0
-        
+
         with torch.no_grad():
+            # 预处理：找出所有可见的submodel
+            visible_submodels = []
             for submodel_id, submodel in enumerate(submodel_list):
-                
                 if submodel.visible_indices.shape[0] == 0:
                     continue
-                
+                visible_submodels.append((submodel_id, submodel))
                 visible_pts += submodel.visible_indices.shape[0]
-                
-                with timer.scope("send1"), tl.scope("send1", tid="CPU", cat="cpu", block_id=submodel_id):
-                    submodel.move_and_activate_subset(requires_grad = False)
 
-                with timer.scope("render1"), tl.scope("render1", tid="GPU", cat="gpu", block_id=submodel_id):
-                    render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                    
-                submodel.deactivate_subset()
-                
-                # pixel level 
-                image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
-                
-                # 能被视锥看见并不一定真的有贡献
-                # image: [3, H, W]
-                valid_mask = (image > 0).any(dim=0)   # [H, W] bool
-                valid_pixels = valid_mask.sum().item()
-                total_pixels = valid_mask.numel()
-                contributed_percent = valid_pixels / total_pixels
-                if contributed_percent < 0.05:
-                    continue
-                
-                rendered_list.append(image)
-                depth_list.append(depth)
-                alpha_list.append(alphaLeft)
-                
-                visible_submodel_id_list.append(submodel_id)
+            # 真正的流水线优化：
+            # 1. 预先传输第一个block
+            # 2. 在循环中：render(i) 完成后，立即启动 send(i+1)，然后处理结果
+            # 3. 由于send使用non_blocking=True，它会立即返回，让CPU继续工作
+
+            if len(visible_submodels) > 0:
+                # 预先传输第一个block
+                submodel_id_0, submodel_0 = visible_submodels[0]
+                with timer.scope("send1"), tl.scope("send1", tid="CPU", cat="cpu", block_id=submodel_id_0):
+                    submodel_0.move_and_activate_subset(requires_grad=False)
+
+                for i in range(len(visible_submodels)):
+                    submodel_id, submodel = visible_submodels[i]
+
+                    # 渲染当前block
+                    with timer.scope("render1"), tl.scope("render1", tid="GPU", cat="gpu", block_id=submodel_id):
+                        render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+
+                    # 立即启动下一个block的传输（在处理当前结果之前）
+                    # 这样send的CPU操作可以与结果处理并行
+                    if i + 1 < len(visible_submodels):
+                        next_submodel_id, next_submodel = visible_submodels[i + 1]
+                        with timer.scope("send1"), tl.scope("send1", tid="CPU", cat="cpu", block_id=next_submodel_id):
+                            next_submodel.move_and_activate_subset(requires_grad=False)
+
+                    # 处理当前block的结果
+                    submodel.deactivate_subset()
+
+                    image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
+                    valid_mask = (image > 0).any(dim=0)
+                    valid_pixels = valid_mask.sum().item()
+                    total_pixels = valid_mask.numel()
+                    contributed_percent = valid_pixels / total_pixels
+                    if contributed_percent < 0.05:
+                        continue
+
+                    rendered_list.append(image)
+                    depth_list.append(depth)
+                    alpha_list.append(alphaLeft)
+                    visible_submodel_id_list.append(submodel_id)
 
                 
         # execute merge 
@@ -365,6 +384,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             
             # gaussian points level
             sub_viewspace_point_tensor, sub_visibility_filter, sub_radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+
+            # 将mask转换为indices（延迟到需要时才同步）
+            sub_visibility_filter = sub_visibility_filter.nonzero(as_tuple=True)[0]
             
             with torch.no_grad(), timer.scope("cal"), tl.scope("cal", tid="CPU", cat="cpu", block_id=submodel_id):
                 # 当前subset的渲染结果在每个像素上的排序位置

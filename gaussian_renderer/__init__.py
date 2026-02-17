@@ -118,15 +118,20 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     rendered_image = rendered_image.clamp(0, 1)
+
+    # 优化：延迟nonzero()操作，避免在render中触发同步
+    # nonzero()会导致CPU-GPU同步，阻塞流水线
+    visibility_mask = radii > 0  # 只创建mask，不调用nonzero()
+
     out = {
         "render": rendered_image,
         "viewspace_points": screenspace_points,
-        "visibility_filter" : (radii > 0).nonzero(),
+        "visibility_filter" : visibility_mask,  # 返回mask而不是indices
         "radii": radii,
         "depth" : depth_image,
         "alphaLeft" : alphaLeft
         }
-    
+
     return out
 
 

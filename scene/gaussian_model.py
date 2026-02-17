@@ -696,24 +696,46 @@ class GaussianModel:
             if not torch.is_tensor(idx):
                 idx = torch.tensor(idx, dtype=torch.long)
             return idx.to("cpu")
-        
+
         idx = _to_cpu_index(self.visible_indices)
-        
-        # 截断梯度回传 统一处理
-        def send_subset_to_gpu(tensor):
-            subset = tensor[idx].detach().cuda(non_blocking=True)
-            if requires_grad:
-                subset.requires_grad_(True)
-            return subset
-        
-        # --------------- Parameter subset (with gradients) ---------------
-        self._xyz_gpu           = send_subset_to_gpu(self._xyz)
-        self._opacity_gpu       = send_subset_to_gpu(self._opacity)
-        self._scaling_gpu       = send_subset_to_gpu(self._scaling)
-        self._rotation_gpu      = send_subset_to_gpu(self._rotation)
-        self._features_dc_gpu   = send_subset_to_gpu(self._features_dc)
-        self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
-        
+
+        # 优化：使用pinned memory加速CPU到GPU的传输
+        # pinned memory可以让DMA直接访问，传输速度更快
+
+        # 先在CPU上完成所有索引操作
+        xyz_subset = self._xyz[idx]
+        opacity_subset = self._opacity[idx]
+        scaling_subset = self._scaling[idx]
+        rotation_subset = self._rotation[idx]
+        features_dc_subset = self._features_dc[idx]
+        features_rest_subset = self._features_rest[idx]
+
+        # 使用pin_memory加速传输（如果数据还不在pinned memory中）
+        if not xyz_subset.is_pinned():
+            xyz_subset = xyz_subset.pin_memory()
+            opacity_subset = opacity_subset.pin_memory()
+            scaling_subset = scaling_subset.pin_memory()
+            rotation_subset = rotation_subset.pin_memory()
+            features_dc_subset = features_dc_subset.pin_memory()
+            features_rest_subset = features_rest_subset.pin_memory()
+
+        # 批量传输到GPU（使用non_blocking可以让多个传输并行）
+        self._xyz_gpu = xyz_subset.cuda(non_blocking=True)
+        self._opacity_gpu = opacity_subset.cuda(non_blocking=True)
+        self._scaling_gpu = scaling_subset.cuda(non_blocking=True)
+        self._rotation_gpu = rotation_subset.cuda(non_blocking=True)
+        self._features_dc_gpu = features_dc_subset.cuda(non_blocking=True)
+        self._features_rest_gpu = features_rest_subset.cuda(non_blocking=True)
+
+        # 设置梯度
+        if requires_grad:
+            self._xyz_gpu.requires_grad_(True)
+            self._opacity_gpu.requires_grad_(True)
+            self._scaling_gpu.requires_grad_(True)
+            self._rotation_gpu.requires_grad_(True)
+            self._features_dc_gpu.requires_grad_(True)
+            self._features_rest_gpu.requires_grad_(True)
+
         self.subset_mode_2 = True
 
 
