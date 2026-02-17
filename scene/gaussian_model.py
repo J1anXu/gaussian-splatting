@@ -688,36 +688,72 @@ class GaussianModel:
         self.subset_mode_1 = True
         
     def deactivate_subset(self):
-        self.subset_mode_1 = False    
-        self.subset_mode_2 = False  
+        self.subset_mode_1 = False
+        self.subset_mode_2 = False
+
+    # -------------------- Packed tensor 寻址加速 --------------------
+    # 原来 move_and_activate_subset 对 6 个参数分别做
+    # tensor[idx]（CPU fancy indexing，散列内存访问）+ .cuda()（6 次 H2D），
+    # 共 12 次开销。packed 之后只需 1 次 gather + 1 次 H2D，
+    # 且 _packed 是行连续的，CPU 端 gather 对缓存更友好。
+
+    _PACK_PARAMS = ("_xyz", "_features_dc", "_features_rest",
+                    "_scaling", "_rotation", "_opacity")
+
+    def build_packed_tensor(self):
+        """将 6 个参数 flatten 拼成一个 contiguous [N, total_dim] 的 CPU tensor。"""
+        splits, shapes = [], []
+        for name in self._PACK_PARAMS:
+            t = getattr(self, name)
+            flat_dim = t[0].numel()          # per-point flat width
+            splits.append(flat_dim)
+            shapes.append(t.shape[1:])       # shape excluding N
+
+        N = self._xyz.shape[0]
+        total_dim = sum(splits)
+        self._packed = torch.empty(N, total_dim, dtype=torch.float32)
+        self._pack_splits = splits
+        self._pack_shapes = shapes
+
+        col = 0
+        for name, w in zip(self._PACK_PARAMS, splits):
+            t = getattr(self, name)
+            self._packed[:, col:col + w] = t.data.detach().reshape(N, w)
+            col += w
+
+    @torch.no_grad()
+    def sync_to_packed(self):
+        """optimizer.step() 后把更新后的参数写回 _packed。"""
+        N = self._xyz.shape[0]
+        col = 0
+        for name, w in zip(self._PACK_PARAMS, self._pack_splits):
+            t = getattr(self, name)
+            self._packed[:, col:col + w] = t.data.detach().reshape(N, w)
+            col += w
 
     def move_and_activate_subset(self, requires_grad=True):
-        def _to_cpu_index(idx):
-            if not torch.is_tensor(idx):
-                idx = torch.tensor(idx, dtype=torch.long)
-            return idx.to("cpu")
-        
-        idx = _to_cpu_index(self.visible_indices)
-        
-        # 截断梯度回传 统一处理
-        def send_subset_to_gpu(tensor):
-            subset = tensor[idx].detach().cuda(non_blocking=True)
+        idx = self.visible_indices
+        if not torch.is_tensor(idx):
+            idx = torch.tensor(idx, dtype=torch.long)
+        cpu_idx = idx.to("cpu")
+
+        # 加速关键：1 次 contiguous gather + 1 次 H2D，替代原来 6×gather + 6×H2D
+        packed_subset = self._packed[cpu_idx].cuda(non_blocking=True)
+        # GPU 上 split 回各属性，开销可忽略（只是 view/narrow）
+        parts = packed_subset.split(self._pack_splits, dim=1)
+
+        gpu_attrs = ("_xyz_gpu", "_features_dc_gpu", "_features_rest_gpu",
+                     "_scaling_gpu", "_rotation_gpu", "_opacity_gpu")
+        for attr, part, shape in zip(gpu_attrs, parts, self._pack_shapes):
+            t = part.contiguous().reshape(-1, *shape)
             if requires_grad:
-                subset.requires_grad_(True)
-            return subset
-        
-        # --------------- Parameter subset (with gradients) ---------------
-        self._xyz_gpu           = send_subset_to_gpu(self._xyz)
-        self._opacity_gpu       = send_subset_to_gpu(self._opacity)
-        self._scaling_gpu       = send_subset_to_gpu(self._scaling)
-        self._rotation_gpu      = send_subset_to_gpu(self._rotation)
-        self._features_dc_gpu   = send_subset_to_gpu(self._features_dc)
-        self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
-        
+                t = t.requires_grad_(True)
+            setattr(self, attr, t)
+
         self.subset_mode_2 = True
 
 
-        
+
     def build_split_indices(self):
         block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz)
         self.block_bounds = block_bounds
