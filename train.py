@@ -73,11 +73,12 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     
     
     # TODO
-    # scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
-    scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    if DEBUG_MODE:
+        # scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+        scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+        progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
 
-    return scene, 1000, 0, 0, progress_bar, None
+        return scene, 1000, 0, 0, progress_bar, None
     
     
     initial_gaussians.training_setup(opt)
@@ -250,6 +251,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
     
     time_start = time.time()
+    if DEBUG_MODE:
+        opt.iterations = 1050
+
     for iteration in range(first_iter, opt.iterations + 1):
         
         for submodel in submodel_list:
@@ -454,12 +458,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     wandb.log(log, step=iteration)
                     wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(submodel_list)}, step=iteration)
             
-        # # saving Gaussians ply    
-        # if (iteration in saving_iterations):
-        #     print("\n[ITER {}] Saving Gaussians".format(iteration))
-        #     point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}")
-        #     for submodel_id, submodel in enumerate(submodel_list):
-        #         submodel.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{submodel_id}.ply"), include_block=False)
+        # saving Gaussians ply    
+        if (iteration in saving_iterations):
+            print("\n[ITER {}] Saving Gaussians".format(iteration))
+            point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}")
+            for submodel_id, submodel in enumerate(submodel_list):
+                submodel.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{submodel_id}.ply"), include_block=False)
                 
         # # save debug image
         # if viewpoint_cam.image_name == debug_image_name:
