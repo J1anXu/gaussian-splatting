@@ -292,6 +292,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
                     else:
                         visible_mask = frustum_culling(model._xyz, cpu_full_proj_transform_dict[viewpoint_cam.image_name])
+
+                    # 修复：确保visible_mask是连续的tensor，避免PyTorch内部错误
+                    visible_mask = visible_mask.contiguous()
                     model.visible_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
             else:
                 for model in submodel_list:
