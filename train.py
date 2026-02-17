@@ -33,7 +33,7 @@ from logger import get_logger
 import config
 import diff_gaussian_rasterization_jian
 from TimerManager import TimerManager
-from timeline_logger import TimelineLogger
+from timeline_logger import TimelineLogger, TimelineEvent
 SCENE_NAME = None
 BRANCH = None
 DEBUG_MODE = False
@@ -311,30 +311,51 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 visible_submodels.append((submodel_id, submodel))
                 visible_pts += submodel.visible_indices.shape[0]
 
-            # 真正的流水线优化：
-            # 1. 预先传输第一个block
-            # 2. 在循环中：render(i) 完成后，立即启动 send(i+1)，然后处理结果
-            # 3. 由于send使用non_blocking=True，它会立即返回，让CPU继续工作
+            # 使用CUDA事件记录真实的GPU执行时间
+            # 这样可以看到真正的重叠情况
+            cuda_events = []  # 存储所有CUDA事件用于后续分析
 
             if len(visible_submodels) > 0:
                 # 预先传输第一个block
                 submodel_id_0, submodel_0 = visible_submodels[0]
-                with timer.scope("send1"), tl.scope("send1", tid="CPU", cat="cpu", block_id=submodel_id_0):
+
+                send_start = torch.cuda.Event(enable_timing=True)
+                send_end = torch.cuda.Event(enable_timing=True)
+                send_start.record()
+
+                with timer.scope("send1"):
                     submodel_0.move_and_activate_subset(requires_grad=False)
+
+                send_end.record()
+                cuda_events.append(('send1', submodel_id_0, send_start, send_end))
 
                 for i in range(len(visible_submodels)):
                     submodel_id, submodel = visible_submodels[i]
 
-                    # 渲染当前block
-                    with timer.scope("render1"), tl.scope("render1", tid="GPU", cat="gpu", block_id=submodel_id):
+                    # 使用CUDA事件记录render的真实时间
+                    render_start = torch.cuda.Event(enable_timing=True)
+                    render_end = torch.cuda.Event(enable_timing=True)
+                    render_start.record()
+
+                    with timer.scope("render1"):
                         render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
 
-                    # 立即启动下一个block的传输（在处理当前结果之前）
-                    # 这样send的CPU操作可以与结果处理并行
+                    render_end.record()
+                    cuda_events.append(('render1', submodel_id, render_start, render_end))
+
+                    # 立即启动下一个block的传输
                     if i + 1 < len(visible_submodels):
                         next_submodel_id, next_submodel = visible_submodels[i + 1]
-                        with timer.scope("send1"), tl.scope("send1", tid="CPU", cat="cpu", block_id=next_submodel_id):
+
+                        send_start = torch.cuda.Event(enable_timing=True)
+                        send_end = torch.cuda.Event(enable_timing=True)
+                        send_start.record()
+
+                        with timer.scope("send1"):
                             next_submodel.move_and_activate_subset(requires_grad=False)
+
+                        send_end.record()
+                        cuda_events.append(('send1', next_submodel_id, send_start, send_end))
 
                     # 处理当前block的结果
                     submodel.deactivate_subset()
@@ -351,6 +372,46 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     depth_list.append(depth)
                     alpha_list.append(alphaLeft)
                     visible_submodel_id_list.append(submodel_id)
+
+                # 同步并记录真实的CUDA时间到timeline
+                torch.cuda.synchronize()
+
+                # 计算所有事件的绝对时间戳
+                if len(cuda_events) > 0:
+                    base_time = time.perf_counter() * 1e6  # 当前时间作为基准
+
+                    for event_name, block_id, start_event, end_event in cuda_events:
+                        # 计算相对于第一个事件的时间
+                        if cuda_events[0][2] == start_event:
+                            start_offset = 0
+                        else:
+                            start_offset = cuda_events[0][2].elapsed_time(start_event) * 1000  # ms to us
+
+                        end_offset = cuda_events[0][2].elapsed_time(end_event) * 1000
+
+                        # 记录到timeline（使用真实的CUDA时间）
+                        tid = "GPU" if event_name == "render1" else "CPU"
+                        cat = "gpu" if event_name == "render1" else "cpu"
+
+                        tl._events.append(TimelineEvent(
+                            name=event_name,
+                            cat=cat,
+                            ph="B",
+                            ts=base_time + start_offset,
+                            tid=tid,
+                            pid=tl._pid(),
+                            args={"block_id": block_id}
+                        ))
+                        tl._events.append(TimelineEvent(
+                            name=event_name,
+                            cat=cat,
+                            ph="E",
+                            ts=base_time + end_offset,
+                            tid=tid,
+                            pid=tl._pid(),
+                            args={"block_id": block_id}
+                        ))
+
 
                 
         # execute merge 
