@@ -488,12 +488,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     wandb.log(log, step=iteration)
                     wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(submodel_list)}, step=iteration)
             
-        # # saving Gaussians ply    
-        # if (iteration in saving_iterations):
-        #     print("\n[ITER {}] Saving Gaussians".format(iteration))
-        #     point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}")
-        #     for submodel_id, submodel in enumerate(submodel_list):
-        #         submodel.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{submodel_id}.ply"), include_block=False)
+        # saving Gaussians ply    
+        if (iteration in saving_iterations):
+            print("\n[ITER {}] Saving Gaussians".format(iteration))
+            point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}")
+            for submodel_id, submodel in enumerate(submodel_list):
+                submodel.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{submodel_id}.ply"), include_block=False)
                 
         # # save debug image
         # if viewpoint_cam.image_name == debug_image_name:
