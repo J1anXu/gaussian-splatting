@@ -33,6 +33,7 @@ from logger import get_logger
 import config
 import diff_gaussian_rasterization_jian
 from TimerManager import TimerManager
+from timeline_logger import TimelineLogger
 SCENE_NAME = None
 BRANCH = None
 DEBUG_MODE = False
@@ -71,13 +72,13 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
     
-    
+    if DEBUG_MODE:
     # TODO
-    # # scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
-    # scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
-    # progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
-
-    # return scene, 1000, 0, 0, progress_bar, None
+        # scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+        scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+        progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+        opt.iterations = 1050
+        return scene, 1000, 0, 0, progress_bar, None
     
     
     initial_gaussians.training_setup(opt)
@@ -219,7 +220,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     scene, old_iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg = res
     
     timer = TimerManager()
-    
+    tl = TimelineLogger(enabled=config.TIMELINE)
+
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
@@ -249,9 +251,13 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     for cam in scene.getTrainCameras():
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
     
+    if DEBUG_MODE:
+        opt.iterations = 1050
+
     time_start = time.time()
     for iteration in range(first_iter, opt.iterations + 1):
-        
+        tl.set_iteration(iteration)
+
         for submodel in submodel_list:
             submodel.update_learning_rate(iteration)
         
@@ -275,7 +281,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         
         # frustum culling
-        with torch.no_grad(), timer.scope("frustum_culling"):
+        with torch.no_grad(), timer.scope("frustum_culling"), tl.scope("frustum_culling", tid="CPU", cat="cpu"):
             if config.FRUSTUM_CULLING_ENABLED:
                 for model in submodel_list:
                     # TODO 不再增点之后不必频繁更新视锥剔除
@@ -301,10 +307,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 
                 visible_pts += submodel.visible_indices.shape[0]
                 
-                with timer.scope("send1"):
+                with timer.scope("send1"), tl.scope("send1", tid="CPU", cat="cpu", block_id=submodel_id):
                     submodel.move_and_activate_subset(requires_grad = False)
-                    
-                with timer.scope("render1"):
+
+                with timer.scope("render1"), tl.scope("render1", tid="GPU", cat="gpu", block_id=submodel_id):
                     render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
                     
                 submodel.deactivate_subset()
@@ -329,7 +335,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 
         # execute merge 
-        with torch.no_grad(), timer.scope("merge"):
+        with torch.no_grad(), timer.scope("merge"), tl.scope("merge", tid="GPU", cat="gpu"):
             merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
             
         C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
@@ -339,17 +345,17 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         colors_bg = merge_res["bg_rgb"]
         
 
-        with torch.no_grad(), timer.scope("send gt"):
+        with torch.no_grad(), timer.scope("send gt"), tl.scope("send_gt", tid="CPU", cat="cpu"):
             gt_image = viewpoint_cam.original_image.cuda()
             
         # 遍历所有可见block 轮流当active block
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
             
-            with timer.scope("send2"):
+            with timer.scope("send2"), tl.scope("send2", tid="CPU", cat="cpu", block_id=submodel_id):
                 submodel.move_and_activate_subset(requires_grad = True)
-                
-            with timer.scope("render2"):
+
+            with timer.scope("render2"), tl.scope("render2", tid="GPU", cat="gpu", block_id=submodel_id):
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
                 
             # submodel.deactivate_subset()
@@ -360,7 +366,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # gaussian points level
             sub_viewspace_point_tensor, sub_visibility_filter, sub_radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             
-            with torch.no_grad(), timer.scope("cal"):
+            with torch.no_grad(), timer.scope("cal"), tl.scope("cal", tid="CPU", cat="cpu", block_id=submodel_id):
                 # 当前subset的渲染结果在每个像素上的排序位置
                 submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
                 # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
@@ -382,7 +388,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # Loss
 
             
-            with timer.scope("loss"):
+            with timer.scope("loss"), tl.scope("loss", tid="GPU", cat="gpu", block_id=submodel_id):
                 Ll1 = l1_loss(composed_img, gt_image)
                 ssim_value = ssim(composed_img, gt_image)
                 loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
@@ -390,13 +396,13 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # Depth regularization
             Ll1depth = 0
             
-            with torch.no_grad(), timer.scope("set_colors_bg"):
+            with torch.no_grad(), timer.scope("set_colors_bg"), tl.scope("set_colors_bg", tid="CPU", cat="cpu", block_id=submodel_id):
                 diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
                 
-            with timer.scope("backward"):
+            with timer.scope("backward"), tl.scope("backward", tid="GPU", cat="gpu", block_id=submodel_id):
                 loss.backward()
 
-            with timer.scope("copy grad"):
+            with timer.scope("copy grad"), tl.scope("copy_grad", tid="CPU", cat="cpu", block_id=submodel_id):
 
                 idx = submodel.visible_indices.to("cpu")
 
@@ -424,31 +430,31 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with torch.no_grad():
                 # Densification
                 if iteration < opt.densify_until_iter:
-                    with timer.scope("stats to cpu"):
+                    with timer.scope("stats to cpu"), tl.scope("stats_to_cpu", tid="CPU", cat="cpu", block_id=submodel_id):
                         sub_visibility_filter = sub_visibility_filter.cpu()
                         sub_radii = sub_radii.cpu()
                         global_viewspace_points_grad = torch.zeros(submodel.get_xyz.shape[0], 3, device="cpu", requires_grad=False )
                         global_viewspace_points_grad[submodel.visible_indices] = sub_viewspace_point_tensor.grad.cpu()
                         global_visibility_filter = submodel.visible_indices[sub_visibility_filter]
                     
-                    with timer.scope("update stats"):
+                    with timer.scope("update stats"), tl.scope("update_stats", tid="CPU", cat="cpu", block_id=submodel_id):
                         # TODO 这个是否可以增加间隔
                         submodel.max_radii2D[global_visibility_filter] = torch.max(submodel.max_radii2D[global_visibility_filter], sub_radii[sub_visibility_filter])
                         submodel.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
                     
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        with timer.scope("densify"):
+                        with timer.scope("densify"), tl.scope("densify", tid="CPU", cat="cpu", block_id=submodel_id):
                             size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                             submodel.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
                         
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        with timer.scope("reset opacity"):
+                        with timer.scope("reset opacity"), tl.scope("reset_opacity", tid="CPU", cat="cpu", block_id=submodel_id):
                             submodel.reset_opacity()
                 
                 diff = False
                 # Optimizer step
                 if iteration < opt.iterations:
-                    with timer.scope("opt step"):
+                    with timer.scope("opt step"), tl.scope("opt_step", tid="CPU", cat="cpu", block_id=submodel_id):
                         if diff:
                             before = submodel._xyz.detach().clone()
                             submodel.optimizer.step()
@@ -503,6 +509,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     print(f"Phase 2 training time cost: [{cost:.2f}] seconds.")
     
     timer.summary()
+
+    if config.TIMELINE:
+        os.makedirs("timeline", exist_ok=True)
+        tl.save_chrome_trace(f"timeline/{BRANCH}.json")
+        tl.print_text_summary(iteration=opt.iterations)
         
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
