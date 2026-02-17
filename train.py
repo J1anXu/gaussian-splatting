@@ -47,7 +47,7 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 try:
-    from diff_gaussian_rasterization import SparseGaussianAdam
+    from diff_gaussian_rasterization_jian import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
@@ -73,11 +73,11 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     
     
     # TODO
-    # scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
-    scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    # # scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+    # scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+    # progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
 
-    return scene, 1000, 0, 0, progress_bar, None
+    # return scene, 1000, 0, 0, progress_bar, None
     
     
     initial_gaussians.training_setup(opt)
@@ -171,7 +171,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
         # Depth regularization
         Ll1depth = 0
-        diff_gaussian_rasterization.set_colors_bg(colors_bg)
+        diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
         loss.backward()
 
         with torch.no_grad():
