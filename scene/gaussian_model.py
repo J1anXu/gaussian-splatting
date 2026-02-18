@@ -685,7 +685,23 @@ class GaussianModel:
         self.denom[update_filter] += 1
 
     def _compute_pack_layout(self):
-        """Compute packed buffer column layout based on sh_degree."""
+        """
+        Compute the column layout for the packed parameter buffer.
+
+        All per-Gaussian attributes are concatenated along the feature dimension
+        into a single row of width D. The layout is determined by the spherical
+        harmonics degree and follows a fixed ordering:
+
+            [xyz(3) | f_dc(3) | f_rest((L+1)^2-1)*3 | scaling(3) | rotation(4) | opacity(1)]
+
+        where L = max_sh_degree. For L=3, D = 3+3+45+3+4+1 = 59.
+
+        Returns:
+            slices: dict mapping attribute name -> (col_start, col_end, reshape_dims)
+                    reshape_dims is None for 2D attributes, or a tuple for those
+                    requiring reshape (e.g., features_dc: [N,1,3]).
+            D:      total number of columns in the packed buffer.
+        """
         sh_rest_cols = ((self.max_sh_degree + 1) ** 2 - 1) * 3
         slices = {}
         c = 0
@@ -698,7 +714,26 @@ class GaussianModel:
         return slices, c
 
     def pack_to_buffer(self):
-        """Pack 6 CPU parameters into a single [N, D] pinned tensor."""
+        """
+        Pack six per-Gaussian CPU nn.Parameter tensors into a single contiguous
+        pinned-memory buffer of shape [N, D].
+
+        Motivation: In the partitioned training pipeline, each submodel's parameters
+        reside on CPU. The original implementation performed six independent fancy-
+        indexing operations followed by six separate Host-to-Device (H2D) transfers.
+        This incurs (1) repeated random memory access patterns with poor cache
+        locality, and (2) six PCIe transaction overheads.
+
+        By packing all attributes into a single row-major [N, D] pinned tensor,
+        we enable a single gather + single DMA transfer, reducing both CPU-side
+        indexing cost and PCIe launch overhead.
+
+        Additionally, a pre-allocated pinned staging buffer (_packed_staging) of
+        identical shape is created to hold the subset after index_select. This
+        ensures the H2D source is always in page-locked memory, which is a
+        prerequisite for truly asynchronous cudaMemcpyAsync via non_blocking=True.
+        Without pinned memory, PyTorch silently falls back to synchronous transfer.
+        """
         slices, D = self._compute_pack_layout()
         N = self._xyz.shape[0]
         packed = torch.empty(N, D, dtype=torch.float32, pin_memory=True)
@@ -708,11 +743,20 @@ class GaussianModel:
         self._packed = packed
         self._pack_slices = slices
         self._pack_D = D
-        # Pre-allocate pinned staging buffer (worst case = all N points visible)
+        # Pre-allocate pinned staging buffer sized for worst case (all N points visible).
+        # Reusing this buffer across iterations avoids repeated cudaHostAlloc calls,
+        # which are expensive due to page-locking overhead in the OS kernel.
         self._packed_staging = torch.empty(N, D, dtype=torch.float32, pin_memory=True)
 
     def sync_packed_from_params(self):
-        """After optimizer.step(), sync updated params back into packed buffer."""
+        """
+        Synchronize the packed pinned buffer with current nn.Parameter values.
+
+        Must be called after any operation that mutates parameter data in-place
+        (optimizer.step(), reset_opacity()) to keep _packed consistent. If the
+        number of Gaussians has changed (e.g., after densification/pruning),
+        falls back to a full reallocation via pack_to_buffer().
+        """
         N = self._xyz.shape[0]
         if not hasattr(self, '_packed') or self._packed.shape[0] != N:
             self.pack_to_buffer()
@@ -729,20 +773,52 @@ class GaussianModel:
         self.subset_mode_2 = False  
 
     def move_and_activate_subset(self, requires_grad=True):
+        """
+        Gather visible Gaussian attributes from CPU and transfer to GPU.
+
+        This method replaces the naive per-attribute implementation that performed
+        six independent fancy-indexing + H2D transfers. The optimized pipeline:
+
+        1. **Single gather**: torch.index_select on the packed [N, D] pinned buffer
+           writes directly into a pre-allocated pinned staging buffer, avoiding
+           memory allocation and ensuring the result resides in page-locked memory.
+
+        2. **Single H2D transfer**: The pinned staging buffer is transferred to GPU
+           via .cuda(non_blocking=True). Because the source is pinned, PyTorch
+           dispatches a true cudaMemcpyAsync on the current stream, enabling
+           overlap with concurrent CPU work or GPU computation on other streams.
+
+        3. **GPU-side unpack**: The packed GPU tensor is sliced and cloned into
+           individual attribute tensors. clone() is mandatory — views would share
+           the same storage, causing gradient accumulation conflicts during
+           backward (scatter_grad expects independent .grad tensors per attribute).
+           GPU-internal memcpy (clone) is negligible (~0.1ms) compared to the
+           PCIe transfer savings.
+
+        Complexity reduction:
+            - CPU indexing: 6 random-access passes -> 1 pass (better cache locality)
+            - PCIe transactions: 6 -> 1 (reduced launch overhead)
+            - Memory allocation: 6 temporary tensors -> 0 (pre-allocated staging)
+        """
         idx = self.visible_indices
         if not torch.is_tensor(idx):
             idx = torch.tensor(idx, dtype=torch.long)
         idx = idx.to("cpu")
         n = idx.shape[0]
 
-        # Index into pinned staging buffer (result stays in pinned memory)
+        # Gather into pre-allocated pinned staging buffer.
+        # Using out= parameter ensures the result is written directly into
+        # page-locked memory without intermediate allocation.
         staging = self._packed_staging[:n]
         torch.index_select(self._packed, 0, idx, out=staging)
 
-        # Single H2D from pinned memory — non_blocking truly async
+        # Single DMA transfer: pinned -> GPU. non_blocking=True is effective
+        # only when the source tensor is in pinned (page-locked) memory.
         gpu_packed = staging.cuda(non_blocking=True)
 
-        # Unpack on GPU (clone for independent grad)
+        # Unpack on GPU. Each clone() creates an independent tensor with its
+        # own storage, which is required for correct per-attribute gradient
+        # computation in the subsequent backward pass.
         slices = self._pack_slices
         s, e, _ = slices['_xyz']
         self._xyz_gpu = gpu_packed[:, s:e].clone()

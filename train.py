@@ -246,6 +246,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         
     for submodel in submodel_list:
         submodel.training_setup(opt, device = "cpu")
+        # Initialize packed pinned buffer after parameters are created.
+        # This packs all 6 per-Gaussian attributes into a single [N, D]
+        # contiguous pinned tensor for efficient subset H2D transfer.
         submodel.pack_to_buffer()
 
     cpu_full_proj_transform_dict = {}
@@ -447,11 +450,14 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         with timer.scope("densify"), tl.scope("densify", tid="CPU", cat="cpu", block_id=submodel_id):
                             size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                             submodel.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
+                            # Rebuild packed buffer: densify/prune changes N,
+                            # requiring full reallocation of pinned memory.
                             submodel.pack_to_buffer()
 
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         with timer.scope("reset opacity"), tl.scope("reset_opacity", tid="CPU", cat="cpu", block_id=submodel_id):
                             submodel.reset_opacity()
+                            # Opacity values changed in-place; sync to packed buffer.
                             submodel.sync_packed_from_params()
                 
                 diff = False
@@ -468,6 +474,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         else:
                             submodel.optimizer.step()
                             submodel.optimizer.zero_grad(set_to_none = True)
+                        # Sync optimizer-updated parameters back into the packed
+                        # pinned buffer so that subsequent move_and_activate_subset
+                        # calls read the latest values.
                         submodel.sync_packed_from_params()
                         
                         
