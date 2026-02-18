@@ -246,7 +246,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         
     for submodel in submodel_list:
         submodel.training_setup(opt, device = "cpu")
-        
+        submodel.pack_to_buffer()
+
     cpu_full_proj_transform_dict = {}
     for cam in scene.getTrainCameras():
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
@@ -446,10 +447,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         with timer.scope("densify"), tl.scope("densify", tid="CPU", cat="cpu", block_id=submodel_id):
                             size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                             submodel.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
-                        
+                            submodel.pack_to_buffer()
+
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         with timer.scope("reset opacity"), tl.scope("reset_opacity", tid="CPU", cat="cpu", block_id=submodel_id):
                             submodel.reset_opacity()
+                            submodel.sync_packed_from_params()
                 
                 diff = False
                 # Optimizer step
@@ -465,6 +468,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         else:
                             submodel.optimizer.step()
                             submodel.optimizer.zero_grad(set_to_none = True)
+                        submodel.sync_packed_from_params()
                         
                         
         with torch.no_grad():

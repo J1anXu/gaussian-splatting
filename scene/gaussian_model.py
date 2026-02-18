@@ -684,6 +684,43 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor_grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
+    def _compute_pack_layout(self):
+        """Compute packed buffer column layout based on sh_degree."""
+        sh_rest_cols = ((self.max_sh_degree + 1) ** 2 - 1) * 3
+        slices = {}
+        c = 0
+        slices['_xyz'] = (c, c + 3, None); c += 3
+        slices['_features_dc'] = (c, c + 3, (-1, 1, 3)); c += 3
+        slices['_features_rest'] = (c, c + sh_rest_cols, (-1, sh_rest_cols // 3, 3)); c += sh_rest_cols
+        slices['_scaling'] = (c, c + 3, None); c += 3
+        slices['_rotation'] = (c, c + 4, None); c += 4
+        slices['_opacity'] = (c, c + 1, None); c += 1
+        return slices, c
+
+    def pack_to_buffer(self):
+        """Pack 6 CPU parameters into a single [N, D] pinned tensor."""
+        slices, D = self._compute_pack_layout()
+        N = self._xyz.shape[0]
+        packed = torch.empty(N, D, dtype=torch.float32, pin_memory=True)
+        for name, (s, e, _) in slices.items():
+            param = getattr(self, name)
+            packed[:, s:e] = param.data.detach().reshape(N, e - s)
+        self._packed = packed
+        self._pack_slices = slices
+        self._pack_D = D
+        # Pre-allocate pinned staging buffer (worst case = all N points visible)
+        self._packed_staging = torch.empty(N, D, dtype=torch.float32, pin_memory=True)
+
+    def sync_packed_from_params(self):
+        """After optimizer.step(), sync updated params back into packed buffer."""
+        N = self._xyz.shape[0]
+        if not hasattr(self, '_packed') or self._packed.shape[0] != N:
+            self.pack_to_buffer()
+            return
+        for name, (s, e, _) in self._pack_slices.items():
+            param = getattr(self, name)
+            self._packed[:, s:e] = param.data.detach().reshape(N, e - s)
+
     def activate_subset(self):
         self.subset_mode_1 = True
         
@@ -692,28 +729,42 @@ class GaussianModel:
         self.subset_mode_2 = False  
 
     def move_and_activate_subset(self, requires_grad=True):
-        def _to_cpu_index(idx):
-            if not torch.is_tensor(idx):
-                idx = torch.tensor(idx, dtype=torch.long)
-            return idx.to("cpu")
-        
-        idx = _to_cpu_index(self.visible_indices)
-        
-        # 截断梯度回传 统一处理
-        def send_subset_to_gpu(tensor):
-            subset = tensor[idx].detach().cuda(non_blocking=True)
-            if requires_grad:
-                subset.requires_grad_(True)
-            return subset
-        
-        # --------------- Parameter subset (with gradients) ---------------
-        self._xyz_gpu           = send_subset_to_gpu(self._xyz)
-        self._opacity_gpu       = send_subset_to_gpu(self._opacity)
-        self._scaling_gpu       = send_subset_to_gpu(self._scaling)
-        self._rotation_gpu      = send_subset_to_gpu(self._rotation)
-        self._features_dc_gpu   = send_subset_to_gpu(self._features_dc)
-        self._features_rest_gpu = send_subset_to_gpu(self._features_rest)
-        
+        idx = self.visible_indices
+        if not torch.is_tensor(idx):
+            idx = torch.tensor(idx, dtype=torch.long)
+        idx = idx.to("cpu")
+        n = idx.shape[0]
+
+        # Index into pinned staging buffer (result stays in pinned memory)
+        staging = self._packed_staging[:n]
+        torch.index_select(self._packed, 0, idx, out=staging)
+
+        # Single H2D from pinned memory — non_blocking truly async
+        gpu_packed = staging.cuda(non_blocking=True)
+
+        # Unpack on GPU (clone for independent grad)
+        slices = self._pack_slices
+        s, e, _ = slices['_xyz']
+        self._xyz_gpu = gpu_packed[:, s:e].clone()
+        s, e, reshape = slices['_features_dc']
+        self._features_dc_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2]).clone()
+        s, e, reshape = slices['_features_rest']
+        self._features_rest_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2]).clone()
+        s, e, _ = slices['_scaling']
+        self._scaling_gpu = gpu_packed[:, s:e].clone()
+        s, e, _ = slices['_rotation']
+        self._rotation_gpu = gpu_packed[:, s:e].clone()
+        s, e, _ = slices['_opacity']
+        self._opacity_gpu = gpu_packed[:, s:e].clone()
+
+        if requires_grad:
+            self._xyz_gpu.requires_grad_(True)
+            self._features_dc_gpu.requires_grad_(True)
+            self._features_rest_gpu.requires_grad_(True)
+            self._scaling_gpu.requires_grad_(True)
+            self._rotation_gpu.requires_grad_(True)
+            self._opacity_gpu.requires_grad_(True)
+
         self.subset_mode_2 = True
 
 
