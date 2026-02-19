@@ -82,7 +82,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_Ll1depth_for_log = 0.0
     debug_image_name = "_DSC8680.JPG"
     img_path_in_debug = os.path.join("debug", BRANCH, debug_image_name)
-    os.makedirs(img_path_in_debug, exist_ok=True)
+    # os.makedirs(img_path_in_debug, exist_ok=True)
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     start_time = time.time()
@@ -118,10 +118,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             image *= alpha_mask
 
 
-        if viewpoint_cam.image_name == debug_image_name:
-            # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
-            torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}" + ".png"))
-            LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
+        # if viewpoint_cam.image_name == debug_image_name:
+        #     # block_rank[k, h, w] 表示： 在像素 (h, w) 处，第 k 个 block 在“按深度排序后”的层级排名（rank）
+        #     torchvision.utils.save_image(image, os.path.join(img_path_in_debug, f"{iteration}" + ".png"))
+        #     LOGGER.info(f"Saved debug images at iteration {iteration} for {debug_image_name}")
 
 
         # Loss
