@@ -149,8 +149,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             Ll1depth = 0
 
         
-        colors_bg = torch.zeros(image.shape, device="cuda")
-        diff_gaussian_rasterization.set_colors_bg(colors_bg)
+        # colors_bg = torch.zeros(image.shape, device="cuda")
+        # diff_gaussian_rasterization.set_colors_bg(colors_bg)
         loss.backward()
 
         iter_end.record()
