@@ -31,7 +31,7 @@ import wandb
 import time
 from logger import get_logger
 import config
-import diff_gaussian_rasterization_jian
+import diff_gaussian_rasterization_wenqi_tam
 from TimerManager import TimerManager
 from timeline_logger import TimelineLogger
 SCENE_NAME = None
@@ -48,7 +48,7 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 try:
-    from diff_gaussian_rasterization_jian import SparseGaussianAdam
+    from diff_gaussian_rasterization_wenqi_tam import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
@@ -111,7 +111,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
                 return scene, iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg
             
         initial_gaussians.update_learning_rate(iteration)
-        
+
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             initial_gaussians.oneupSHdegree()
@@ -172,7 +172,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
         # Depth regularization
         Ll1depth = 0
-        diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
+        diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
         loss.backward()
 
         with torch.no_grad():
@@ -211,8 +211,15 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
             # Optimizer step
             if iteration < opt.iterations:
-                initial_gaussians.optimizer.step()
-                initial_gaussians.optimizer.zero_grad(set_to_none = True)
+                initial_gaussians.exposure_optimizer.step()
+                initial_gaussians.exposure_optimizer.zero_grad(set_to_none = True)
+                if use_sparse_adam:
+                    visible = radii > 0
+                    initial_gaussians.optimizer.step(visible, radii.shape[0])
+                    initial_gaussians.optimizer.zero_grad(set_to_none = True)
+                else:
+                    initial_gaussians.optimizer.step()
+                    initial_gaussians.optimizer.zero_grad(set_to_none = True)
 
 
 
@@ -257,6 +264,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     
     if DEBUG_MODE:
         opt.iterations = 1050
+        
+    use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
 
     time_start = time.time()
     for iteration in range(first_iter, opt.iterations + 1):
@@ -401,7 +410,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             Ll1depth = 0
             
             with torch.no_grad(), timer.scope("set_colors_bg"), tl.scope("set_colors_bg", tid="CPU", cat="cpu", block_id=submodel_id):
-                diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
+                diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
                 
             with timer.scope("backward"), tl.scope("backward", tid="GPU", cat="gpu", block_id=submodel_id):
                 loss.backward()
@@ -460,20 +469,16 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                             # Opacity values changed in-place; sync to packed buffer.
                             submodel.sync_packed_from_params()
                 
-                diff = False
+                
                 # Optimizer step
                 if iteration < opt.iterations:
                     with timer.scope("opt step"), tl.scope("opt_step", tid="CPU", cat="cpu", block_id=submodel_id):
-                        if diff:
-                            before = submodel._xyz.detach().clone()
-                            submodel.optimizer.step()
-                            after = submodel._xyz.detach()
-                            diff = (after - before).abs().max().item()
-                            print(f"xyz max update: {diff:.6e}")
-                            submodel.optimizer.zero_grad(set_to_none = True)
+                        if use_sparse_adam:
+                            visible = global_visibility_filter
+                            submodel.optimizer.step(visible, global_visibility_filter.shape[0])
                         else:
                             submodel.optimizer.step()
-                            submodel.optimizer.zero_grad(set_to_none = True)
+                        submodel.optimizer.zero_grad(set_to_none = True)
                         # Sync optimizer-updated parameters back into the packed
                         # pinned buffer so that subsequent move_and_activate_subset
                         # calls read the latest values.

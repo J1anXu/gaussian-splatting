@@ -28,7 +28,7 @@ import copy
 
 
 try:
-    from diff_gaussian_rasterization_jian import SparseGaussianAdam
+    from diff_gaussian_rasterization_wenqi_tam import SparseGaussianAdam
 except:
     pass
 
