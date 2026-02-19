@@ -352,46 +352,55 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         with torch.no_grad(), timer.scope("send gt"), tl.scope("send_gt", tid="CPU", cat="cpu"):
             gt_image = viewpoint_cam.original_image.cuda()
             
+        # ------ helper: flush deferred optimizer work from previous submodel ------
+        pending_opt = None   # will hold a closure for the previous submodel's scatter + opt + sync
+
+        def flush_pending():
+            nonlocal pending_opt
+            if pending_opt is not None:
+                pending_opt()
+                pending_opt = None
+
         # 遍历所有可见block 轮流当active block
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
-            
+
             with timer.scope("send2"), tl.scope("send2", tid="CPU", cat="cpu", block_id=submodel_id):
                 submodel.move_and_activate_subset(requires_grad = True)
 
             with timer.scope("render2"), tl.scope("render2", tid="GPU", cat="gpu", block_id=submodel_id):
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                
+
             # submodel.deactivate_subset()
-            
-            # pixel level 
+
+            # pixel level
             sub_img = render_pkg["render"]
-            
+
             # gaussian points level
             sub_viewspace_point_tensor, sub_visibility_filter, sub_radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-            
+
             with torch.no_grad(), timer.scope("cal"), tl.scope("cal", tid="CPU", cat="cpu", block_id=submodel_id):
                 # 当前subset的渲染结果在每个像素上的排序位置
                 submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
                 # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
                 prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
                 # 4. 当前块(index = idx)块提供的颜色
-                C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]   
+                C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]
                 # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
-                C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k                  
+                C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k
                 # 6. 带梯度的渲染结果
-                C_active = sub_img      # [3,H,W], has grad   
-                
+                C_active = sub_img      # [3,H,W], has grad
+
             # 把带梯度的渲染结果拼到背景上 用于计算loss
             composed_img = C_base + prefix_T_k * C_active
-            
+
             # if viewpoint_cam.alpha_mask is not None:
             #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
             #     composed_img *= alpha_mask
-                
+
             # Loss
 
-            
+
             with timer.scope("loss"), tl.scope("loss", tid="GPU", cat="gpu", block_id=submodel_id):
                 Ll1 = l1_loss(composed_img, gt_image)
                 ssim_value = ssim(composed_img, gt_image)
@@ -399,85 +408,101 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             # Depth regularization
             Ll1depth = 0
-            
+
             with torch.no_grad(), timer.scope("set_colors_bg"), tl.scope("set_colors_bg", tid="CPU", cat="cpu", block_id=submodel_id):
                 diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
-                
+
             with timer.scope("backward"), tl.scope("backward", tid="GPU", cat="gpu", block_id=submodel_id):
                 loss.backward()
 
-            with timer.scope("copy grad"), tl.scope("copy_grad", tid="CPU", cat="cpu", block_id=submodel_id):
+            # ---- async D2H: kick off non-blocking grad copies ----
+            with timer.scope("copy grad async"), tl.scope("copy_grad_async", tid="CPU", cat="cpu", block_id=submodel_id):
+                cur_idx = submodel.visible_indices.to("cpu")
+                cur_gpu_grads = []
+                cur_cpu_params = []
+                for cpu_p, gpu_p in (
+                    (submodel._xyz, submodel._xyz_gpu),
+                    (submodel._features_dc, submodel._features_dc_gpu),
+                    (submodel._features_rest, submodel._features_rest_gpu),
+                    (submodel._scaling, submodel._scaling_gpu),
+                    (submodel._rotation, submodel._rotation_gpu),
+                    (submodel._opacity, submodel._opacity_gpu),
+                ):
+                    g = gpu_p.grad
+                    if g is None:
+                        continue
+                    cur_gpu_grads.append(g.detach().to("cpu", non_blocking=True))
+                    cur_cpu_params.append(cpu_p)
 
-                idx = submodel.visible_indices.to("cpu")
+                cur_sub_vf = sub_visibility_filter
+                cur_sub_radii = sub_radii
+                cur_sub_vpt = sub_viewspace_point_tensor
 
-                def scatter_grad(cpu_param, gpu_param):
-                    grad_gpu = gpu_param.grad
-                    if grad_gpu is None:
-                        return
-
-                    grad_cpu = grad_gpu.detach().cpu()
-
-                    if cpu_param.grad is None:
-                        cpu_param.grad = torch.zeros_like(cpu_param)
-
-                    cpu_param.grad[idx] += grad_cpu
-
-                scatter_grad(submodel._xyz, submodel._xyz_gpu)
-                scatter_grad(submodel._features_dc, submodel._features_dc_gpu)
-                scatter_grad(submodel._features_rest, submodel._features_rest_gpu)
-                scatter_grad(submodel._scaling, submodel._scaling_gpu)
-                scatter_grad(submodel._rotation, submodel._rotation_gpu)
-                scatter_grad(submodel._opacity, submodel._opacity_gpu)
             submodel.deactivate_subset()
 
+            # ---- while D2H is in flight, run PREVIOUS submodel's opt step ----
+            flush_pending()
 
-            with torch.no_grad():
-                # Densification
-                if iteration < opt.densify_until_iter:
-                    with timer.scope("stats to cpu"), tl.scope("stats_to_cpu", tid="CPU", cat="cpu", block_id=submodel_id):
-                        sub_visibility_filter = sub_visibility_filter.cpu()
-                        sub_radii = sub_radii.cpu()
-                        global_viewspace_points_grad = torch.zeros(submodel.get_xyz.shape[0], 3, device="cpu", requires_grad=False )
-                        global_viewspace_points_grad[submodel.visible_indices] = sub_viewspace_point_tensor.grad.cpu()
-                        global_visibility_filter = submodel.visible_indices[sub_visibility_filter]
-                    
-                    with timer.scope("update stats"), tl.scope("update_stats", tid="CPU", cat="cpu", block_id=submodel_id):
-                        # TODO 这个是否可以增加间隔
-                        submodel.max_radii2D[global_visibility_filter] = torch.max(submodel.max_radii2D[global_visibility_filter], sub_radii[sub_visibility_filter])
-                        submodel.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
-                    
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        with timer.scope("densify"), tl.scope("densify", tid="CPU", cat="cpu", block_id=submodel_id):
-                            size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                            submodel.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
-                            # Rebuild packed buffer: densify/prune changes N,
-                            # requiring full reallocation of pinned memory.
-                            submodel.pack_to_buffer()
+            # ---- now sync D2H and prepare this submodel's deferred work ----
+            torch.cuda.synchronize()
 
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        with timer.scope("reset opacity"), tl.scope("reset_opacity", tid="CPU", cat="cpu", block_id=submodel_id):
-                            submodel.reset_opacity()
-                            # Opacity values changed in-place; sync to packed buffer.
-                            submodel.sync_packed_from_params()
-                
-                diff = False
-                # Optimizer step
-                if iteration < opt.iterations:
-                    with timer.scope("opt step"), tl.scope("opt_step", tid="CPU", cat="cpu", block_id=submodel_id):
-                        if diff:
-                            before = submodel._xyz.detach().clone()
-                            submodel.optimizer.step()
-                            after = submodel._xyz.detach()
-                            diff = (after - before).abs().max().item()
-                            print(f"xyz max update: {diff:.6e}")
-                            submodel.optimizer.zero_grad(set_to_none = True)
-                        else:
-                            submodel.optimizer.step()
-                            submodel.optimizer.zero_grad(set_to_none = True)
-                        # Sync optimizer-updated parameters back into the packed
-                        # pinned buffer so that subsequent move_and_activate_subset
-                        # calls read the latest values.
-                        submodel.sync_packed_from_params()
+            # capture current submodel state for deferred execution
+            _sm = submodel
+            _sm_id = submodel_id
+            _idx = cur_idx
+            _gpu_grads = cur_gpu_grads
+            _cpu_params = cur_cpu_params
+            _sub_vf = cur_sub_vf
+            _sub_radii = cur_sub_radii
+            _sub_vpt = cur_sub_vpt
+            _iteration = iteration
+
+            def make_pending(_sm, _sm_id, _idx, _gpu_grads, _cpu_params, _sub_vf, _sub_radii, _sub_vpt, _iteration):
+                def _do():
+                    # scatter grad
+                    with timer.scope("scatter_grad"), tl.scope("scatter_grad", tid="CPU", cat="cpu", block_id=_sm_id):
+                        for cpu_p, grad_cpu in zip(_cpu_params, _gpu_grads):
+                            if cpu_p.grad is None:
+                                cpu_p.grad = torch.zeros_like(cpu_p)
+                            cpu_p.grad[_idx] += grad_cpu
+
+                    with torch.no_grad():
+                        # Densification
+                        if _iteration < opt.densify_until_iter:
+                            with timer.scope("stats to cpu"), tl.scope("stats_to_cpu", tid="CPU", cat="cpu", block_id=_sm_id):
+                                _sub_vf_cpu = _sub_vf.cpu()
+                                _sub_radii_cpu = _sub_radii.cpu()
+                                gvpg = torch.zeros(_sm.get_xyz.shape[0], 3, device="cpu", requires_grad=False)
+                                gvpg[_sm.visible_indices] = _sub_vpt.grad.cpu()
+                                gvf = _sm.visible_indices[_sub_vf_cpu]
+
+                            with timer.scope("update stats"), tl.scope("update_stats", tid="CPU", cat="cpu", block_id=_sm_id):
+                                _sm.max_radii2D[gvf] = torch.max(_sm.max_radii2D[gvf], _sub_radii_cpu[_sub_vf_cpu])
+                                _sm.add_densification_stats2(gvpg, gvf)
+
+                            if _iteration > opt.densify_from_iter and _iteration % opt.densification_interval == 0:
+                                with timer.scope("densify"), tl.scope("densify", tid="CPU", cat="cpu", block_id=_sm_id):
+                                    size_threshold = 20 if _iteration > opt.opacity_reset_interval else None
+                                    _sm.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
+                                    _sm.pack_to_buffer()
+
+                            if _iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and _iteration == opt.densify_from_iter):
+                                with timer.scope("reset opacity"), tl.scope("reset_opacity", tid="CPU", cat="cpu", block_id=_sm_id):
+                                    _sm.reset_opacity()
+                                    _sm.sync_packed_from_params()
+
+                        # Optimizer step
+                        if _iteration < opt.iterations:
+                            with timer.scope("opt step"), tl.scope("opt_step", tid="CPU", cat="cpu", block_id=_sm_id):
+                                _sm.optimizer.step()
+                                _sm.optimizer.zero_grad(set_to_none=True)
+                                _sm.sync_packed_from_params()
+                return _do
+
+            pending_opt = make_pending(_sm, _sm_id, _idx, _gpu_grads, _cpu_params, _sub_vf, _sub_radii, _sub_vpt, _iteration)
+
+        # flush the last submodel's pending work
+        flush_pending()
                         
                         
         with torch.no_grad():
