@@ -1,0 +1,8 @@
+setup.py
+cpu_adam.egg-info/PKG-INFO
+cpu_adam.egg-info/SOURCES.txt
+cpu_adam.egg-info/dependency_links.txt
+cpu_adam.egg-info/not-zip-safe
+cpu_adam.egg-info/top_level.txt
+src/cpu_adam.cpp
+src/cpu_adam_api.cpp
