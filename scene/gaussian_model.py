@@ -32,6 +32,55 @@ try:
 except:
     pass
 
+
+class CPUSparseAdam(torch.optim.Optimizer):
+    """Pure-Python sparse Adam that only updates visible rows. CPU-safe."""
+
+    def __init__(self, params, lr=1e-3, eps=1e-15, betas=(0.9, 0.999)):
+        defaults = dict(lr=lr, eps=eps, betas=betas)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, visibility_mask, N):
+        idx = visibility_mask.nonzero(as_tuple=True)[0]
+        if idx.numel() == 0:
+            return
+        for group in self.param_groups:
+            lr = group["lr"]
+            eps = group["eps"]
+            beta1, beta2 = group["betas"]
+
+            assert len(group["params"]) == 1
+            param = group["params"][0]
+            if param.grad is None:
+                continue
+
+            state = self.state[param]
+            if len(state) == 0:
+                state["step"] = 0
+                state["exp_avg"] = torch.zeros_like(param)
+                state["exp_avg_sq"] = torch.zeros_like(param)
+
+            state["step"] += 1
+            ea = state["exp_avg"]
+            easq = state["exp_avg_sq"]
+
+            g = param.grad[idx]
+            ea_s = ea[idx]
+            easq_s = easq[idx]
+
+            ea_s.mul_(beta1).add_(g, alpha=1 - beta1)
+            easq_s.mul_(beta2).addcmul_(g, g, value=1 - beta2)
+
+            ea[idx] = ea_s
+            easq[idx] = easq_s
+
+            bc1 = 1 - beta1 ** state["step"]
+            bc2 = 1 - beta2 ** state["step"]
+            step_size = lr / bc1
+
+            param.data[idx] -= step_size * ea_s / (easq_s.sqrt() / (bc2 ** 0.5) + eps)
+
 class GaussianModel:
 
     def setup_functions(self):
@@ -304,11 +353,13 @@ class GaussianModel:
         if self.optimizer_type == "default":
             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         elif self.optimizer_type == "sparse_adam":
-            try:
-                self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
-            except:
-                # A special version of the rasterizer is required to enable sparse adam
-                self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+            if device == "cuda":
+                try:
+                    self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
+                except:
+                    self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+            else:
+                self.optimizer = CPUSparseAdam(l, lr=0.0, eps=1e-15)
 
         self.exposure_optimizer = torch.optim.Adam([self._exposure])
 
@@ -674,7 +725,8 @@ class GaussianModel:
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
 
-        torch.cuda.empty_cache()
+        if device != "cpu":
+            torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, global_visibility_filter, frustum_visibility_filter):
         self.xyz_gradient_accum[global_visibility_filter] += torch.norm(viewspace_point_tensor.grad[frustum_visibility_filter,:2], dim=-1, keepdim=True)
@@ -743,9 +795,6 @@ class GaussianModel:
         self._packed = packed
         self._pack_slices = slices
         self._pack_D = D
-        # Pre-allocate pinned staging buffer sized for worst case (all N points visible).
-        # Reusing this buffer across iterations avoids repeated cudaHostAlloc calls,
-        # which are expensive due to page-locking overhead in the OS kernel.
         self._packed_staging = torch.empty(N, D, dtype=torch.float32, pin_memory=True)
 
     def sync_packed_from_params(self):

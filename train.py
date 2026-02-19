@@ -241,7 +241,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     first_iter = old_iteration
     
     gaussians: GaussianModel = scene.gaussians
-    
+
     # generate a initialized gs copy
     gaussians = gaussians.dump_to_cpu()
     
@@ -253,9 +253,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         
     for submodel in submodel_list:
         submodel.training_setup(opt, device = "cpu")
-        # Initialize packed pinned buffer after parameters are created.
-        # This packs all 6 per-Gaussian attributes into a single [N, D]
-        # contiguous pinned tensor for efficient subset H2D transfer.
         submodel.pack_to_buffer()
 
     cpu_full_proj_transform_dict = {}
@@ -334,10 +331,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 # 能被视锥看见并不一定真的有贡献
                 # image: [3, H, W]
                 valid_mask = (image > 0).any(dim=0)   # [H, W] bool
-                valid_pixels = valid_mask.sum().item()
-                total_pixels = valid_mask.numel()
-                contributed_percent = valid_pixels / total_pixels
-                if contributed_percent < 0.05:
+                if valid_mask.sum().item() < 0.05 * valid_mask.numel():
                     continue
                 
                 rendered_list.append(image)
@@ -441,14 +435,35 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
 
             with torch.no_grad():
+                
+                with timer.scope("stats to cpu"), tl.scope("stats_to_cpu", tid="CPU", cat="cpu", block_id=submodel_id):
+                    sub_visibility_filter = sub_visibility_filter.cpu()
+                    sub_radii = sub_radii.cpu()
+                    global_viewspace_points_grad = torch.zeros(submodel.get_xyz.shape[0], 3, device="cpu", requires_grad=False )
+                    global_viewspace_points_grad[submodel.visible_indices] = sub_viewspace_point_tensor.grad.cpu()
+                    global_visibility_filter = submodel.visible_indices[sub_visibility_filter]
+                
+                    N = submodel.get_xyz.shape[0]
+                    global_visibility_mask = torch.zeros(N, dtype=torch.bool, device="cpu")
+                    global_visibility_mask[global_visibility_filter] = True
+                
+                # Optimizer step
+                if iteration < opt.iterations:
+                    with timer.scope("opt step"), tl.scope("opt_step", tid="CPU", cat="cpu", block_id=submodel_id):
+                        if use_sparse_adam:
+                            submodel.optimizer.step(global_visibility_mask, global_visibility_mask.shape[0])
+                        else:
+                            submodel.optimizer.step()
+                        submodel.optimizer.zero_grad(set_to_none = True)
+                        # Sync optimizer-updated parameters back into the packed
+                        # pinned buffer so that subsequent move_and_activate_subset
+                        # calls read the latest values.
+                        submodel.sync_packed_from_params()
+                
+                
+                
                 # Densification
                 if iteration < opt.densify_until_iter:
-                    with timer.scope("stats to cpu"), tl.scope("stats_to_cpu", tid="CPU", cat="cpu", block_id=submodel_id):
-                        sub_visibility_filter = sub_visibility_filter.cpu()
-                        sub_radii = sub_radii.cpu()
-                        global_viewspace_points_grad = torch.zeros(submodel.get_xyz.shape[0], 3, device="cpu", requires_grad=False )
-                        global_viewspace_points_grad[submodel.visible_indices] = sub_viewspace_point_tensor.grad.cpu()
-                        global_visibility_filter = submodel.visible_indices[sub_visibility_filter]
                     
                     with timer.scope("update stats"), tl.scope("update_stats", tid="CPU", cat="cpu", block_id=submodel_id):
                         # TODO 这个是否可以增加间隔
@@ -469,20 +484,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                             # Opacity values changed in-place; sync to packed buffer.
                             submodel.sync_packed_from_params()
                 
+
                 
-                # Optimizer step
-                if iteration < opt.iterations:
-                    with timer.scope("opt step"), tl.scope("opt_step", tid="CPU", cat="cpu", block_id=submodel_id):
-                        if use_sparse_adam:
-                            visible = global_visibility_filter
-                            submodel.optimizer.step(visible, global_visibility_filter.shape[0])
-                        else:
-                            submodel.optimizer.step()
-                        submodel.optimizer.zero_grad(set_to_none = True)
-                        # Sync optimizer-updated parameters back into the packed
-                        # pinned buffer so that subsequent move_and_activate_subset
-                        # calls read the latest values.
-                        submodel.sync_packed_from_params()
+
                         
                         
         with torch.no_grad():
@@ -531,7 +535,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     if config.TIMELINE:
         os.makedirs("timeline", exist_ok=True)
         tl.save_chrome_trace(f"timeline/{BRANCH}.json")
-        tl.print_text_summary(iteration=opt.iterations)
+        # tl.print_text_summary(iteration=opt.iterations)
         
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
