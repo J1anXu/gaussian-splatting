@@ -415,7 +415,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with timer.scope("backward"), tl.scope("backward", tid="GPU", cat="gpu", block_id=submodel_id):
                 loss.backward()
 
-            # ---- async D2H: kick off non-blocking grad copies ----
+            # ---- async D2H: kick off non-blocking grad copies into pinned buffers ----
             with timer.scope("copy grad async"), tl.scope("copy_grad_async", tid="CPU", cat="cpu", block_id=submodel_id):
                 cur_idx = submodel.visible_indices.to("cpu")
                 cur_gpu_grads = []
@@ -431,12 +431,18 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     g = gpu_p.grad
                     if g is None:
                         continue
-                    cur_gpu_grads.append(g.detach().to("cpu", non_blocking=True))
+                    pinned = torch.empty_like(g, device="cpu", pin_memory=True)
+                    pinned.copy_(g, non_blocking=True)
+                    cur_gpu_grads.append(pinned)
                     cur_cpu_params.append(cpu_p)
 
-                cur_sub_vf = sub_visibility_filter
-                cur_sub_radii = sub_radii
-                cur_sub_vpt = sub_viewspace_point_tensor
+                # also async-copy densification stats
+                pin_sub_vf = torch.empty_like(sub_visibility_filter, device="cpu", pin_memory=True)
+                pin_sub_vf.copy_(sub_visibility_filter, non_blocking=True)
+                pin_sub_radii = torch.empty_like(sub_radii, device="cpu", pin_memory=True)
+                pin_sub_radii.copy_(sub_radii, non_blocking=True)
+                pin_vpt_grad = torch.empty_like(sub_viewspace_point_tensor.grad, device="cpu", pin_memory=True)
+                pin_vpt_grad.copy_(sub_viewspace_point_tensor.grad, non_blocking=True)
 
             submodel.deactivate_subset()
 
@@ -452,12 +458,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             _idx = cur_idx
             _gpu_grads = cur_gpu_grads
             _cpu_params = cur_cpu_params
-            _sub_vf = cur_sub_vf
-            _sub_radii = cur_sub_radii
-            _sub_vpt = cur_sub_vpt
+            _sub_vf = pin_sub_vf
+            _sub_radii = pin_sub_radii
+            _vpt_grad = pin_vpt_grad
             _iteration = iteration
 
-            def make_pending(_sm, _sm_id, _idx, _gpu_grads, _cpu_params, _sub_vf, _sub_radii, _sub_vpt, _iteration):
+            def make_pending(_sm, _sm_id, _idx, _gpu_grads, _cpu_params, _sub_vf, _sub_radii, _vpt_grad, _iteration):
                 def _do():
                     # scatter grad
                     with timer.scope("scatter_grad"), tl.scope("scatter_grad", tid="CPU", cat="cpu", block_id=_sm_id):
@@ -470,14 +476,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         # Densification
                         if _iteration < opt.densify_until_iter:
                             with timer.scope("stats to cpu"), tl.scope("stats_to_cpu", tid="CPU", cat="cpu", block_id=_sm_id):
-                                _sub_vf_cpu = _sub_vf.cpu()
-                                _sub_radii_cpu = _sub_radii.cpu()
                                 gvpg = torch.zeros(_sm.get_xyz.shape[0], 3, device="cpu", requires_grad=False)
-                                gvpg[_sm.visible_indices] = _sub_vpt.grad.cpu()
-                                gvf = _sm.visible_indices[_sub_vf_cpu]
+                                gvpg[_sm.visible_indices] = _vpt_grad
+                                gvf = _sm.visible_indices[_sub_vf]
 
                             with timer.scope("update stats"), tl.scope("update_stats", tid="CPU", cat="cpu", block_id=_sm_id):
-                                _sm.max_radii2D[gvf] = torch.max(_sm.max_radii2D[gvf], _sub_radii_cpu[_sub_vf_cpu])
+                                _sm.max_radii2D[gvf] = torch.max(_sm.max_radii2D[gvf], _sub_radii[_sub_vf])
                                 _sm.add_densification_stats2(gvpg, gvf)
 
                             if _iteration > opt.densify_from_iter and _iteration % opt.densification_interval == 0:
@@ -499,7 +503,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                                 _sm.sync_packed_from_params()
                 return _do
 
-            pending_opt = make_pending(_sm, _sm_id, _idx, _gpu_grads, _cpu_params, _sub_vf, _sub_radii, _sub_vpt, _iteration)
+            pending_opt = make_pending(_sm, _sm_id, _idx, _gpu_grads, _cpu_params, _sub_vf, _sub_radii, _vpt_grad, _iteration)
 
         # flush the last submodel's pending work
         flush_pending()
