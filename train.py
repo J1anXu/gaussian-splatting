@@ -526,7 +526,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     if config.TIMELINE:
         os.makedirs("timeline", exist_ok=True)
         tl.save_chrome_trace(f"timeline/{BRANCH}.json")
-        tl.print_text_summary(iteration=opt.iterations)
+        # tl.print_text_summary(iteration=opt.iterations)
         
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))

@@ -302,13 +302,15 @@ class GaussianModel:
         ]
 
         if self.optimizer_type == "default":
-            self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+            self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
         elif self.optimizer_type == "sparse_adam":
-            try:
-                self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
-            except:
-                # A special version of the rasterizer is required to enable sparse adam
-                self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+            if device == "cuda":
+                try:
+                    self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
+                except:
+                    self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
+            else:
+                self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
 
         self.exposure_optimizer = torch.optim.Adam([self._exposure])
 
