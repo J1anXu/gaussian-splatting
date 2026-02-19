@@ -255,6 +255,22 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     for cam in scene.getTrainCameras():
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
     
+    # Pre-allocate pinned buffers for async D2H grad copies (avoid cudaHostAlloc per iteration)
+    for submodel in submodel_list:
+        n_vis = submodel._xyz.shape[0]  # worst case: all visible
+        submodel._pinned_grad_bufs = {
+            '_xyz': torch.empty(n_vis, 3, dtype=torch.float32, pin_memory=True),
+            '_features_dc': torch.empty_like(submodel._features_dc, pin_memory=True),
+            '_features_rest': torch.empty_like(submodel._features_rest, pin_memory=True),
+            '_scaling': torch.empty(n_vis, 3, dtype=torch.float32, pin_memory=True),
+            '_rotation': torch.empty(n_vis, 4, dtype=torch.float32, pin_memory=True),
+            '_opacity': torch.empty(n_vis, 1, dtype=torch.float32, pin_memory=True),
+        }
+        # visibility_filter from (radii>0).nonzero() is [M,1] long; radii is int32
+        submodel._pinned_vf_buf = torch.empty(n_vis, 1, dtype=torch.long, pin_memory=True)
+        submodel._pinned_radii_buf = torch.empty(n_vis, dtype=torch.int32, pin_memory=True)
+        submodel._pinned_vpt_grad_buf = torch.empty(n_vis, 3, dtype=torch.float32, pin_memory=True)
+
     if DEBUG_MODE:
         opt.iterations = 1050
 
@@ -415,33 +431,32 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with timer.scope("backward"), tl.scope("backward", tid="GPU", cat="gpu", block_id=submodel_id):
                 loss.backward()
 
-            # ---- async D2H: kick off non-blocking grad copies into pinned buffers ----
+            # ---- async D2H: kick off non-blocking grad copies into pre-allocated pinned buffers ----
             with timer.scope("copy grad async"), tl.scope("copy_grad_async", tid="CPU", cat="cpu", block_id=submodel_id):
                 cur_idx = submodel.visible_indices.to("cpu")
+                n_vis = cur_idx.shape[0]
                 cur_gpu_grads = []
                 cur_cpu_params = []
-                for cpu_p, gpu_p in (
-                    (submodel._xyz, submodel._xyz_gpu),
-                    (submodel._features_dc, submodel._features_dc_gpu),
-                    (submodel._features_rest, submodel._features_rest_gpu),
-                    (submodel._scaling, submodel._scaling_gpu),
-                    (submodel._rotation, submodel._rotation_gpu),
-                    (submodel._opacity, submodel._opacity_gpu),
-                ):
+                attr_names = ['_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation', '_opacity']
+                gpu_attrs = [submodel._xyz_gpu, submodel._features_dc_gpu, submodel._features_rest_gpu,
+                             submodel._scaling_gpu, submodel._rotation_gpu, submodel._opacity_gpu]
+                cpu_attrs = [submodel._xyz, submodel._features_dc, submodel._features_rest,
+                             submodel._scaling, submodel._rotation, submodel._opacity]
+                for name, cpu_p, gpu_p in zip(attr_names, cpu_attrs, gpu_attrs):
                     g = gpu_p.grad
                     if g is None:
                         continue
-                    pinned = torch.empty_like(g, device="cpu", pin_memory=True)
+                    pinned = submodel._pinned_grad_bufs[name][:n_vis]
                     pinned.copy_(g, non_blocking=True)
                     cur_gpu_grads.append(pinned)
                     cur_cpu_params.append(cpu_p)
 
-                # also async-copy densification stats
-                pin_sub_vf = torch.empty_like(sub_visibility_filter, device="cpu", pin_memory=True)
+                # also async-copy densification stats into pre-allocated pinned buffers
+                pin_sub_vf = submodel._pinned_vf_buf[:sub_visibility_filter.shape[0]]
                 pin_sub_vf.copy_(sub_visibility_filter, non_blocking=True)
-                pin_sub_radii = torch.empty_like(sub_radii, device="cpu", pin_memory=True)
+                pin_sub_radii = submodel._pinned_radii_buf[:sub_radii.shape[0]]
                 pin_sub_radii.copy_(sub_radii, non_blocking=True)
-                pin_vpt_grad = torch.empty_like(sub_viewspace_point_tensor.grad, device="cpu", pin_memory=True)
+                pin_vpt_grad = submodel._pinned_vpt_grad_buf[:n_vis]
                 pin_vpt_grad.copy_(sub_viewspace_point_tensor.grad, non_blocking=True)
 
             submodel.deactivate_subset()
