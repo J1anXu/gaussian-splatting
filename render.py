@@ -24,7 +24,7 @@ from gaussian_renderer import GaussianModel
 BRANCH = None
 
 try:
-    from diff_gaussian_rasterization import SparseGaussianAdam
+    from diff_gaussian_rasterization_sparse_adam import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False

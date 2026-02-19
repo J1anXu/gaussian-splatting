@@ -24,7 +24,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
-import diff_gaussian_rasterization
+import diff_gaussian_rasterization_sparse_adam
 
 import wandb
 import time
@@ -48,7 +48,7 @@ except:
     FUSED_SSIM_AVAILABLE = False
 
 try:
-    from diff_gaussian_rasterization import SparseGaussianAdam
+    from diff_gaussian_rasterization_sparse_adam import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
