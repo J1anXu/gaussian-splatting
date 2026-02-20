@@ -45,8 +45,7 @@ class PipelinedGradSync:
     def reallocate_pinned_buffers(self, submodel: GaussianModel):
         self._allocate_pinned_buffers(submodel)
 
-    def kick_async_d2h(self, submodel: GaussianModel, submodel_id: int,
-                        render_pkg: dict, sub_viewspace_point_tensor):
+    def kick_async_d2h(self, submodel: GaussianModel, submodel_id: int, render_pkg: dict, sub_viewspace_point_tensor):
         """Kick off non-blocking D2H copies of grads into pre-allocated pinned buffers.
 
         Returns captured state tuple for deferred work.
@@ -88,6 +87,7 @@ class PipelinedGradSync:
         tracer = self._tracer
 
         def _do():
+            ev_all = tracer.begin(f"worker[{sm_id}]", tier="worker", block_id=sm_id)
             ev = tracer.begin(f"scatter_grad [block {sm_id}]", tier="worker", block_id=sm_id)
             for cpu_p, grad_cpu in zip(cpu_params, gpu_grads):
                 if cpu_p.grad is None:
@@ -123,6 +123,8 @@ class PipelinedGradSync:
                     sm.sync_packed_from_params()
                     tracer.end(ev)
 
+            tracer.end(ev_all)
+
         return _do
 
     def flush(self):
@@ -130,8 +132,7 @@ class PipelinedGradSync:
         tracer = self._tracer
         # 如果上一个线程没有执行完, 就等它执行完再开始新的线程
         if self._worker_thread is not None:
-            ev = tracer.begin(f"join_worker [block {self._running_block_id}]",
-                              tier="block", block_id=self._running_block_id)
+            ev = tracer.begin(f"wait[{self._running_block_id}]", tier="block", block_id=self._running_block_id)
             self._worker_thread.join()
             tracer.end(ev)
             self._worker_thread = None
@@ -145,37 +146,9 @@ class PipelinedGradSync:
             self._worker_thread = threading.Thread(target=fn)
             self._worker_thread.start()
 
-    def flush_and_prepare(self, submodel: GaussianModel, submodel_id: int,
-                          render_pkg: dict, sub_viewspace_point_tensor, iteration: int):
-        """Kick async D2H, flush previous pending, sync, and prepare new pending.
 
-        This is the single method the main loop calls per submodel.
-        """
-        tracer = self._tracer
 
-        # 1. kick off async D2H for current submodel (CUDA stream tier) 等backward 的梯度就绪
-        ev_d2h = tracer.begin_cuda(f"d2h_copy [block {submodel_id}]", block_id=submodel_id)
-        state = self.kick_async_d2h(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor)
-        cur_idx, cur_gpu_grads, cur_cpu_params, pin_sub_vf, pin_sub_radii, pin_vpt_grad = state
-        tracer.end_cuda(ev_d2h)
 
-        # 梯度都已经拷回来了 关闭当前子模型的GPU部分, 释放显存, 让后续子模型使用
-        # 2. deactivate current submodel's GPU subset
-        submodel.subset_off()
-
-        # 执行上一个model的优化步骤, 这时当前model的梯度已经在CPU上了, 不会有显存占用冲突
-        # 3. while D2H is in flight, run PREVIOUS submodel's opt step
-        self.flush()
-
-        # TODO 不知到这个同步点是否必要 需要做实验来确定。。
-        # 4. sync D2H
-        # ev_sync = tracer.begin("cuda_sync", block_id=submodel_id)
-        # torch.cuda.synchronize()
-        # tracer.end(ev_sync)
-
-        # 5. prepare deferred work for current submodel
-        self._pending_opt = self._make_pending(submodel, submodel_id, cur_idx, cur_gpu_grads, cur_cpu_params, pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration)
-        self._pending_block_id = submodel_id
 
     def flush_last(self):
         """Flush the last submodel's pending work after the loop ends."""

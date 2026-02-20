@@ -66,7 +66,7 @@ def render_set(model_path, name, iteration, views, model_list: List[GaussianMode
             
             model.activate_subset()
             render_pkg = render(view, model, pipeline, background, use_trained_exp=train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-            model.subset_off()
+            model.clear()
             
             image, viewspace_point_tensor, visibility_filter, radii, alphaLeft = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["alphaLeft"]
             rendered_list.append(image)
