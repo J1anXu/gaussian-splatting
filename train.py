@@ -309,8 +309,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         visible_submodel_id_list = []
         visible_pts = 0
 
-    
-        ev_preparation = TRACER.begin("preparation")
+        ev_prep = TRACER.begin("preparation", tier="main")
         with torch.no_grad():
             for submodel_id, submodel in enumerate(submodel_list):
 
@@ -319,11 +318,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 visible_pts += submodel.visible_indices.shape[0]
 
-                ev_sson = TRACER.begin("subset_on")
+                ev_sson = TRACER.begin(f"subset_on [block {submodel_id}]", tier="block", block_id=submodel_id)
                 submodel.subset_on(requires_grad = False)
                 TRACER.end(ev_sson)
 
-                ev_render = TRACER.begin_cuda("rendering")
+                ev_render = TRACER.begin_cuda(f"rendering [block {submodel_id}]", block_id=submodel_id)
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
                 TRACER.end_cuda(ev_render)
 
@@ -334,7 +333,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 # 能被视锥看见并不一定真的有贡献
                 # image: [3, H, W]
-                ev_justic = TRACER.begin("justification")
+                ev_justic = TRACER.begin(f"justification [block {submodel_id}]", tier="block", block_id=submodel_id)
                 valid_mask = (image > 0).any(dim=0)   # [H, W] bool
                 valid_pixels = valid_mask.sum().item()
                 total_pixels = valid_mask.numel()
@@ -347,13 +346,15 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 depth_list.append(depth)
                 alpha_list.append(alphaLeft)
                 visible_submodel_id_list.append(submodel_id)
-        TRACER.end(ev_preparation)
+        TRACER.end(ev_prep)
                 
         # execute merge
+        ev_merge_main = TRACER.begin("merge", tier="main")
         ev_merge = TRACER.begin_cuda("merge")
         with torch.no_grad():
             merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
         TRACER.end_cuda(ev_merge)
+        TRACER.end(ev_merge_main)
             
         C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
         prefix_T = merge_res["prefix_T"]
@@ -365,15 +366,15 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             gt_image = viewpoint_cam.original_image.cuda()
 
         # 遍历所有可见block 轮流当active block
-        ev_Traversal = TRACER.begin("traversal")
+        ev_traversal = TRACER.begin("traversal", tier="main")
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
 
-            ev_subset_on = TRACER.begin("subset_on", block_id=submodel_id)
+            ev_subset_on = TRACER.begin(f"subset_on [block {submodel_id}]", tier="block", block_id=submodel_id)
             submodel.subset_on(requires_grad = True)
             TRACER.end(ev_subset_on)
 
-            ev_render = TRACER.begin_cuda("rendering_active", block_id=submodel_id)
+            ev_render = TRACER.begin_cuda(f"rendering_active [block {submodel_id}]", block_id=submodel_id)
             render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             TRACER.end_cuda(ev_render)
 
@@ -384,7 +385,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             sub_viewspace_point_tensor = render_pkg["viewspace_points"]
 
 
-            ev_composition = TRACER.begin("composition", block_id=submodel_id)
+            ev_composition = TRACER.begin(f"composition [block {submodel_id}]", tier="block", block_id=submodel_id)
             with torch.no_grad():
                 # 当前subset的渲染结果在每个像素上的排序位置
                 submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
@@ -407,7 +408,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             # Loss
 
-            ev_loss = TRACER.begin("loss", block_id=submodel_id)
+            ev_loss = TRACER.begin(f"loss [block {submodel_id}]", tier="block", block_id=submodel_id)
             Ll1 = l1_loss(composed_img, gt_image)
             ssim_value = ssim(composed_img, gt_image)
             loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
@@ -419,20 +420,18 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with torch.no_grad():
                 diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
 
-            ev_bw = TRACER.begin_cuda("backward", block_id=submodel_id)
+            # 异步的 无需等待 先去处理其他东西
+            ev_bw = TRACER.begin_cuda(f"backward [block {submodel_id}]", block_id=submodel_id)
             loss.backward()
             TRACER.end_cuda(ev_bw)
 
-            ev_grad_sync = TRACER.begin("flush_and_prepare", block_id=submodel_id)
             grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
-            TRACER.end(ev_grad_sync)
 
-        TRACER.end(ev_Traversal)
-
+        TRACER.end(ev_traversal)
         # flush the last submodel's pending work
-        ev_flush = TRACER.begin("flush_last")
+        ev_flush_last = TRACER.begin("flush_last", tier="main")
         grad_sync.flush_last()
-        TRACER.end(ev_flush)                
+        TRACER.end(ev_flush_last)
                         
         with torch.no_grad():
             # Progress bar

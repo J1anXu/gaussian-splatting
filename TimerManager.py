@@ -3,32 +3,27 @@ import json
 import torch
 
 
+# Fixed tier → tid mapping (top to bottom in chrome://tracing)
+_TIER_TID = {
+    "main":   "1-Main",
+    "block":  "2-Per-block",
+    "worker": "3-Worker",
+}
+_CUDA_TID = "4-CUDA"
+
+
 class TraceManager:
-    """Three-tier tracing → chrome://tracing JSON.
+    """Fixed 4-row tracing → chrome://tracing JSON.
 
-    Tiers:
-        "main"   → 1-Main Thread   (CPU perf_counter, big pipeline stages)
-        "worker" → 2-Work Thread   (CPU perf_counter, _make_pending tasks)
-        "cuda"   → 3-CUDA Stream   (torch.cuda.Event, accurate GPU timing)
+    Rows (top → bottom):
+      1-Main       : high-level phases (frustum_culling, preparation, merge, traversal, flush_last)
+      2-Per-block  : per-block leaf ops (subset_on, composition, loss, join_worker …)
+      3-Worker     : background-thread work (scatter_grad, opt_step …)
+      4-CUDA       : GPU-timed spans (rendering, backward, d2h_copy …)
 
-    Usage:
-        tracer = TraceManager()
-        tracer.set_iteration(iteration)
-
-        # CPU-timed span (tier "main" or "worker")
-        ev = tracer.begin("frustum_culling")
-        ...
-        tracer.end(ev)
-
-        # CUDA-timed span (always tier "cuda")
-        ev = tracer.begin_cuda("rendering", block_id=0)
-        render(...)
-        tracer.end_cuda(ev)
-
-        tracer.export("trace.json")
+    Colors are NOT specified — chrome assigns them automatically by event name,
+    so same-name events share a color and different names get different colors.
     """
-
-    _TID = {"main": "1-Main Thread", "worker": "2-Work Thread"}
 
     def __init__(self):
         self._events = []
@@ -40,29 +35,29 @@ class TraceManager:
         self._iter = iteration
 
     def _us(self, ns: int) -> float:
-        """Offset from anchor in microseconds."""
         return (ns - self._t0) / 1000.0
 
     # ── CPU-timed spans ─────────────────────────────────────
     def begin(self, name: str, tier: str = "main", **kwargs):
-        kwargs["iteration"] = self._iter
+        kwargs.setdefault("iteration", self._iter)
         return {"name": name, "tier": tier, "ts": time.perf_counter_ns(), "args": kwargs}
 
     def end(self, handle: dict):
         dur = time.perf_counter_ns() - handle["ts"]
+        tid = _TIER_TID.get(handle["tier"], _TIER_TID["main"])
         self._events.append({
             "name": handle["name"],
             "ph": "X",
             "ts": self._us(handle["ts"]),
             "dur": dur / 1000.0,
             "pid": "Training",
-            "tid": self._TID[handle["tier"]],
+            "tid": tid,
             "args": handle["args"],
         })
 
-    # ── CUDA-timed spans (always "3-CUDA Stream") ──────────
+    # ── CUDA-timed spans (always on 4-CUDA row) ────────────
     def begin_cuda(self, name: str, stream=None, **kwargs):
-        kwargs["iteration"] = self._iter
+        kwargs.setdefault("iteration", self._iter)
         ev = torch.cuda.Event(enable_timing=True)
         ev.record(stream)
         return {
@@ -93,9 +88,9 @@ class TraceManager:
                 "name": p["name"],
                 "ph": "X",
                 "ts": self._us(p["wall_ns"]),
-                "dur": dur_ms * 1000.0,   # ms → µs
+                "dur": dur_ms * 1000.0,
                 "pid": "Training",
-                "tid": "3-CUDA Stream",
+                "tid": _CUDA_TID,
                 "args": p["args"],
             })
         self._cuda_pending.clear()
