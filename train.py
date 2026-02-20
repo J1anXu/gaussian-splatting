@@ -41,6 +41,8 @@ DEBUG_MODE = False
 WANDB = True
 LOGGER = None
 
+TRACER = None
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -146,7 +148,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         
         initial_gaussians.activate_subset()
         render_pkg = render(viewpoint_cam, initial_gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-        initial_gaussians.deactivate_subset()
+        initial_gaussians.subset_off()
         
         # pixel level 
         image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
@@ -254,13 +256,14 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
     
     # Pipeline: async D2H grad copies + deferred opt steps
-    grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene)
+    grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, TRACER)
 
     if DEBUG_MODE:
         opt.iterations = 1050
 
     time_start = time.time()
     for iteration in range(first_iter, opt.iterations + 1):
+        TRACER.set_iteration(iteration)
 
         for submodel in submodel_list:
             submodel.update_learning_rate(iteration)
@@ -285,6 +288,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         
         # frustum culling
+        ev = TRACER.begin("frustum_culling")
         with torch.no_grad():
             if config.FRUSTUM_CULLING_ENABLED:
                 for model in submodel_list:
@@ -297,48 +301,59 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             else:
                 for model in submodel_list:
                     model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
-        
+        TRACER.end(ev)
+
+
         # 无渲染全部结果 为计算Loss做准备
         rendered_list, depth_list, alpha_list = [], [], []
         visible_submodel_id_list = []
         visible_pts = 0
-        
+
+    
+        ev_preparation = TRACER.begin("preparation")
         with torch.no_grad():
             for submodel_id, submodel in enumerate(submodel_list):
-                
+
                 if submodel.visible_indices.shape[0] == 0:
                     continue
-                
-                visible_pts += submodel.visible_indices.shape[0]
-                
-                submodel.move_and_activate_subset(requires_grad = False)
 
+                visible_pts += submodel.visible_indices.shape[0]
+
+                ev_sson = TRACER.begin("subset_on")
+                submodel.subset_on(requires_grad = False)
+                TRACER.end(ev_sson)
+
+                ev_render = TRACER.begin_cuda("rendering")
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                    
-                submodel.deactivate_subset()
-                
-                # pixel level 
+                TRACER.end_cuda(ev_render)
+
+                submodel.subset_off()
+
+                # pixel level
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
-                
+
                 # 能被视锥看见并不一定真的有贡献
                 # image: [3, H, W]
+                ev_justic = TRACER.begin("justification")
                 valid_mask = (image > 0).any(dim=0)   # [H, W] bool
                 valid_pixels = valid_mask.sum().item()
                 total_pixels = valid_mask.numel()
                 contributed_percent = valid_pixels / total_pixels
                 if contributed_percent < 0.05:
                     continue
-                
+                TRACER.end(ev_justic)
+
                 rendered_list.append(image)
                 depth_list.append(depth)
                 alpha_list.append(alphaLeft)
-                
                 visible_submodel_id_list.append(submodel_id)
-
+        TRACER.end(ev_preparation)
                 
-        # execute merge 
+        # execute merge
+        ev_merge = TRACER.begin_cuda("merge")
         with torch.no_grad():
             merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
+        TRACER.end_cuda(ev_merge)
             
         C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
         prefix_T = merge_res["prefix_T"]
@@ -346,17 +361,21 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = merge_res["bg_rgb"]
         
-
         with torch.no_grad():
             gt_image = viewpoint_cam.original_image.cuda()
 
         # 遍历所有可见block 轮流当active block
+        ev_Traversal = TRACER.begin("traversal")
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
 
-            submodel.move_and_activate_subset(requires_grad = True)
+            ev_subset_on = TRACER.begin("subset_on", block_id=submodel_id)
+            submodel.subset_on(requires_grad = True)
+            TRACER.end(ev_subset_on)
 
+            ev_render = TRACER.begin_cuda("rendering_active", block_id=submodel_id)
             render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            TRACER.end_cuda(ev_render)
 
             # pixel level
             sub_img = render_pkg["render"]
@@ -364,6 +383,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # gaussian points level
             sub_viewspace_point_tensor = render_pkg["viewspace_points"]
 
+
+            ev_composition = TRACER.begin("composition", block_id=submodel_id)
             with torch.no_grad():
                 # 当前subset的渲染结果在每个像素上的排序位置
                 submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
@@ -378,6 +399,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             # 把带梯度的渲染结果拼到背景上 用于计算loss
             composed_img = C_base + prefix_T_k * C_active
+            TRACER.end(ev_composition)
 
             # if viewpoint_cam.alpha_mask is not None:
             #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
@@ -385,10 +407,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             # Loss
 
-
+            ev_loss = TRACER.begin("loss", block_id=submodel_id)
             Ll1 = l1_loss(composed_img, gt_image)
             ssim_value = ssim(composed_img, gt_image)
             loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+            TRACER.end(ev_loss)
 
             # Depth regularization
             Ll1depth = 0
@@ -396,13 +419,20 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with torch.no_grad():
                 diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
 
+            ev_bw = TRACER.begin_cuda("backward", block_id=submodel_id)
             loss.backward()
+            TRACER.end_cuda(ev_bw)
 
+            ev_grad_sync = TRACER.begin("flush_and_prepare", block_id=submodel_id)
             grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
+            TRACER.end(ev_grad_sync)
+
+        TRACER.end(ev_Traversal)
 
         # flush the last submodel's pending work
+        ev_flush = TRACER.begin("flush_last")
         grad_sync.flush_last()
-                        
+        TRACER.end(ev_flush)                
                         
         with torch.no_grad():
             # Progress bar
@@ -444,7 +474,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     time_end = time.time()
     cost = time_end - time_start
     print(f"Phase 2 training time cost: [{cost:.2f}] seconds.")
-    
+    TRACER.export(f"timeline/{SCENE_NAME}_{BRANCH}_timeline.json")
 
     if config.TIMELINE:
         os.makedirs("timeline", exist_ok=True)
@@ -500,6 +530,8 @@ if __name__ == "__main__":
     args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
+
+    TRACER = TraceManager()
 
     # Initialize system state (RNG)
     safe_state(args.quiet)

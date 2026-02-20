@@ -1,5 +1,6 @@
 import torch
 from typing import List, Optional, Callable
+from TimerManager import TraceManager
 from scene import GaussianModel
 
 
@@ -9,12 +10,12 @@ ATTR_NAMES = ['_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation',
 class PipelinedGradSync:
     """Manages async D2H gradient copies and deferred optimizer steps for submodel pipeline."""
 
-    def __init__(self, submodel_list: List[GaussianModel], opt, dataset, scene):
+    def __init__(self, submodel_list: List[GaussianModel], opt, dataset, scene, tracer: TraceManager):
         self.submodel_list = submodel_list
         self.opt = opt
         self.dataset = dataset
         self.scene = scene
-
+        self._tracer = tracer
 
         self._pending_opt: Optional[Callable] = None
 
@@ -80,15 +81,21 @@ class PipelinedGradSync:
                        sub_vf, sub_radii, vpt_grad, iteration):
         """Build a closure that performs scatter_grad + densify + opt_step for one submodel."""
         opt, dataset, scene = self.opt, self.dataset, self.scene
+        tracer = self._tracer
 
         def _do():
+            ev_all = tracer.begin(f"_make_pending[{sm_id}]", "worker", block_id=sm_id)
+
+            ev = tracer.begin("scatter_grad", "worker", block_id=sm_id)
             for cpu_p, grad_cpu in zip(cpu_params, gpu_grads):
                 if cpu_p.grad is None:
                     cpu_p.grad = torch.zeros_like(cpu_p)
                 cpu_p.grad[idx] = grad_cpu
+            tracer.end(ev)
 
             with torch.no_grad():
                 if iteration < opt.densify_until_iter:
+                    ev = tracer.begin("densify_stats", "worker", block_id=sm_id)
                     gvpg = torch.zeros(sm.get_xyz.shape[0], 3, device="cpu", requires_grad=False)
                     gvpg[sm.visible_indices] = vpt_grad
                     gvf = sm.visible_indices[sub_vf]
@@ -105,11 +112,16 @@ class PipelinedGradSync:
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         sm.reset_opacity()
                         sm.sync_packed_from_params()
+                    tracer.end(ev)
 
                 if iteration < opt.iterations:
+                    ev = tracer.begin("opt_step", "worker", block_id=sm_id)
                     sm.optimizer.step()
                     sm.optimizer.zero_grad(set_to_none=True)
                     sm.sync_packed_from_params()
+                    tracer.end(ev)
+
+            tracer.end(ev_all)
 
         return _do
 
@@ -125,18 +137,24 @@ class PipelinedGradSync:
 
         This is the single method the main loop calls per submodel.
         """
-        # 1. kick off async D2H for current submodel
+        tracer = self._tracer
+
+        # 1. kick off async D2H for current submodel (CUDA stream tier)
+        ev_d2h = tracer.begin_cuda("kick_async_d2h", block_id=submodel_id)
         state = self.kick_async_d2h(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor)
         cur_idx, cur_gpu_grads, cur_cpu_params, pin_sub_vf, pin_sub_radii, pin_vpt_grad = state
+        tracer.end_cuda(ev_d2h)
 
         # 2. deactivate current submodel's GPU subset
-        submodel.deactivate_subset()
+        submodel.subset_off()
 
         # 3. while D2H is in flight, run PREVIOUS submodel's opt step
         self.flush()
 
         # 4. sync D2H
+        ev_sync = tracer.begin("cuda_sync", block_id=submodel_id)
         torch.cuda.synchronize()
+        tracer.end(ev_sync)
 
         # 5. prepare deferred work for current submodel
         self._pending_opt = self._make_pending(

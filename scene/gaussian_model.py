@@ -769,11 +769,11 @@ class GaussianModel:
     def activate_subset(self):
         self.subset_mode_1 = True
         
-    def deactivate_subset(self):
+    def subset_off(self):
         self.subset_mode_1 = False    
         self.subset_mode_2 = False  
 
-    def move_and_activate_subset(self, requires_grad=True):
+    def subset_on(self, requires_grad=True):
         """
         Gather visible Gaussian attributes from CPU and transfer to GPU.
 
