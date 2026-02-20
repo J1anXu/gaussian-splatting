@@ -21,4 +21,4 @@ FRUSTUM_CULLING_ENABLED = True  # 是否启用视锥剔除
 SPLIT_SIZE = 300000 # 300000
 
 HALF = False        # 半精度梯度拷贝加速
-TIMELINE = True    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
+TIMELINE = True    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)   关掉后零开销 — 没有 CUDA event 创建、没有 perf_counter_ns 调用、没有 list append。

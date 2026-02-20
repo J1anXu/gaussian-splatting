@@ -32,7 +32,7 @@ import time
 from logger import get_logger
 import config
 import diff_gaussian_rasterization_jian
-from TimerManager import  TraceManager
+from TimerManager import TraceManager, NoOpTraceManager
 from pipeline_grad_sync import PipelinedGradSync
 SCENE_NAME = None
 BRANCH = None
@@ -501,10 +501,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     time_end = time.time()
     cost = time_end - time_start
     print(f"Phase 2 training time cost: [{cost:.2f}] seconds.")
-    TRACER.export(f"timeline/{SCENE_NAME}_{BRANCH}_timeline.json")
-
     if config.TIMELINE:
         os.makedirs("timeline", exist_ok=True)
+        TRACER.export(f"timeline/{SCENE_NAME}_{BRANCH}_timeline.json")
         
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -558,7 +557,7 @@ if __name__ == "__main__":
     
     print("Optimizing " + args.model_path)
 
-    TRACER = TraceManager()
+    TRACER = TraceManager() if config.TIMELINE else NoOpTraceManager()
 
     # Initialize system state (RNG)
     safe_state(args.quiet)

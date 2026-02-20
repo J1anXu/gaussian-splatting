@@ -98,3 +98,16 @@ class TraceManager:
         with open(path, "w") as f:
             json.dump({"traceEvents": self._events}, f)
         print(f"Trace exported → {path}  ({len(self._events)} events)")
+
+
+_NOOP_HANDLE = {}
+
+
+class NoOpTraceManager:
+    """Drop-in replacement that does nothing. Zero overhead when TIMELINE=False."""
+    def set_iteration(self, iteration): pass
+    def begin(self, name, tier="main", **kw): return _NOOP_HANDLE
+    def end(self, handle): pass
+    def begin_cuda(self, name, stream=None, **kw): return _NOOP_HANDLE
+    def end_cuda(self, handle): pass
+    def export(self, path="trace.json"): pass
