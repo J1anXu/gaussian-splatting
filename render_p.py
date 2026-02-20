@@ -96,14 +96,14 @@ def render_set(model_path, name, iteration, views, model_list: List[GaussianMode
 
         img_path_in_debug = os.path.join(debug_path, img_name)
         
-        if config.SAVE_RGB_LAYERS:
-            save_rgb_layers(img_path_in_debug, front_rgbs)
+        # if config.SAVE_RGB_LAYERS:
+        #     save_rgb_layers(img_path_in_debug, front_rgbs)
             
-        if config.SAVE_LAYERS_CONTRIBUTION:
-            save_layer_contribution(img_path_in_debug, block_rank, front_rgbs, prefix_T, visible_block_idxs)
+        # if config.SAVE_LAYERS_CONTRIBUTION:
+        #     save_layer_contribution(img_path_in_debug, block_rank, front_rgbs, prefix_T, visible_block_idxs)
                     
-        if config.SAVE_DEPTH_LIST:
-            save_depth_list(img_path_in_debug, depth_list, visible_block_idxs)
+        # if config.SAVE_DEPTH_LIST:
+        #     save_depth_list(img_path_in_debug, depth_list, visible_block_idxs)
                 
 
         torchvision.utils.save_image(image, os.path.join(render_path, img_name + ".png"))            

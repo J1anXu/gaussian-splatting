@@ -160,8 +160,8 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             image *= alpha_mask
         
 
-        if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+        # if viewpoint_cam.image_name == debug_image_name:
+        #     torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -539,7 +539,7 @@ if __name__ == "__main__":
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     os.makedirs("debug", exist_ok=True)
     IMG_PATH_IN_DEBUG = os.path.join("/data/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
-    os.makedirs(IMG_PATH_IN_DEBUG, exist_ok=True)
+    # os.makedirs(IMG_PATH_IN_DEBUG, exist_ok=True)
     time_start = time.time()
     res = training_phase_1(lp.extract(args), op.extract(args), pp.extract(args), args.start_checkpoint, args.debug_from)
     
