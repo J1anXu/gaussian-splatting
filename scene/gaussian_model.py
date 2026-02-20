@@ -523,7 +523,6 @@ class GaussianModel:
         for idx in range(len(self.block_idx_list)):
             subset = self.get_subset_by_id(idx)
             subsets.append(subset)
-            print(f"GS {idx} size: {subset._xyz.shape[0]}")
         return subsets
 
 

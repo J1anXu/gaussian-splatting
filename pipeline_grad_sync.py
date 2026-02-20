@@ -9,13 +9,12 @@ ATTR_NAMES = ['_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation',
 class PipelinedGradSync:
     """Manages async D2H gradient copies and deferred optimizer steps for submodel pipeline."""
 
-    def __init__(self, submodel_list: List[GaussianModel], opt, dataset, scene, timer, tl):
+    def __init__(self, submodel_list: List[GaussianModel], opt, dataset, scene):
         self.submodel_list = submodel_list
         self.opt = opt
         self.dataset = dataset
         self.scene = scene
-        self.timer = timer
-        self.tl = tl
+
 
         self._pending_opt: Optional[Callable] = None
 
@@ -47,35 +46,33 @@ class PipelinedGradSync:
 
         Returns captured state tuple for deferred work.
         """
-        timer, tl = self.timer, self.tl
 
-        with timer.scope("copy grad async"), tl.scope("copy_grad_async", tid="CPU", cat="cpu", block_id=submodel_id):
-            cur_idx = submodel.visible_indices.to("cpu")
-            n_vis = cur_idx.shape[0]
-            cur_gpu_grads = []
-            cur_cpu_params = []
-            gpu_attrs = [submodel._xyz_gpu, submodel._features_dc_gpu, submodel._features_rest_gpu,
-                         submodel._scaling_gpu, submodel._rotation_gpu, submodel._opacity_gpu]
-            cpu_attrs = [submodel._xyz, submodel._features_dc, submodel._features_rest,
-                         submodel._scaling, submodel._rotation, submodel._opacity]
-            for name, cpu_p, gpu_p in zip(ATTR_NAMES, cpu_attrs, gpu_attrs):
-                g = gpu_p.grad
-                if g is None:
-                    continue
-                pinned = submodel._pinned_grad_bufs[name][:n_vis]
-                pinned.copy_(g, non_blocking=True)
-                cur_gpu_grads.append(pinned)
-                cur_cpu_params.append(cpu_p)
+        cur_idx = submodel.visible_indices.to("cpu")
+        n_vis = cur_idx.shape[0]
+        cur_gpu_grads = []
+        cur_cpu_params = []
+        gpu_attrs = [submodel._xyz_gpu, submodel._features_dc_gpu, submodel._features_rest_gpu,
+                        submodel._scaling_gpu, submodel._rotation_gpu, submodel._opacity_gpu]
+        cpu_attrs = [submodel._xyz, submodel._features_dc, submodel._features_rest,
+                        submodel._scaling, submodel._rotation, submodel._opacity]
+        for name, cpu_p, gpu_p in zip(ATTR_NAMES, cpu_attrs, gpu_attrs):
+            g = gpu_p.grad
+            if g is None:
+                continue
+            pinned = submodel._pinned_grad_bufs[name][:n_vis]
+            pinned.copy_(g, non_blocking=True)
+            cur_gpu_grads.append(pinned)
+            cur_cpu_params.append(cpu_p)
 
-            sub_visibility_filter = render_pkg["visibility_filter"]
-            sub_radii = render_pkg["radii"]
+        sub_visibility_filter = render_pkg["visibility_filter"]
+        sub_radii = render_pkg["radii"]
 
-            pin_sub_vf = submodel._pinned_vf_buf[:sub_visibility_filter.shape[0]]
-            pin_sub_vf.copy_(sub_visibility_filter, non_blocking=True)
-            pin_sub_radii = submodel._pinned_radii_buf[:sub_radii.shape[0]]
-            pin_sub_radii.copy_(sub_radii, non_blocking=True)
-            pin_vpt_grad = submodel._pinned_vpt_grad_buf[:n_vis]
-            pin_vpt_grad.copy_(sub_viewspace_point_tensor.grad, non_blocking=True)
+        pin_sub_vf = submodel._pinned_vf_buf[:sub_visibility_filter.shape[0]]
+        pin_sub_vf.copy_(sub_visibility_filter, non_blocking=True)
+        pin_sub_radii = submodel._pinned_radii_buf[:sub_radii.shape[0]]
+        pin_sub_radii.copy_(sub_radii, non_blocking=True)
+        pin_vpt_grad = submodel._pinned_vpt_grad_buf[:n_vis]
+        pin_vpt_grad.copy_(sub_viewspace_point_tensor.grad, non_blocking=True)
 
         return cur_idx, cur_gpu_grads, cur_cpu_params, pin_sub_vf, pin_sub_radii, pin_vpt_grad
 
@@ -83,43 +80,36 @@ class PipelinedGradSync:
                        sub_vf, sub_radii, vpt_grad, iteration):
         """Build a closure that performs scatter_grad + densify + opt_step for one submodel."""
         opt, dataset, scene = self.opt, self.dataset, self.scene
-        timer, tl = self.timer, self.tl
 
         def _do():
-            with timer.scope("scatter_grad"), tl.scope("scatter_grad", tid="CPU", cat="cpu", block_id=sm_id):
-                for cpu_p, grad_cpu in zip(cpu_params, gpu_grads):
-                    if cpu_p.grad is None:
-                        cpu_p.grad = torch.zeros_like(cpu_p)
-                    cpu_p.grad[idx] = grad_cpu
+            for cpu_p, grad_cpu in zip(cpu_params, gpu_grads):
+                if cpu_p.grad is None:
+                    cpu_p.grad = torch.zeros_like(cpu_p)
+                cpu_p.grad[idx] = grad_cpu
 
             with torch.no_grad():
                 if iteration < opt.densify_until_iter:
-                    with timer.scope("stats to cpu"), tl.scope("stats_to_cpu", tid="CPU", cat="cpu", block_id=sm_id):
-                        gvpg = torch.zeros(sm.get_xyz.shape[0], 3, device="cpu", requires_grad=False)
-                        gvpg[sm.visible_indices] = vpt_grad
-                        gvf = sm.visible_indices[sub_vf]
+                    gvpg = torch.zeros(sm.get_xyz.shape[0], 3, device="cpu", requires_grad=False)
+                    gvpg[sm.visible_indices] = vpt_grad
+                    gvf = sm.visible_indices[sub_vf]
 
-                    with timer.scope("update stats"), tl.scope("update_stats", tid="CPU", cat="cpu", block_id=sm_id):
-                        sm.max_radii2D[gvf] = torch.max(sm.max_radii2D[gvf], sub_radii[sub_vf])
-                        sm.add_densification_stats2(gvpg, gvf)
+                    sm.max_radii2D[gvf] = torch.max(sm.max_radii2D[gvf], sub_radii[sub_vf])
+                    sm.add_densification_stats2(gvpg, gvf)
 
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        with timer.scope("densify"), tl.scope("densify", tid="CPU", cat="cpu", block_id=sm_id):
-                            size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                            sm.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
-                            sm.pack_to_buffer()
-                            self.reallocate_pinned_buffers(sm)
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        sm.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
+                        sm.pack_to_buffer()
+                        self.reallocate_pinned_buffers(sm)
 
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        with timer.scope("reset opacity"), tl.scope("reset_opacity", tid="CPU", cat="cpu", block_id=sm_id):
-                            sm.reset_opacity()
-                            sm.sync_packed_from_params()
+                        sm.reset_opacity()
+                        sm.sync_packed_from_params()
 
                 if iteration < opt.iterations:
-                    with timer.scope("opt step"), tl.scope("opt_step", tid="CPU", cat="cpu", block_id=sm_id):
-                        sm.optimizer.step()
-                        sm.optimizer.zero_grad(set_to_none=True)
-                        sm.sync_packed_from_params()
+                    sm.optimizer.step()
+                    sm.optimizer.zero_grad(set_to_none=True)
+                    sm.sync_packed_from_params()
 
         return _do
 
