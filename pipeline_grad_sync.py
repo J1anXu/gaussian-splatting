@@ -90,7 +90,7 @@ class PipelinedGradSync:
                 for cpu_p, grad_cpu in zip(cpu_params, gpu_grads):
                     if cpu_p.grad is None:
                         cpu_p.grad = torch.zeros_like(cpu_p)
-                    cpu_p.grad[idx] += grad_cpu
+                    cpu_p.grad[idx] = grad_cpu
 
             with torch.no_grad():
                 if iteration < opt.densify_until_iter:
