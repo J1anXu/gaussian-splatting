@@ -32,6 +32,11 @@ try:
 except:
     pass
 
+try:
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
+except ImportError:
+    DeepSpeedCPUAdam = None
+
 class GaussianModel:
 
     def setup_functions(self):
@@ -310,7 +315,8 @@ class GaussianModel:
                 except:
                     self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
             else:
-                self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
+                self.optimizer = DeepSpeedCPUAdam(l, lr=0.0, eps=1e-15, adamw_mode=False)
+                # self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
 
         self.exposure_optimizer = torch.optim.Adam([self._exposure])
 
