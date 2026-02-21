@@ -104,12 +104,11 @@ class PipelinedGradSync:
 
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         sm.reset_opacity()
-                        sm.sync_packed_from_params()
+                        sm._re_view_opacity()
 
                 if iteration < opt.iterations:
                     sm.optimizer.step()
                     sm.optimizer.zero_grad(set_to_none=True)
-                    sm.sync_packed_from_params()
 
         return _do
 

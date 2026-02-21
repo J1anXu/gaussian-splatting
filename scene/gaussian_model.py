@@ -714,26 +714,17 @@ class GaussianModel:
         slices['_opacity'] = (c, c + 1, None); c += 1
         return slices, c
 
+    _GROUP_TO_ATTR = {
+        "xyz": "_xyz", "f_dc": "_features_dc", "f_rest": "_features_rest",
+        "opacity": "_opacity", "scaling": "_scaling", "rotation": "_rotation",
+    }
+
     def pack_to_buffer(self):
         """
         Pack six per-Gaussian CPU nn.Parameter tensors into a single contiguous
-        pinned-memory buffer of shape [N, D].
-
-        Motivation: In the partitioned training pipeline, each submodel's parameters
-        reside on CPU. The original implementation performed six independent fancy-
-        indexing operations followed by six separate Host-to-Device (H2D) transfers.
-        This incurs (1) repeated random memory access patterns with poor cache
-        locality, and (2) six PCIe transaction overheads.
-
-        By packing all attributes into a single row-major [N, D] pinned tensor,
-        we enable a single gather + single DMA transfer, reducing both CPU-side
-        indexing cost and PCIe launch overhead.
-
-        Additionally, a pre-allocated pinned staging buffer (_packed_staging) of
-        identical shape is created to hold the subset after index_select. This
-        ensures the H2D source is always in page-locked memory, which is a
-        prerequisite for truly asynchronous cudaMemcpyAsync via non_blocking=True.
-        Without pinned memory, PyTorch silently falls back to synchronous transfer.
+        pinned-memory buffer of shape [N, D], then replace each param with a
+        view into the packed buffer so that optimizer.step() writes directly
+        into _packed (eliminating the need for sync_packed_from_params).
         """
         slices, D = self._compute_pack_layout()
         N = self._xyz.shape[0]
@@ -741,30 +732,69 @@ class GaussianModel:
         for name, (s, e, _) in slices.items():
             param = getattr(self, name)
             packed[:, s:e] = param.data.detach().reshape(N, e - s)
+
+        old_params = {name: getattr(self, name) for name in slices}
+
         self._packed = packed
         self._pack_slices = slices
         self._pack_D = D
-        # Pre-allocate pinned staging buffer sized for worst case (all N points visible).
-        # Reusing this buffer across iterations avoids repeated cudaHostAlloc calls,
-        # which are expensive due to page-locking overhead in the OS kernel.
+
+        # Create view-params: Adam writes directly into _packed
+        for name, (s, e, reshape) in slices.items():
+            view = packed[:, s:e]
+            if reshape is not None:
+                view = view.view(N, *reshape[1:])
+            setattr(self, name, nn.Parameter(view, requires_grad=True))
+
         self._packed_staging = torch.empty(N, D, dtype=torch.float32, pin_memory=True)
+
+        if self.optimizer is not None:
+            self._migrate_optimizer_state(old_params)
+
+    def _migrate_optimizer_state(self, old_params):
+        """Migrate optimizer state from old params to new view-params after pack_to_buffer."""
+        for group in self.optimizer.param_groups:
+            attr = self._GROUP_TO_ATTR.get(group["name"])
+            if attr is None:
+                continue
+            old_p = old_params[attr]
+            new_p = getattr(self, attr)
+            stored = self.optimizer.state.pop(old_p, None)
+            if stored is not None:
+                for key in ["exp_avg", "exp_avg_sq"]:
+                    if key in stored and stored[key].shape == new_p.shape:
+                        pass  # shape unchanged, reuse as-is
+                    else:
+                        stored[key] = torch.zeros_like(new_p)
+                self.optimizer.state[new_p] = stored
+            group["params"][0] = new_p
+
+    def _re_view_opacity(self):
+        """After reset_opacity, write new values back to packed and rebuild the view."""
+        s, e, _ = self._pack_slices['_opacity']
+        N = self._packed.shape[0]
+        self._packed[:, s:e] = self._opacity.data.detach().reshape(N, e - s)
+        new_p = nn.Parameter(self._packed[:, s:e], requires_grad=True)
+        for group in self.optimizer.param_groups:
+            if group["name"] == "opacity":
+                stored = self.optimizer.state.pop(group["params"][0], None)
+                if stored is not None:
+                    for key in ["exp_avg", "exp_avg_sq"]:
+                        stored[key] = torch.zeros_like(new_p)
+                    self.optimizer.state[new_p] = stored
+                group["params"][0] = new_p
+        self._opacity = new_p
 
     def sync_packed_from_params(self):
         """
-        Synchronize the packed pinned buffer with current nn.Parameter values.
-
-        Must be called after any operation that mutates parameter data in-place
-        (optimizer.step(), reset_opacity()) to keep _packed consistent. If the
-        number of Gaussians has changed (e.g., after densification/pruning),
-        falls back to a full reallocation via pack_to_buffer().
+        No-op when params are views into _packed (optimizer writes directly).
+        Falls back to full repack only if N changed (densify/prune).
         """
         N = self._xyz.shape[0]
         if not hasattr(self, '_packed') or self._packed.shape[0] != N:
             self.pack_to_buffer()
             return
-        for name, (s, e, _) in self._pack_slices.items():
-            param = getattr(self, name)
-            self._packed[:, s:e] = param.data.detach().reshape(N, e - s)
+        # params are views of _packed — nothing to sync
 
     def activate_subset(self):
         self.subset_mode_1 = True
