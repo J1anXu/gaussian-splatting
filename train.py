@@ -502,7 +502,8 @@ if __name__ == "__main__":
         run = wandb.init(
             project = "partgs_gpu", 
             name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
-            config = vars(op.extract(args)) 
+            config = vars(op.extract(args)) ,
+            group = f"{SCENE_NAME}"
         )
         wandb.define_metric("iteration")  # 
         
