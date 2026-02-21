@@ -10,6 +10,7 @@
 #
 
 import os
+import math
 from typing import List
 import torch
 from random import randint
@@ -234,13 +235,45 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         LOGGER.info(f"GS {idx} size: {model._xyz.shape[0]}")  
         
 
+    # ---- Gradient Accumulation config ----
+    GA_START_ITER = 5000
+    ACCUMULATION_STEPS = 5
+    GA_WARMUP_END_ITER = 6000
+    SQRT_K = math.sqrt(ACCUMULATION_STEPS)
+
+    # Store original (base) LRs for non-xyz param groups
+    original_lrs = {}  # {model_id: {pg_name: lr}}
+    for mid, model in enumerate(model_list):
+        original_lrs[mid] = {}
+        for pg in model.optimizer.param_groups:
+            if pg["name"] != "xyz":
+                original_lrs[mid][pg["name"]] = pg['lr']
+
     start = time.time()
 
 
     for iteration in range(first_iter, opt.iterations + 1):
-        
+
+        use_ga = iteration >= GA_START_ITER
+        # Whether this iteration should do an optimizer step
+        is_ga_step_iter = use_ga and ((iteration - GA_START_ITER) % ACCUMULATION_STEPS == ACCUMULATION_STEPS - 1)
+
         for model in model_list:
             model.update_learning_rate(iteration)
+
+        # Apply sqrt LR scaling + warm-up for non-xyz params
+        if use_ga:
+            if iteration < GA_WARMUP_END_ITER:
+                warmup_factor = (iteration - GA_START_ITER) / (GA_WARMUP_END_ITER - GA_START_ITER)
+            else:
+                warmup_factor = 1.0
+            for mid, model in enumerate(model_list):
+                for pg in model.optimizer.param_groups:
+                    if pg["name"] != "xyz":
+                        base_lr = original_lrs[mid][pg["name"]]
+                        # Smoothly ramp from 1.0 to sqrt(K) over warm-up window
+                        scale = 1.0 + warmup_factor * (SQRT_K - 1.0)
+                        pg['lr'] = base_lr * scale
         
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
@@ -381,17 +414,24 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii2[visibility_filter2])
                     model.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
                     
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    densify_interval = opt.densification_interval // ACCUMULATION_STEPS if use_ga else opt.densification_interval
+                    if iteration > opt.densify_from_iter and iteration % densify_interval == 0:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-                        
+
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         model.reset_opacity()
-                        
+
                 # Optimizer step
                 if iteration < opt.iterations:
+                    if not use_ga:
+                        # 正常模式：每iter都step
                         model.optimizer.step()
-                        model.optimizer.zero_grad(set_to_none = True)
+                        model.optimizer.zero_grad(set_to_none=True)
+                    elif is_ga_step_iter:
+                        # GA模式：累积够了才step
+                        model.optimizer.step()
+                        model.optimizer.zero_grad(set_to_none=True)
                         
                         
         time_elapsed = time.time() - start
@@ -500,7 +540,7 @@ if __name__ == "__main__":
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
-            project = "partgs", 
+            project = "partgs_gpu", 
             name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
             config = vars(op.extract(args)) 
         )
