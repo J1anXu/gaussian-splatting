@@ -500,7 +500,7 @@ if __name__ == "__main__":
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
-            project = "partgs", 
+            project = "partgs_gpu", 
             name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
             config = vars(op.extract(args)) 
         )
