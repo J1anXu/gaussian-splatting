@@ -25,8 +25,7 @@ set -o pipefail
 
 # GPU 与 scene 对应关系（一个 GPU 一个队列）
 GPUS=(0 1 2 3)
-SCENES=(bicycle)
-
+SCENES=(bicycle kitchen room bonsai)
 
 DATA_ROOT=/data2/jian/data/mip360
 OUT_ROOT=output/mip360
@@ -57,6 +56,9 @@ run_pipeline() {
   GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
   echo "🌿 Git branch: $GIT_BRANCH"
 
+  local log_dir="$LOG_ROOT/$GIT_BRANCH/$scene"
+  mkdir -p "$log_dir"
+
   echo "========================================"
   echo "GPU   : $gpu"
   echo "Scene : $scene"
@@ -64,34 +66,32 @@ run_pipeline() {
   echo "Branch: $GIT_BRANCH"
   echo "========================================"
 
-
-
-  ####################
-  # 1. TRAIN
-  ####################
+  # ####################
+  # # 1. TRAIN
+  # ####################
   python train.py \
     -s "$data_path" \
     --model_path "$model_path" \
     --git_branch "$GIT_BRANCH" \
     --eval \
-    > "$LOG_ROOT/train_${scene}_$GIT_BRANCH.log" 2>&1
+    > "$log_dir/train.log" 2>&1
 
   ####################
   # 2. RENDER_P
   ####################
-  python render_p.py \
+  python render.py \
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
     --skip_train \
-    > "$LOG_ROOT/render_p_${scene}_$GIT_BRANCH.log" 2>&1
+    > "$log_dir/render.log" 2>&1
 
   ####################
   # 3. METRICS_P
   ####################
-  python metrics_p.py \
+  python metrics.py \
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
-    > "$LOG_ROOT/metrics_p_${scene}_$GIT_BRANCH.log" 2>&1
+    > "$log_dir/metricsp.log" 2>&1
 
   echo "✅ Finished $scene on GPU $gpu"
 }
