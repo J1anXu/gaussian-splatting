@@ -79,7 +79,7 @@ run_pipeline() {
   ####################
   # 2. RENDER_P
   ####################
-  python render.py \
+  python render_p.py \
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
     --skip_train \
@@ -88,7 +88,7 @@ run_pipeline() {
   ####################
   # 3. METRICS_P
   ####################
-  python metrics.py \
+  python metrics_p.py \
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
     > "$log_dir/metricsp.log" 2>&1
