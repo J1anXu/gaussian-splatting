@@ -223,7 +223,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     initial_gaussians: GaussianModel = scene.gaussians
     
     # partition
-    initial_gaussians.partition(num_blocks=4) 
+    initial_gaussians.partition(num_blocks=config.BLOCK_NUMS) 
     initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
     
     model_list: List[GaussianModel] = []
@@ -405,33 +405,52 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             loss.backward()
 
             with torch.no_grad():
-                # Densification
+                # Densification stats accumulation (每个iter都做)
                 if iteration < opt.densify_until_iter:
                     global_viewspace_points_grad = torch.zeros(model.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
                     global_viewspace_points_grad[model.visible_idx] = viewspace_point_tensor2.grad
                     global_visibility_filter = model.visible_idx[visibility_filter2]
-                    
+
                     model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii2[visibility_filter2])
                     model.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
-                    
-                    densify_interval = opt.densification_interval // ACCUMULATION_STEPS if use_ga else opt.densification_interval
-                    if iteration > opt.densify_from_iter and iteration % densify_interval == 0:
-                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
 
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        model.reset_opacity()
+                    # 判断本轮是否需要 densify / reset_opacity
+                    # GA模式下只在 step 迭代触发，避免替换参数时丢失累积梯度
+                    if use_ga:
+                        should_densify = (is_ga_step_iter
+                                          and iteration > opt.densify_from_iter
+                                          and iteration % opt.densification_interval < ACCUMULATION_STEPS)
+                        should_reset_opacity = (is_ga_step_iter
+                                                and (iteration % opt.opacity_reset_interval < ACCUMULATION_STEPS
+                                                     or (dataset.white_background and iteration == opt.densify_from_iter)))
+                    else:
+                        should_densify = iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0
+                        should_reset_opacity = iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter)
+
+                    # 非GA：保持原始顺序 densify → step（只丢1个iter梯度，原版行为）
+                    if not use_ga:
+                        if should_densify:
+                            size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                            model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                        if should_reset_opacity:
+                            model.reset_opacity()
 
                 # Optimizer step
                 if iteration < opt.iterations:
                     if not use_ga:
-                        # 正常模式：每iter都step
                         model.optimizer.step()
                         model.optimizer.zero_grad(set_to_none=True)
                     elif is_ga_step_iter:
-                        # GA模式：累积够了才step
                         model.optimizer.step()
                         model.optimizer.zero_grad(set_to_none=True)
+
+                # GA：step 之后再 densify，保证累积梯度先被消费
+                if use_ga and iteration < opt.densify_until_iter:
+                    if should_densify:
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                    if should_reset_opacity:
+                        model.reset_opacity()
                         
                         
         time_elapsed = time.time() - start
@@ -542,7 +561,8 @@ if __name__ == "__main__":
         run = wandb.init(
             project = "partgs_gpu", 
             name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
-            config = vars(op.extract(args)) 
+            config = vars(op.extract(args)),
+            group = f"{SCENE_NAME}"
         )
         wandb.define_metric("iteration")  # 
         
