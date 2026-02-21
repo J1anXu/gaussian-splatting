@@ -222,7 +222,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     initial_gaussians: GaussianModel = scene.gaussians
     
     # partition
-    initial_gaussians.partition(num_blocks=4) 
+    initial_gaussians.partition(num_blocks=config.BLOCK_NUMS) 
     initial_gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
     
     model_list: List[GaussianModel] = []
