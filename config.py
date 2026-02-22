@@ -22,3 +22,5 @@ SPLIT_SIZE = 300000 # 300000
 
 HALF = False        # 半精度梯度拷贝加速
 TIMELINE = True    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
+
+OPTIMIZER_TYPE_IN_PHASE_2 = "default"  # "default" or "sparse_adam"

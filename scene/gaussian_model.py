@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import config
 import torch
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
@@ -309,15 +310,44 @@ class GaussianModel:
         if self.optimizer_type == "default":
             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
         elif self.optimizer_type == "sparse_adam":
-            if device == "cuda":
-                try:
-                    self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
-                except:
-                    self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
-            else:
-                self.optimizer = DeepSpeedCPUAdam(l, lr=0.0, eps=1e-15, adamw_mode=False)
-                # self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
+            self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
+        self.exposure_optimizer = torch.optim.Adam([self._exposure])
+        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.position_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
+        
+        self.exposure_scheduler_args = get_expon_lr_func(training_args.exposure_lr_init, training_args.exposure_lr_final,
+                                                        lr_delay_steps=training_args.exposure_lr_delay_steps,
+                                                        lr_delay_mult=training_args.exposure_lr_delay_mult,
+                                                        max_steps=training_args.iterations)
 
+
+    def training_setup_phase2(self, training_args, device = "cuda"):
+        self.percent_dense = training_args.percent_dense
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=device)
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=device)
+
+        l = [
+            {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
+            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
+            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+        ]
+
+        if config.OPTIMIZER_TYPE_IN_PHASE_2 == "default":
+            self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
+        elif config.OPTIMIZER_TYPE_IN_PHASE_2 == "sparse_adam":
+            self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
+        elif config.OPTIMIZER_TYPE_IN_PHASE_2 == "deepspeed_cpu_adam":
+            self.optimizer = DeepSpeedCPUAdam(l, lr=0.0, eps=1e-15, adamw_mode=False)
+        elif config.OPTIMIZER_TYPE_IN_PHASE_2 == "cpu_adam":
+            self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
+        else:
+            raise ValueError(f"Unknown optimizer type {config.OPTIMIZER_TYPE_IN_PHASE_2}")
+        
         self.exposure_optimizer = torch.optim.Adam([self._exposure])
 
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
