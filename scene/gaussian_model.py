@@ -580,6 +580,10 @@ class GaussianModel:
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
 
+        if hasattr(self, '_packed_exp_avg'):
+            self._packed_exp_avg = self._packed_exp_avg[valid_points_mask]
+            self._packed_exp_avg_sq = self._packed_exp_avg_sq[valid_points_mask]
+
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -622,6 +626,12 @@ class GaussianModel:
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=device)
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=device)
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=device)
+
+        if hasattr(self, '_packed_exp_avg'):
+            n_new = new_xyz.shape[0]
+            D = self._packed_exp_avg.shape[1]
+            self._packed_exp_avg = torch.cat([self._packed_exp_avg, torch.zeros(n_new, D, dtype=torch.float32, pin_memory=True)], dim=0)
+            self._packed_exp_avg_sq = torch.cat([self._packed_exp_avg_sq, torch.zeros(n_new, D, dtype=torch.float32, pin_memory=True)], dim=0)
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, device = "cuda"):
         # 梯度大 + 尺度已经很大的 Gaussian → 不该再 clone，而是必须 split（拆分）: 沿 Gaussian 自身尺度与朝向，在空间上强制生成 N 个彼此分离的子 Gaussian
@@ -797,17 +807,18 @@ class GaussianModel:
             self._packed_exp_avg_sq[:, s:e] = 0
 
     def _init_packed_adam_state(self):
-        """Initialize or resize [N, D] exp_avg / exp_avg_sq for packed_sparse_adam.
+        """Initialize or reuse [N, D] exp_avg / exp_avg_sq for packed_sparse_adam.
 
         On first call: allocate zero tensors and set step=0.
-        On subsequent calls (after densify/prune): resize to new N, preserving
-        step counter. Momentum is reset to zero (new points need zero init anyway,
-        and densify only happens in early training).
+        On subsequent calls (after densify/prune): reuse existing state if size
+        matches (prune_points/densification_postfix already resized it), otherwise
+        reallocate.
         """
         N, D = self._packed.shape
         if not hasattr(self, '_packed_adam_step'):
             self._packed_adam_step = 0
-        # Always reallocate to match current N (densify/prune changes N)
+        if hasattr(self, '_packed_exp_avg') and self._packed_exp_avg.shape[0] == N:
+            return  # already correct size from prune/cat
         self._packed_exp_avg = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
         self._packed_exp_avg_sq = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
 
