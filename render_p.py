@@ -44,7 +44,7 @@ def render_set(model_path, name, iteration, views, model_list: List[GaussianMode
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
     debug_path = os.path.join("debug", BRANCH)
-    os.makedirs(debug_path, exist_ok=True)
+    # os.makedirs(debug_path, exist_ok=True)
     
     # gaussians.partition()
     # gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
