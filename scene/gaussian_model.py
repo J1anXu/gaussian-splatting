@@ -797,11 +797,19 @@ class GaussianModel:
             self._packed_exp_avg_sq[:, s:e] = 0
 
     def _init_packed_adam_state(self):
-        """Initialize [N, D] exp_avg / exp_avg_sq for packed_sparse_adam."""
+        """Initialize or resize [N, D] exp_avg / exp_avg_sq for packed_sparse_adam.
+
+        On first call: allocate zero tensors and set step=0.
+        On subsequent calls (after densify/prune): resize to new N, preserving
+        step counter. Momentum is reset to zero (new points need zero init anyway,
+        and densify only happens in early training).
+        """
         N, D = self._packed.shape
+        if not hasattr(self, '_packed_adam_step'):
+            self._packed_adam_step = 0
+        # Always reallocate to match current N (densify/prune changes N)
         self._packed_exp_avg = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
         self._packed_exp_avg_sq = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
-        self._packed_adam_step = 0
 
     def _build_lr_per_col(self, iteration):
         """Build [D] tensor with per-column learning rate from optimizer param_groups."""
