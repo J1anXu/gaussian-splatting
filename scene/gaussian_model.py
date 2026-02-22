@@ -534,12 +534,14 @@ class GaussianModel:
         for group in self.optimizer.param_groups:
             if group["name"] == name:
                 stored_state = self.optimizer.state.get(group['params'][0], None)
-                stored_state["exp_avg"] = torch.zeros_like(tensor)
-                stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
-
-                del self.optimizer.state[group['params'][0]]
-                group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
-                self.optimizer.state[group['params'][0]] = stored_state
+                if stored_state is not None:
+                    stored_state["exp_avg"] = torch.zeros_like(tensor)
+                    stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+                    del self.optimizer.state[group['params'][0]]
+                    group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+                    self.optimizer.state[group['params'][0]] = stored_state
+                else:
+                    group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
 
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
@@ -789,6 +791,10 @@ class GaussianModel:
                     self.optimizer.state[new_p] = stored
                 group["params"][0] = new_p
         self._opacity = new_p
+        # Zero out packed adam state for opacity columns
+        if hasattr(self, '_packed_exp_avg'):
+            self._packed_exp_avg[:, s:e] = 0
+            self._packed_exp_avg_sq[:, s:e] = 0
 
     def _init_packed_adam_state(self):
         """Initialize [N, D] exp_avg / exp_avg_sq for packed_sparse_adam."""
