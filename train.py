@@ -77,7 +77,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         # scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
         scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
         progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
-        opt.iterations = 1050
+        opt.iterations = 1100
         return scene, 1000, 0, 0, progress_bar, None
     
     
@@ -241,9 +241,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     # gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
     
     submodel_list: List[GaussianModel] = gaussians.split()
-        
+    
     for submodel in submodel_list:
-        submodel.training_setup(opt, device = "cpu")
+        submodel.training_setup_phase2(opt, device = "cpu")
         # Initialize packed pinned buffer after parameters are created.
         # This packs all 6 per-Gaussian attributes into a single [N, D]
         # contiguous pinned tensor for efficient subset H2D transfer.
@@ -257,7 +257,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene)
 
     if DEBUG_MODE:
-        opt.iterations = 1050
+        opt.iterations = 1100
 
     time_start = time.time()
     for iteration in range(first_iter, opt.iterations + 1):

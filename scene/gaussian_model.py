@@ -336,7 +336,7 @@ class GaussianModel:
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
-
+        print(f"Optimizer type in phase 2: {config.OPTIMIZER_TYPE_IN_PHASE_2}")
         if config.OPTIMIZER_TYPE_IN_PHASE_2 == "default":
             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, foreach=True)
         elif config.OPTIMIZER_TYPE_IN_PHASE_2 == "sparse_adam":
