@@ -31,7 +31,7 @@ import wandb
 import time
 from logger import get_logger
 import config
-import diff_gaussian_rasterization_jian
+import diff_gaussian_rasterization_wenqi_tam
 from TimerManager import  TraceManager
 from pipeline_grad_sync import PipelinedGradSync
 SCENE_NAME = None
@@ -48,7 +48,7 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 try:
-    from diff_gaussian_rasterization_jian import SparseGaussianAdam
+    from diff_gaussian_rasterization_wenqi_tam import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
@@ -172,7 +172,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
         # Depth regularization
         Ll1depth = 0
-        diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
+        diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
         loss.backward()
 
         with torch.no_grad():
@@ -243,7 +243,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     submodel_list: List[GaussianModel] = gaussians.split()
     
     for submodel in submodel_list:
-        submodel.training_setup_phase2(opt, device = "cpu")
+        submodel.training_setup(opt, device = "cpu")
         # Initialize packed pinned buffer after parameters are created.
         # This packs all 6 per-Gaussian attributes into a single [N, D]
         # contiguous pinned tensor for efficient subset H2D transfer.
@@ -394,7 +394,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             Ll1depth = 0
 
             with torch.no_grad():
-                diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
+                diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
 
             loss.backward()
 
