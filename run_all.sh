@@ -69,26 +69,26 @@ run_pipeline() {
   # ####################
   # # 1. TRAIN
   # ####################
-  python train.py \
-    -s "$data_path" \
-    --model_path "$model_path" \
-    --git_branch "$GIT_BRANCH" \
-    --eval \
-    > "$log_dir/train.log" 2>&1
+  # python train.py \
+  #   -s "$data_path" \
+  #   --model_path "$model_path" \
+  #   --git_branch "$GIT_BRANCH" \
+  #   --eval \
+  #   > "$log_dir/train.log" 2>&1
 
   ####################
   # 2. RENDER_P
   ####################
-  python render.py \
-    -m "$model_path" \
-    --git_branch "$GIT_BRANCH" \
-    --skip_train \
-    > "$log_dir/render.log" 2>&1
+  # python render_p.py \
+  #   -m "$model_path" \
+  #   --git_branch "$GIT_BRANCH" \
+  #   --skip_train \
+  #   > "$log_dir/render.log" 2>&1
 
   ####################
   # 3. METRICS_P
   ####################
-  python metrics.py \
+  python metrics_p.py \
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
     > "$log_dir/metricsp.log" 2>&1
