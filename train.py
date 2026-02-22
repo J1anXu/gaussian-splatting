@@ -211,8 +211,15 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
             # Optimizer step
             if iteration < opt.iterations:
-                initial_gaussians.optimizer.step()
-                initial_gaussians.optimizer.zero_grad(set_to_none = True)
+                initial_gaussians.exposure_optimizer.step()
+                initial_gaussians.exposure_optimizer.zero_grad(set_to_none = True)
+                if use_sparse_adam:
+                    visible = radii > 0
+                    initial_gaussians.optimizer.step(visible, radii.shape[0])
+                    initial_gaussians.optimizer.zero_grad(set_to_none = True)
+                else:
+                    initial_gaussians.optimizer.step()
+                    initial_gaussians.optimizer.zero_grad(set_to_none = True)
 
 
 
