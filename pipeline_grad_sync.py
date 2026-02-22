@@ -79,6 +79,11 @@ class PipelinedGradSync:
 
         def _do():
             with torch.no_grad():
+                # Adam step first — before densify/prune which may change N
+                if iteration < opt.iterations:
+                    grad_subset = sm._assemble_grad_subset(gpu_grads)
+                    sm.packed_sparse_adam_step(idx, grad_subset, iteration)
+
                 if iteration < opt.densify_until_iter:
                     gvpg = torch.zeros(sm.get_xyz.shape[0], 3, device="cpu", requires_grad=False)
                     gvpg[sm.visible_indices] = vpt_grad
@@ -96,10 +101,6 @@ class PipelinedGradSync:
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         sm.reset_opacity()
                         sm._re_view_opacity()
-
-                if iteration < opt.iterations:
-                    grad_subset = sm._assemble_grad_subset(gpu_grads)
-                    sm.packed_sparse_adam_step(idx, grad_subset, iteration)
 
         return _do
 
