@@ -14,5 +14,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("sparse_adam", &sparse_adam, py::call_guard<py::gil_scoped_release>());
     m.def("adam_for_next", &adam_for_next, py::call_guard<py::gil_scoped_release>());
     m.def("index_copy", &index_copy, py::call_guard<py::gil_scoped_release>());
+    m.def("packed_sparse_adam", &packed_sparse_adam, py::call_guard<py::gil_scoped_release>());
 }
 

@@ -50,19 +50,15 @@ class PipelinedGradSync:
         cur_idx = submodel.visible_indices.to("cpu")
         n_vis = cur_idx.shape[0]
         cur_gpu_grads = []
-        cur_cpu_params = []
         gpu_attrs = [submodel._xyz_gpu, submodel._features_dc_gpu, submodel._features_rest_gpu,
                         submodel._scaling_gpu, submodel._rotation_gpu, submodel._opacity_gpu]
-        cpu_attrs = [submodel._xyz, submodel._features_dc, submodel._features_rest,
-                        submodel._scaling, submodel._rotation, submodel._opacity]
-        for name, cpu_p, gpu_p in zip(ATTR_NAMES, cpu_attrs, gpu_attrs):
+        for name, gpu_p in zip(ATTR_NAMES, gpu_attrs):
             g = gpu_p.grad
             if g is None:
                 continue
             pinned = submodel._pinned_grad_bufs[name][:n_vis]
             pinned.copy_(g, non_blocking=True)
             cur_gpu_grads.append(pinned)
-            cur_cpu_params.append(cpu_p)
 
         sub_visibility_filter = render_pkg["visibility_filter"]
         sub_radii = render_pkg["radii"]
@@ -74,19 +70,14 @@ class PipelinedGradSync:
         pin_vpt_grad = submodel._pinned_vpt_grad_buf[:n_vis]
         pin_vpt_grad.copy_(sub_viewspace_point_tensor.grad, non_blocking=True)
 
-        return cur_idx, cur_gpu_grads, cur_cpu_params, pin_sub_vf, pin_sub_radii, pin_vpt_grad
+        return cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad
 
-    def _make_pending(self, sm, sm_id, idx, gpu_grads, cpu_params,
+    def _make_pending(self, sm, sm_id, idx, gpu_grads,
                        sub_vf, sub_radii, vpt_grad, iteration):
-        """Build a closure that performs scatter_grad + densify + opt_step for one submodel."""
+        """Build a closure that performs densify + packed_sparse_adam for one submodel."""
         opt, dataset, scene = self.opt, self.dataset, self.scene
 
         def _do():
-            for cpu_p, grad_cpu in zip(cpu_params, gpu_grads):
-                if cpu_p.grad is None:
-                    cpu_p.grad = torch.zeros_like(cpu_p)
-                cpu_p.grad[idx] = grad_cpu
-
             with torch.no_grad():
                 if iteration < opt.densify_until_iter:
                     gvpg = torch.zeros(sm.get_xyz.shape[0], 3, device="cpu", requires_grad=False)
@@ -107,8 +98,8 @@ class PipelinedGradSync:
                         sm._re_view_opacity()
 
                 if iteration < opt.iterations:
-                    sm.optimizer.step()
-                    sm.optimizer.zero_grad(set_to_none=True)
+                    grad_subset = sm._assemble_grad_subset(gpu_grads)
+                    sm.packed_sparse_adam_step(idx, grad_subset, iteration)
 
         return _do
 
@@ -126,7 +117,7 @@ class PipelinedGradSync:
         """
         # 1. kick off async D2H for current submodel
         state = self.kick_async_d2h(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor)
-        cur_idx, cur_gpu_grads, cur_cpu_params, pin_sub_vf, pin_sub_radii, pin_vpt_grad = state
+        cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad = state
 
         # 2. deactivate current submodel's GPU subset
         submodel.deactivate_subset()
@@ -139,7 +130,7 @@ class PipelinedGradSync:
 
         # 5. prepare deferred work for current submodel
         self._pending_opt = self._make_pending(
-            submodel, submodel_id, cur_idx, cur_gpu_grads, cur_cpu_params,
+            submodel, submodel_id, cur_idx, cur_gpu_grads,
             pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration,
         )
 

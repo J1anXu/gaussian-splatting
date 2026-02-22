@@ -38,6 +38,11 @@ try:
 except ImportError:
     DeepSpeedCPUAdam = None
 
+try:
+    import cpu_adam
+except ImportError:
+    cpu_adam = None
+
 class GaussianModel:
 
     def setup_functions(self):
@@ -787,6 +792,8 @@ class GaussianModel:
         if self.optimizer is not None:
             self._migrate_optimizer_state(old_params)
 
+        self._init_packed_adam_state()
+
     def _migrate_optimizer_state(self, old_params):
         """Migrate optimizer state from old params to new view-params after pack_to_buffer."""
         for group in self.optimizer.param_groups:
@@ -820,6 +827,51 @@ class GaussianModel:
                     self.optimizer.state[new_p] = stored
                 group["params"][0] = new_p
         self._opacity = new_p
+
+    def _init_packed_adam_state(self):
+        """Initialize [N, D] exp_avg / exp_avg_sq for packed_sparse_adam."""
+        N, D = self._packed.shape
+        self._packed_exp_avg = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
+        self._packed_exp_avg_sq = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
+        self._packed_adam_step = 0
+
+    def _build_lr_per_col(self, iteration):
+        """Build [D] tensor with per-column learning rate from optimizer param_groups."""
+        D = self._pack_D
+        lr_vec = torch.zeros(D, dtype=torch.float32)
+        for group in self.optimizer.param_groups:
+            attr = self._GROUP_TO_ATTR.get(group["name"])
+            if attr is None:
+                continue
+            s, e, _ = self._pack_slices[attr]
+            lr_vec[s:e] = group["lr"]
+        return lr_vec
+
+    def _assemble_grad_subset(self, gpu_grads):
+        """Concatenate 6 per-attr grad pinned bufs [n_vis, cols_i] into [n_vis, D]."""
+        n_vis = gpu_grads[0].shape[0]
+        staging = self._packed_staging[:n_vis]
+        attr_order = ['_xyz', '_features_dc', '_features_rest',
+                      '_scaling', '_rotation', '_opacity']
+        for gi, name in enumerate(attr_order):
+            s, e, _ = self._pack_slices[name]
+            staging[:, s:e] = gpu_grads[gi].reshape(n_vis, e - s)
+        return staging
+
+    def packed_sparse_adam_step(self, idx, grad_subset, iteration):
+        """
+        idx: [n_vis] int64, visible row indices
+        grad_subset: [n_vis, D] float32, assembled gradient
+        """
+        self._packed_adam_step += 1
+        lr_per_col = self._build_lr_per_col(iteration)
+        cpu_adam.packed_sparse_adam(
+            self._packed, grad_subset,
+            self._packed_exp_avg, self._packed_exp_avg_sq,
+            idx, lr_per_col,
+            self._packed_adam_step,
+            0.9, 0.999, 1e-15
+        )
 
     def sync_packed_from_params(self):
         """

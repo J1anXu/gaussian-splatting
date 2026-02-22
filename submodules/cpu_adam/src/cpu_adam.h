@@ -31,4 +31,16 @@ void adam_for_next(at::Tensor weight, at::Tensor grad, at::Tensor exp_avg, at::T
 
 void index_copy(at::Tensor src, at::Tensor indices, at::Tensor dest);
 
+void packed_sparse_adam(
+    at::Tensor packed,
+    at::Tensor grad_subset,
+    at::Tensor exp_avg,
+    at::Tensor exp_avg_sq,
+    at::Tensor valid_ids,
+    at::Tensor lr_per_col,
+    int step,
+    float beta1,
+    float beta2,
+    float eps);
+
 #endif

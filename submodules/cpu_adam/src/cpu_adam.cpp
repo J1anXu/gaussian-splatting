@@ -565,6 +565,60 @@ void adam_for_next(at::Tensor weight, at::Tensor grad, at::Tensor exp_avg, at::T
 }
 
 
+void packed_sparse_adam(
+    at::Tensor packed,
+    at::Tensor grad_subset,
+    at::Tensor exp_avg,
+    at::Tensor exp_avg_sq,
+    at::Tensor valid_ids,
+    at::Tensor lr_per_col,
+    int step,
+    float beta1,
+    float beta2,
+    float eps)
+{
+    RECORD_FUNCTION("packed_sparse_adam", {packed, grad_subset, exp_avg, exp_avg_sq, valid_ids});
+
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+
+    int64_t n_vis = valid_ids.size(0);
+    int64_t D = packed.size(1);
+
+    const float bias_correction1 = 1.0f - std::pow(beta1, step);
+    const float bias_correction2 = 1.0f - std::pow(beta2, step);
+    const float bias_correction2_sqrt = std::sqrt(bias_correction2);
+
+    long int *valid_ids_ptr = valid_ids.data_ptr<int64_t>();
+    float *packed_ptr = packed.data_ptr<float>();
+    float *grad_ptr = grad_subset.data_ptr<float>();
+    float *m_ptr = exp_avg.data_ptr<float>();
+    float *v_ptr = exp_avg_sq.data_ptr<float>();
+    float *lr_ptr = lr_per_col.data_ptr<float>();
+
+    omp_set_num_threads(64);
+    #pragma omp parallel for
+    for (int64_t vi = 0; vi < n_vis; ++vi) {
+        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+
+        int64_t row = valid_ids_ptr[vi];
+        float* p = packed_ptr + row * D;
+        float* g = grad_ptr + vi * D;
+        float* m = m_ptr + row * D;
+        float* vv = v_ptr + row * D;
+
+        for (int64_t d = 0; d < D; ++d) {
+            float grad = g[d];
+            m[d] = beta1 * m[d] + (1.0f - beta1) * grad;
+            vv[d] = beta2 * vv[d] + (1.0f - beta2) * grad * grad;
+            float denom = std::sqrt(vv[d]) / bias_correction2_sqrt + eps;
+            p[d] -= (lr_ptr[d] / bias_correction1) * m[d] / denom;
+        }
+    }
+}
+
+
 void index_copy(at::Tensor src, at::Tensor indices, at::Tensor dest) {
 
     RECORD_FUNCTION("index_copy", {src, indices, dest});
