@@ -159,8 +159,8 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             image *= alpha_mask
         
 
-        # if viewpoint_cam.image_name == debug_image_name:
-        #     torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+        if viewpoint_cam.image_name == debug_image_name:
+            torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
