@@ -9,3 +9,6 @@ screenshots
 debug
 logs
 wandb
+
+# local timelines
+/timeline/*.json
