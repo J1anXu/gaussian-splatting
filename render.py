@@ -185,7 +185,7 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
     debug_path = os.path.join("debug", BRANCH)
-    os.makedirs(debug_path, exist_ok=True)
+    # os.makedirs(debug_path, exist_ok=True)
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         frustum_culling_mask = frustum_culling(gaussians._xyz, view.full_proj_transform)
         num_in_frustum = frustum_culling_mask.sum().item()
@@ -209,8 +209,8 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        if not skip_train:
-             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, dataset.train_test_exp, separate_sh)
+        # if not skip_train:
+        #      render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, dataset.train_test_exp, separate_sh)
 
         if not skip_test:
              render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, dataset.train_test_exp, separate_sh)
