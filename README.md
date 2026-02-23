@@ -30,3 +30,9 @@ CUDA_VISIBLE_DEVICES=6 python metrics.py -m output/mip360/room > debug/metrics_r
 CUDA_VISIBLE_DEVICES=7 ython metrics.py -m output/mip360/bonsai > debug/metrics_bonsai.log 2>&1 &
 
 nohup bash run_all.sh > debug/run_all.out 2>&1 &
+# 跑全部 9 个场景（默认 GPU 0）
+bash run_mip360_serial.sh
+# 只跑室内场景，指定 GPU 2
+bash run_mip360_serial.sh --type indoor --gpu 2
+# 只跑室外场景
+bash run_mip360_serial.sh --type outdoor
