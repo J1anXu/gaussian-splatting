@@ -108,7 +108,7 @@ run_pipeline() {
     # 室内 images_2, 室外 images_4
     local img_flag=""
     if [[ -n "${IS_INDOOR[$scene]}" ]]; then
-      img_flag="-i images_2"
+      img_flag="-i images" # should be images_2
     else
       img_flag="-i images_4"
     fi
