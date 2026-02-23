@@ -70,8 +70,8 @@ for s in "${INDOOR_SCENES[@]}"; do
 done
 
 GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
-DATA_ROOT=/data2/jian/data/mip360
-OUT_ROOT=/data2/jian/output/mip360/$GIT_BRANCH
+DATA_ROOT=/home/jian/data/mip360
+OUT_ROOT=/home/jian/output/mip360/$GIT_BRANCH
 LOG_ROOT=debug
 
 mkdir -p "$LOG_ROOT"
