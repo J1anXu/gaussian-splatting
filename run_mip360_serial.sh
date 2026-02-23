@@ -118,7 +118,7 @@ for scene in "${SCENES[@]}"; do
 
   # 2. RENDER
   echo "  [2/3] Rendering $scene ..."
-  python render.py \
+  python render_p.py \
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
     --skip_train \
@@ -126,7 +126,7 @@ for scene in "${SCENES[@]}"; do
 
   # 3. METRICS
   echo "  [3/3] Metrics $scene ..."
-  python metrics.py \
+  python metrics_p.py \
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
     > "$log_dir/metricsp.log" 2>&1
