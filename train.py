@@ -74,10 +74,9 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     
     if DEBUG_MODE:
     # TODO
-        # scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
-        scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+        scene.gaussians.load_ply("output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
         progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
-        opt.iterations = 1100
+        opt.iterations = 1050
         return scene, 1000, 0, 0, progress_bar, None
     
     
@@ -264,7 +263,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene)
 
     if DEBUG_MODE:
-        opt.iterations = 1100
+        opt.iterations = 1050
 
     time_start = time.time()
     for iteration in range(first_iter, opt.iterations + 1):

@@ -293,68 +293,24 @@ def visualize_frustum(
     
     
 
-def frustum_culling( xyz: torch.Tensor, full_proj_transform: torch.Tensor, assume_opengl: bool = False ) -> torch.BoolTensor:
-    """
-    Returns:
-        mask: BoolTensor [N], True means inside frustum
-    """
+def frustum_culling(xyz: torch.Tensor, full_proj_transform: torch.Tensor, inflate_ratio: float = 0.3) -> torch.Tensor:
+    # Returns BoolTensor [N], True means inside frustum.
+    # Row-vector convention: clip = [xyz|1] @ M
+    # i.e. clip = xyz @ M[:3] + M[3]
+    with torch.no_grad():
+        xyz_ = xyz.detach() if xyz.requires_grad else xyz
+        M = full_proj_transform.detach() if full_proj_transform.requires_grad else full_proj_transform
 
-    # -------- 安全处理 --------
-    xyz_ = xyz.detach()
-    M = full_proj_transform.detach()
+        # [N,3] @ [3,4] + [4] = [N,4]，避免 torch.cat 分配 [N,4] 齐次坐标
+        clip = xyz_.matmul(M[:3]) + M[3]
 
-    device = xyz_.device
-    dtype = xyz_.dtype
-
-    # -------- 齐次坐标 --------
-    ones = torch.ones((xyz_.shape[0], 1), device=device, dtype=dtype)
-    xyz_h = torch.cat([xyz_, ones], dim=1)  # [N,4]
-
-    # -------- 尝试两种矩阵乘法约定 --------
-    # 1) clip = M @ x
-    clip1 = (M @ xyz_h.T).T
-    # 2) clip = M.T @ x
-    clip2 = (M.T @ xyz_h.T).T
-
-    def inside_clip(clip, opengl: bool, inflate_ratio=0.3):
-        x, y, z, w = clip.unbind(dim=1)
-
-        valid_w = w > 0
+        x, y, z, w = clip.unbind(1)
         inflate = inflate_ratio * w
 
-        if opengl:
-            inside = (
-                (x >= -w - inflate) & (x <= w + inflate) &
-                (y >= -w - inflate) & (y <= w + inflate) &
-                (z >= -w - inflate) & (z <= w + inflate)
-            )
-        else:
-            inside = (
-                (x >= -w - inflate) & (x <= w + inflate) &
-                (y >= -w - inflate) & (y <= w + inflate) &
-                (z >= 0) & (z <= w + inflate)   # ❗只放 far
-            )
-
-        return inside & valid_w
-
-
-    # -------- 自动 / 手动 z 约定 --------
-    if assume_opengl is None:
-        # 自动：哪个结果“合理”（inside 点更多）就用哪个
-        mask1_gl = inside_clip(clip1, True)
-        mask1_dx = inside_clip(clip1, False)
-        mask2_gl = inside_clip(clip2, True)
-        mask2_dx = inside_clip(clip2, False)
-
-        candidates = [
-            mask1_gl, mask1_dx,
-            mask2_gl, mask2_dx
-        ]
-        mask = max(candidates, key=lambda m: int(m.sum()))
-    else:
-        if assume_opengl:
-            mask = inside_clip(clip1, True) | inside_clip(clip2, True)
-        else:
-            mask = inside_clip(clip1, False) | inside_clip(clip2, False)
-
+        mask = (
+            (w > 0) &
+            (x >= -w - inflate) & (x <= w + inflate) &
+            (y >= -w - inflate) & (y <= w + inflate) &
+            (z >= 0) & (z <= w + inflate)
+        )
     return mask
