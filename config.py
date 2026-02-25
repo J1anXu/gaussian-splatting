@@ -17,6 +17,7 @@ SAVE_DEPTH_LIST = False  # 是否保存各个block的深度图
 
 PARTITIONING_ENABLED = True  # 是否启用分块处理
 FRUSTUM_CULLING_ENABLED = True  # 是否启用视锥剔除
+FRUSTUM_CULLING_CACHE_ENABLED = True  # 是否缓存视锥剔除结果（densify_until_iter后位置不再增长，可复用）
 
 SPLIT_SIZE = 300000 # 300000
 
