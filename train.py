@@ -24,7 +24,7 @@ from utils.general_utils import get_git_branch, safe_state, get_expon_lr_func, g
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
-from utils.camera_utils import frustum_culling
+from utils.camera_utils import frustum_culling, frustum_culling_idx
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
@@ -74,10 +74,9 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     
     if DEBUG_MODE:
     # TODO
-        # scene.gaussians.load_ply("/home/jian/gaussian-splatting-2/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
-        scene.gaussians.load_ply("/home/jian/gaussian-splatting/output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
+        scene.gaussians.load_ply("output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
         progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
-        opt.iterations = 1100
+        opt.iterations = 1050
         return scene, 1000, 0, 0, progress_bar, None
     
     
@@ -132,8 +131,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         
         # frustum culling (cuda)
         if config.FRUSTUM_CULLING_ENABLED:
-            visible_mask = frustum_culling(initial_gaussians._xyz, viewpoint_cam.full_proj_transform)
-            initial_gaussians.visible_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
+            initial_gaussians.visible_indices = frustum_culling_idx(initial_gaussians._xyz, viewpoint_cam.full_proj_transform)
         else:
             initial_gaussians.visible_indices = torch.arange(initial_gaussians._xyz.shape[0], device="cuda")
         
@@ -264,7 +262,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene)
 
     if DEBUG_MODE:
-        opt.iterations = 1100
+        opt.iterations = 1050
 
     time_start = time.time()
     for iteration in range(first_iter, opt.iterations + 1):
@@ -297,10 +295,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 for model in submodel_list:
                     # TODO 不再增点之后不必频繁更新视锥剔除
                     if model._xyz.is_cuda:
-                        visible_mask = frustum_culling(model._xyz, viewpoint_cam.full_proj_transform)
+                        model.visible_indices = frustum_culling_idx(model._xyz, viewpoint_cam.full_proj_transform)
                     else:
-                        visible_mask = frustum_culling(model._xyz, cpu_full_proj_transform_dict[viewpoint_cam.image_name])
-                    model.visible_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
+                        model.visible_indices = frustum_culling_idx(model._xyz, cpu_full_proj_transform_dict[viewpoint_cam.image_name])
             else:
                 for model in submodel_list:
                     model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
