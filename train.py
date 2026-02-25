@@ -16,7 +16,7 @@ from random import randint
 
 import torchvision
 from utils.debug_utils import save_block_img, save_depth_list, save_rgb_layers, save_layer_contribution
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, fast_ssim
 from gaussian_renderer import render, merge_opt, merge_opt_kid
 import sys
 from scene import Scene, GaussianModel
@@ -165,7 +165,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
         if colors_bg is None:
             colors_bg = torch.zeros_like(gt_image)
         Ll1 = l1_loss(image, gt_image)
-        ssim_value = ssim(image, gt_image)
+        ssim_value = fast_ssim(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
         # Depth regularization
@@ -363,7 +363,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         block_rank = merge_res["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
         K, C, H, W = C_sorted.shape   
         colors_bg = merge_res["bg_rgb"]
-        
+        diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
 
         with torch.no_grad():
             gt_image = viewpoint_cam.original_image.cuda()
@@ -405,14 +405,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
 
             Ll1 = l1_loss(composed_img, gt_image)
-            ssim_value = ssim(composed_img, gt_image)
+            ssim_value = fast_ssim(composed_img, gt_image)
             loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
             # Depth regularization
             Ll1depth = 0
-
-            with torch.no_grad():
-                diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
 
             loss.backward()
 
@@ -426,13 +423,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
-            
-            pts_total = 0
-            for submodel in submodel_list:
-                pts_total += submodel._xyz.shape[0]
-            
-            
+
             if iteration % 10 == 0:
+                pts_total = sum(submodel._xyz.shape[0] for submodel in submodel_list)
                 # progress bar
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
                 progress_bar.update(10)
