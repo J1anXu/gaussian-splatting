@@ -1,3 +1,4 @@
+import config
 import torch
 from typing import List, Optional, Callable
 from scene import GaussianModel
@@ -25,13 +26,14 @@ class PipelinedGradSync:
     @staticmethod
     def _allocate_pinned_buffers(submodel: GaussianModel):
         n_vis = submodel._xyz.shape[0]  # worst case: all visible
+        grad_dtype = torch.float16 if config.HALF_D2H else torch.float32
         submodel._pinned_grad_bufs = {
-            '_xyz': torch.empty(n_vis, 3, dtype=torch.float32, pin_memory=True),
-            '_features_dc': torch.empty_like(submodel._features_dc, pin_memory=True),
-            '_features_rest': torch.empty_like(submodel._features_rest, pin_memory=True),
-            '_scaling': torch.empty(n_vis, 3, dtype=torch.float32, pin_memory=True),
-            '_rotation': torch.empty(n_vis, 4, dtype=torch.float32, pin_memory=True),
-            '_opacity': torch.empty(n_vis, 1, dtype=torch.float32, pin_memory=True),
+            '_xyz': torch.empty(n_vis, 3, dtype=grad_dtype, pin_memory=True),
+            '_features_dc': torch.empty(n_vis, *submodel._features_dc.shape[1:], dtype=grad_dtype, pin_memory=True),
+            '_features_rest': torch.empty(n_vis, *submodel._features_rest.shape[1:], dtype=grad_dtype, pin_memory=True),
+            '_scaling': torch.empty(n_vis, 3, dtype=grad_dtype, pin_memory=True),
+            '_rotation': torch.empty(n_vis, 4, dtype=grad_dtype, pin_memory=True),
+            '_opacity': torch.empty(n_vis, 1, dtype=grad_dtype, pin_memory=True),
         }
         submodel._pinned_vf_buf = torch.empty(n_vis, 1, dtype=torch.long, pin_memory=True)
         submodel._pinned_radii_buf = torch.empty(n_vis, dtype=torch.int32, pin_memory=True)
@@ -57,7 +59,10 @@ class PipelinedGradSync:
             if g is None:
                 continue
             pinned = submodel._pinned_grad_bufs[name][:n_vis]
-            pinned.copy_(g, non_blocking=True)
+            if config.HALF_D2H:
+                pinned.copy_(g.half(), non_blocking=True)
+            else:
+                pinned.copy_(g, non_blocking=True)
             cur_gpu_grads.append(pinned)
 
         sub_visibility_filter = render_pkg["visibility_filter"]

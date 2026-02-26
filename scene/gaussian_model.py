@@ -831,7 +831,7 @@ class GaussianModel:
                       '_scaling', '_rotation', '_opacity']
         for gi, name in enumerate(attr_order):
             s, e, _ = self._pack_slices[name]
-            staging[:, s:e] = gpu_grads[gi].reshape(n_vis, e - s)
+            staging[:, s:e] = gpu_grads[gi].float().reshape(n_vis, e - s)
         return staging
 
     def packed_sparse_adam_step(self, idx, grad_subset, iteration):
@@ -909,24 +909,28 @@ class GaussianModel:
 
         # Single DMA transfer: pinned -> GPU. non_blocking=True is effective
         # only when the source tensor is in pinned (page-locked) memory.
-        gpu_packed = staging.cuda(non_blocking=True)
+        if config.HALF_H2D:
+            gpu_packed = staging.half().cuda(non_blocking=True)
+        else:
+            gpu_packed = staging.cuda(non_blocking=True)
 
         # Unpack on GPU. Each clone() creates an independent tensor with its
         # own storage, which is required for correct per-attribute gradient
         # computation in the subsequent backward pass.
+        # .float() ensures FP32 for rasterizer regardless of HALF_H2D setting.
         slices = self._pack_slices
         s, e, _ = slices['_xyz']
-        self._xyz_gpu = gpu_packed[:, s:e].clone()
+        self._xyz_gpu = gpu_packed[:, s:e].float().clone()
         s, e, reshape = slices['_features_dc']
-        self._features_dc_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2]).clone()
+        self._features_dc_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2]).float().clone()
         s, e, reshape = slices['_features_rest']
-        self._features_rest_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2]).clone()
+        self._features_rest_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2]).float().clone()
         s, e, _ = slices['_scaling']
-        self._scaling_gpu = gpu_packed[:, s:e].clone()
+        self._scaling_gpu = gpu_packed[:, s:e].float().clone()
         s, e, _ = slices['_rotation']
-        self._rotation_gpu = gpu_packed[:, s:e].clone()
+        self._rotation_gpu = gpu_packed[:, s:e].float().clone()
         s, e, _ = slices['_opacity']
-        self._opacity_gpu = gpu_packed[:, s:e].clone()
+        self._opacity_gpu = gpu_packed[:, s:e].float().clone()
 
         if requires_grad:
             self._xyz_gpu.requires_grad_(True)

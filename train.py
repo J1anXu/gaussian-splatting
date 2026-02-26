@@ -320,8 +320,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         rendered_list, depth_list, alpha_list = [], [], []
         visible_submodel_id_list = []
         visible_pts = 0
-        
-        with torch.no_grad():
+
+        _amp_no_grad = torch.cuda.amp.autocast(enabled=config.AMP_NO_GRAD)
+
+        with torch.no_grad(), _amp_no_grad:
             for submodel_id, submodel in enumerate(submodel_list):
                 
                 if submodel.visible_indices.shape[0] == 0:
@@ -354,8 +356,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 visible_submodel_id_list.append(submodel_id)
 
                 
-        # execute merge 
-        with torch.no_grad():
+        # execute merge
+        with torch.no_grad(), _amp_no_grad:
             merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
             
         C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
@@ -369,52 +371,48 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             gt_image = viewpoint_cam.original_image.cuda()
 
         # 遍历所有可见block 轮流当active block
+        _amp_grad = torch.cuda.amp.autocast(enabled=config.AMP_GRAD)
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
 
             submodel.move_and_activate_subset(requires_grad = True)
 
-            render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            with _amp_grad:
+                render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
 
-            # pixel level
-            sub_img = render_pkg["render"]
+                # pixel level
+                sub_img = render_pkg["render"]
 
-            # gaussian points level
-            sub_viewspace_point_tensor = render_pkg["viewspace_points"]
+                # gaussian points level
+                sub_viewspace_point_tensor = render_pkg["viewspace_points"]
 
-            with torch.no_grad():
-                # 当前subset的渲染结果在每个像素上的排序位置
-                submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
-                # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
-                prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
-                # 4. 当前块(index = idx)块提供的颜色
-                C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]
-                # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
-                C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k
-                # 6. 带梯度的渲染结果
-                C_active = sub_img      # [3,H,W], has grad
+                with torch.no_grad():
+                    # 当前subset的渲染结果在每个像素上的排序位置
+                    submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
+                    # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
+                    prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
+                    # 4. 当前块(index = idx)块提供的颜色
+                    C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]
+                    # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
+                    C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k
+                    # 6. 带梯度的渲染结果
+                    C_active = sub_img      # [3,H,W], has grad
 
-            # 把带梯度的渲染结果拼到背景上 用于计算loss
-            composed_img = C_base + prefix_T_k * C_active
+                # 把带梯度的渲染结果拼到背景上 用于计算loss
+                composed_img = C_base + prefix_T_k * C_active
 
-            # if viewpoint_cam.alpha_mask is not None:
-            #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
-            #     composed_img *= alpha_mask
+                # Loss
+                Ll1 = l1_loss(composed_img, gt_image)
+                ssim_value = ssim(composed_img, gt_image)
+                loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-            # Loss
+                # Depth regularization
+                Ll1depth = 0
 
+                with torch.no_grad():
+                    diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
 
-            Ll1 = l1_loss(composed_img, gt_image)
-            ssim_value = ssim(composed_img, gt_image)
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
-
-            # Depth regularization
-            Ll1depth = 0
-
-            with torch.no_grad():
-                diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
-
-            loss.backward()
+                loss.backward()
 
             grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
 

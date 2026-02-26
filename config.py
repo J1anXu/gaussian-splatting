@@ -21,5 +21,9 @@ FRUSTUM_CULLING_CACHE_ENABLED = True  # 是否缓存视锥剔除结果（densify
 
 SPLIT_SIZE = 300000 # 300000
 
-HALF = False        # 半精度梯度拷贝加速
+HALF = False        # 半精度梯度拷贝加速 (legacy, unused)
+HALF_H2D = False    # H2D传输用FP16: CPU FP32 -> half() -> PCIe -> GPU -> float() -> rasterizer
+HALF_D2H = False    # D2H梯度回传用FP16: GPU grad -> half() -> PCIe -> CPU -> float() -> adam
+AMP_NO_GRAD = False # 无梯度预渲染+merge用autocast FP16 (不影响训练，省GPU计算)
+AMP_GRAD = False    # 带梯度渲染+loss用autocast FP16 (SSIM的conv2d跑FP16)
 TIMELINE = True    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
