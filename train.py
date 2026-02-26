@@ -469,7 +469,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     print(f"Phase 2 training time cost: [{cost:.2f}] seconds.")
 
     if config.TIMELINE:
-        import os
         os.makedirs("timeline", exist_ok=True)
         tracer.export(f"timeline/trace_{BRANCH}_{SCENE_NAME}.json")
         
