@@ -310,7 +310,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                             if model._xyz.is_cuda:
                                 model.visible_indices = frustum_culling_idx(model._xyz, viewpoint_cam.full_proj_transform)
                             else:
-                                model.visible_indices = frustum_culling_idx(model._xyz, cpu_full_proj_transform_dict[cam_name])
+                                # Use pre-extracted contiguous [N,3] xyz cache.
+                                # Positions change ~1e-6 relative per iter and culling
+                                # has inflate_ratio=0.3 margin -> stale by 1 iter is safe.
+                                xyz_for_cull = model._xyz_contig if hasattr(model, '_xyz_contig') else model._xyz
+                                model.visible_indices = frustum_culling_idx(xyz_for_cull, cpu_full_proj_transform_dict[cam_name])
                             if use_fc_cache:
                                 if submodel_id not in frustum_cache:
                                     frustum_cache[submodel_id] = {}

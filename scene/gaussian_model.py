@@ -758,6 +758,13 @@ class GaussianModel:
 
         self._init_packed_adam_state()
 
+        # Cache a contiguous [N,3] xyz copy for frustum culling.
+        # _xyz is a view into _packed with stride=(D,1), so .contiguous() would
+        # read the full [N,D] buffer (70MB) just to extract 3 cols.
+        # This pre-extracted copy costs only 3.6MB per culling call.
+        s, e, _ = slices['_xyz']
+        self._xyz_contig = packed[:, s:e].contiguous()  # [N,3], stride=(3,1)
+
     def _migrate_optimizer_state(self, old_params):
         """Migrate optimizer state from old params to new view-params after pack_to_buffer."""
         for group in self.optimizer.param_groups:
