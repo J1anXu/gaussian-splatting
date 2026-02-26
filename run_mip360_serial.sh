@@ -21,7 +21,8 @@ set -o pipefail
 ########################################
 # 场景分组 (参考 full_eval.py)
 ########################################
-OUTDOOR_SCENES=(bicycle flowers garden stump treehill)
+# OUTDOOR_SCENES=(bicycle flowers garden stump treehill)
+OUTDOOR_SCENES=(bicycle)
 INDOOR_SCENES=(room counter kitchen bonsai)
 
 ########################################
