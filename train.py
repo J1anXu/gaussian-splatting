@@ -32,7 +32,7 @@ import time
 from logger import get_logger
 import config
 import diff_gaussian_rasterization_wenqi_tam
-from TimerManager import  TraceManager
+from TimerManager import  TraceManager, TID_MAIN, PID_CPU
 from pipeline_grad_sync import PipelinedGradSync
 SCENE_NAME = None
 BRANCH = None
@@ -264,13 +264,15 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     frustum_cache: dict = {}
 
     # Pipeline: async D2H grad copies + deferred opt steps
-    grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene)
+    tracer = TraceManager(enabled=config.TIMELINE)
+    grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer)
 
     if DEBUG_MODE:
         opt.iterations = 1050
 
     time_start = time.time()
     for iteration in range(first_iter, opt.iterations + 1):
+        tracer.step(iteration)
 
         for submodel in submodel_list:
             submodel.update_learning_rate(iteration)
@@ -299,19 +301,20 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         with torch.no_grad():
             if config.FRUSTUM_CULLING_ENABLED:
                 cam_name = viewpoint_cam.image_name
-                for submodel_id, model in enumerate(submodel_list):
-                    cached = use_fc_cache and submodel_id in frustum_cache and cam_name in frustum_cache[submodel_id]
-                    if cached:
-                        model.visible_indices = frustum_cache[submodel_id][cam_name]
-                    else:
-                        if model._xyz.is_cuda:
-                            model.visible_indices = frustum_culling_idx(model._xyz, viewpoint_cam.full_proj_transform)
+                with tracer.span("frustum_culling", tid=TID_MAIN):
+                    for submodel_id, model in enumerate(submodel_list):
+                        cached = use_fc_cache and submodel_id in frustum_cache and cam_name in frustum_cache[submodel_id]
+                        if cached:
+                            model.visible_indices = frustum_cache[submodel_id][cam_name]
                         else:
-                            model.visible_indices = frustum_culling_idx(model._xyz, cpu_full_proj_transform_dict[cam_name])
-                        if use_fc_cache:
-                            if submodel_id not in frustum_cache:
-                                frustum_cache[submodel_id] = {}
-                            frustum_cache[submodel_id][cam_name] = model.visible_indices
+                            if model._xyz.is_cuda:
+                                model.visible_indices = frustum_culling_idx(model._xyz, viewpoint_cam.full_proj_transform)
+                            else:
+                                model.visible_indices = frustum_culling_idx(model._xyz, cpu_full_proj_transform_dict[cam_name])
+                            if use_fc_cache:
+                                if submodel_id not in frustum_cache:
+                                    frustum_cache[submodel_id] = {}
+                                frustum_cache[submodel_id][cam_name] = model.visible_indices
             else:
                 for model in submodel_list:
                     model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
@@ -320,24 +323,27 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         rendered_list, depth_list, alpha_list = [], [], []
         visible_submodel_id_list = []
         visible_pts = 0
-        
+
         with torch.no_grad():
             for submodel_id, submodel in enumerate(submodel_list):
-                
+
                 if submodel.visible_indices.shape[0] == 0:
                     continue
-                
-                visible_pts += submodel.visible_indices.shape[0]
-                
-                submodel.move_and_activate_subset(requires_grad = False)
 
-                render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                    
+                visible_pts += submodel.visible_indices.shape[0]
+
+                with tracer.span("h2d_nograd", tid=TID_MAIN, block_id=submodel_id,
+                                 n_vis=submodel.visible_indices.shape[0]):
+                    submodel.move_and_activate_subset(requires_grad = False)
+
+                with tracer.gpu_span("render_nograd", block_id=submodel_id):
+                    render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+
                 submodel.deactivate_subset()
-                
-                # pixel level 
+
+                # pixel level
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
-                
+
                 # 能被视锥看见并不一定真的有贡献
                 # image: [3, H, W]
                 valid_mask = (image > 0).any(dim=0)   # [H, W] bool
@@ -346,17 +352,18 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 contributed_percent = valid_pixels / total_pixels
                 if contributed_percent < 0.05:
                     continue
-                
+
                 rendered_list.append(image)
                 depth_list.append(depth)
                 alpha_list.append(alphaLeft)
-                
+
                 visible_submodel_id_list.append(submodel_id)
 
-                
-        # execute merge 
+
+        # execute merge
         with torch.no_grad():
-            merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
+            with tracer.gpu_span("merge_opt_kid"):
+                merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
             
         C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
         prefix_T = merge_res["prefix_T"]
@@ -372,9 +379,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
 
-            submodel.move_and_activate_subset(requires_grad = True)
+            with tracer.span("h2d_grad", tid=TID_MAIN, block_id=submodel_id,
+                             n_vis=submodel.visible_indices.shape[0]):
+                submodel.move_and_activate_subset(requires_grad = True)
 
-            render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            with tracer.gpu_span("render_grad", block_id=submodel_id):
+                render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
 
             # pixel level
             sub_img = render_pkg["render"]
@@ -397,13 +407,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # 把带梯度的渲染结果拼到背景上 用于计算loss
             composed_img = C_base + prefix_T_k * C_active
 
-            # if viewpoint_cam.alpha_mask is not None:
-            #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
-            #     composed_img *= alpha_mask
-
             # Loss
-
-
             Ll1 = l1_loss(composed_img, gt_image)
             ssim_value = fast_ssim(composed_img, gt_image)
             loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
@@ -411,7 +415,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # Depth regularization
             Ll1depth = 0
 
-            loss.backward()
+            with tracer.gpu_span("backward", block_id=submodel_id):
+                loss.backward()
+
+            tracer.counter("pts", {"visible": visible_pts,
+                                   "total": sum(s._xyz.shape[0] for s in submodel_list)})
 
             grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
 
@@ -455,10 +463,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     time_end = time.time()
     cost = time_end - time_start
     print(f"Phase 2 training time cost: [{cost:.2f}] seconds.")
-    
 
     if config.TIMELINE:
+        import os
         os.makedirs("timeline", exist_ok=True)
+        tracer.export(f"timeline/trace_{BRANCH}_{SCENE_NAME}.json")
         
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
