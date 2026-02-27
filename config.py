@@ -19,7 +19,7 @@ PARTITIONING_ENABLED = True  # 是否启用分块处理
 FRUSTUM_CULLING_ENABLED = True  # 是否启用视锥剔除
 FRUSTUM_CULLING_CACHE_ENABLED = True  # 是否缓存视锥剔除结果（densify_until_iter后位置不再增长，可复用）
 
-SPLIT_SIZE = 300000 # 300000
+SPLIT_SIZE = 500000 
 
 HALF = False        # 半精度梯度拷贝加速
 TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
