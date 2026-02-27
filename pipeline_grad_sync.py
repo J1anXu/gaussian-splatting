@@ -114,8 +114,13 @@ class PipelinedGradSync:
         return _do
 
     def flush(self):
-        """Execute the previous submodel's deferred scatter_grad + densify + opt_step."""
+        """Execute the previous submodel's deferred scatter_grad + densify + opt_step.
+        Syncs D2H before reading pinned grad buffers.
+        """
         if self._pending_opt is not None:
+            with self.tracer.span("cuda_synchronize", tid=TID_PIPELINE):
+                torch.cuda.synchronize()
+            self.tracer.flush_gpu_events()
             self._pending_opt()
             self._pending_opt = None
 
@@ -134,15 +139,11 @@ class PipelinedGradSync:
         # 2. deactivate current submodel's GPU subset
         submodel.deactivate_subset()
 
-        # 3. while D2H is in flight, run PREVIOUS submodel's opt step
+        # 3. flush PREVIOUS submodel's opt step (sync happens inside flush())
+        #    while current submodel's D2H is still in flight -> maximizes overlap
         self.flush()
 
-        # 4. sync D2H
-        with tm.span("cuda_synchronize", tid=TID_PIPELINE, block_id=submodel_id):
-            torch.cuda.synchronize()
-        tm.flush_gpu_events()
-
-        # 5. prepare deferred work for current submodel
+        # 4. prepare deferred work for current submodel (no sync needed here)
         self._pending_opt = self._make_pending(
             submodel, submodel_id, cur_idx, cur_gpu_grads,
             pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration,
