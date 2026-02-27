@@ -22,4 +22,4 @@ FRUSTUM_CULLING_CACHE_ENABLED = True  # 是否缓存视锥剔除结果（densify
 SPLIT_SIZE = 300000 # 300000
 
 HALF = False        # 半精度梯度拷贝加速
-TIMELINE = True    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
+TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
