@@ -172,11 +172,12 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
                 progress_bar.update(10)
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total}
+                gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
+                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
                 LOGGER.info(log)
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
-                    
+
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -412,7 +413,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if iteration == opt.iterations:
                     progress_bar.close()
                 
-                log = {"iter": iteration, "loss": ema_loss_for_log, "cost": time_elapsed, "pts": pts_total}
+                gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
+                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
 
                 # logging
                 LOGGER.info(log)
@@ -486,8 +488,9 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
-    SCENE_NAME = args.source_path.strip('/').split('/')[-1]
-    
+    SCENE_NAME = args.source_path.split('/')[-1]
+    DATASET_NAME = args.source_path.split('/')[-2]
+
     if args.git_branch is not None:
         BRANCH = args.git_branch
     else:
@@ -500,10 +503,10 @@ if __name__ == "__main__":
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
-            project = "partgs_gpu", 
-            name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
-            config = vars(op.extract(args)) ,
-            group = f"{SCENE_NAME}"
+            project = DATASET_NAME,
+            name = f"{SCENE_NAME}_{BRANCH}",
+            group = SCENE_NAME,
+            config = vars(op.extract(args))
         )
         wandb.define_metric("iteration")  # 
         
