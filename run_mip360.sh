@@ -36,7 +36,7 @@ done
 ########################################
 GPUS=(0 1 2 3)
 
-DATA_ROOT=/home/jian/data/mip360
+DATA_ROOT=/data2/jian/data/mip360
 LOG_ROOT=debug
 
 GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
