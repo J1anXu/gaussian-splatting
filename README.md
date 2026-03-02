@@ -36,3 +36,5 @@ bash run_mip360_serial.sh
 bash run_mip360_serial.sh --type indoor --gpu 2
 # 只跑室外场景
 bash run_mip360_serial.sh --type outdoor
+
+bash run_deepblending_serial.sh --type outdoor
