@@ -300,8 +300,8 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
-    SCENE_NAME = args.source_path.strip('/').split('/')[-1]
-    
+    SCENE_NAME = args.source_path.split('/')[-1]
+    DATASET_NAME = args.source_path.split('/')[-2]
     if args.git_branch is not None:
         BRANCH = args.git_branch
     else:
@@ -313,8 +313,9 @@ if __name__ == "__main__":
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
-            project = "partgs", 
-            name = f"{SCENE_NAME}_{BRANCH}_{time.strftime('%m%d%H%M')}", 
+            project = DATASET_NAME, 
+            name = f"{SCENE_NAME}_{BRANCH}", 
+            group = SCENE_NAME,
             config = vars(op.extract(args)) 
         )
         wandb.define_metric("iteration")  # 
