@@ -414,7 +414,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     progress_bar.close()
                 
                 gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
+                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "cost": time_elapsed, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
 
                 # logging
                 LOGGER.info(log)
