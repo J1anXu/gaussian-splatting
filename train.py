@@ -167,7 +167,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration == opt.iterations:
                 progress_bar.close()
             time_elapsed = time.time() - start_time
-            log = {"iter": iteration,"loss": ema_loss_for_log, "cost": time_elapsed, "pts": total_points}
+            gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
+            log = {"iter": iteration,"loss": ema_loss_for_log, "cost": time_elapsed, "pts": total_points, "gpu_mem_gb": gpu_mem_gb}
             LOGGER.info(log)
             if WANDB and not DEBUG_MODE:
                 wandb.log(log, step=iteration)
