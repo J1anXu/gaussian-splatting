@@ -440,7 +440,7 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
     SCENE_NAME = args.source_path.split('/')[-1]
-    dataset_name = args.source_path.split('/')[-2]
+    DATASET_NAME = args.source_path.split('/')[-2]
     DEBUG_MODE = sys.gettrace() is not None
 
     if args.git_branch is not None:
@@ -452,17 +452,15 @@ if __name__ == "__main__":
     DEBUG_MODE = sys.gettrace() is not None
     print_config()
     
-    project_name = "partgs"
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
-            project = f"3DGS-{dataset_name}", 
-            name = f"{project_name}_{BRANCH}", 
+            project = DATASET_NAME,
+            name = f"{SCENE_NAME}_{BRANCH}",
             group = SCENE_NAME,
-            settings=wandb.Settings(start_method="fork",code_dir="."),
-            config=vars(args)
+            config = vars(op.extract(args))
         )
-        wandb.define_metric("iteration")  # 
+        wandb.define_metric("iteration")  #  
         
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     os.makedirs("debug", exist_ok=True)
