@@ -85,6 +85,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
+
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     
@@ -280,6 +281,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         visible_model_id_list = []
         act_contribution_list = [] # 真的有渲染结果的 block
         visible_pts = 0
+        block_importance_ema = {}
+        block_xyz_diff_ema = {}
+        block_scaling_diff_ema = {}
+        block_opacity_diff_ema = {}
+        loss_ema = {}
+        
         with torch.no_grad():
             for idx, model in enumerate(model_list):
                 
@@ -322,7 +329,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = cpu_merge_result["bg_rgb"]
 
-
+        loss_list = {}
         
         # 遍历所有可见block 轮流当active block
         for index, model_id in enumerate(visible_model_id_list):
@@ -371,8 +378,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             Ll1depth = 0
             diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
             loss.backward()
-
+            loss_list[model_id] = loss.item()
+            
             with torch.no_grad():
+
+                statistic(model_id, model_list, loss, loss_ema, block_importance_ema, block_xyz_diff_ema, block_scaling_diff_ema, block_opacity_diff_ema)
+
                 # Densification
                 if iteration < opt.densify_until_iter:
                     global_viewspace_points_grad = torch.zeros(model.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
@@ -421,8 +432,23 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 
                 # wandb logging
                 if WANDB and not DEBUG_MODE:
-                    wandb.log(log, step=iteration)
-                    wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(model_list)}, step=iteration)
+                    log_dict = {}
+                    # 取所有importance
+                    importance_values = torch.tensor( list(block_importance_ema.values()) )
+                    imp_min = importance_values.min()
+                    imp_max = importance_values.max()
+                    for model_id in visible_model_id_list:
+                        raw_importance = block_importance_ema[model_id]
+                        # 0-1 归一化
+                        norm_importance = (raw_importance - imp_min) / (imp_max - imp_min + 1e-8)
+                        log_dict[f"importance/{model_id}"] = raw_importance.item()
+                        log_dict[f"importance_norm/{model_id}"] = norm_importance.item()
+                        log_dict[f"xyz_diff/{model_id}"] = block_xyz_diff_ema[model_id].item()
+                        log_dict[f"scaling_diff/{model_id}"] = block_scaling_diff_ema[model_id].item()
+                        log_dict[f"opacity_diff/{model_id}"] = block_opacity_diff_ema[model_id].item()
+                        log_dict[f"block_size/{model_id}"] = model_list[model_id]._xyz.shape[0]
+                        log_dict[f"block_loss/{model_id}"] = loss_list[model_id]
+                    wandb.log(log_dict, step=iteration)
                         
         # saving Gaussians ply    
         if (iteration in saving_iterations):
@@ -440,6 +466,34 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     #     pth_path = os.path.join(args.model_path, f"point_cloud/{BRANCH}")
     #     torch.save((gaussians.capture(), iteration), pth_path + "/chkpnt" + str(iteration) + ".pth")
 
+
+def statistic(model_id, model_list, loss, loss_ema, block_importance_ema, block_xyz_diff_ema, block_scaling_diff_ema, block_opacity_diff_ema):
+    model = model_list[model_id]
+    alpha = 0.95
+
+
+    opacity_grad = model._opacity.grad
+    scale_grad = model._scaling.grad
+    xyz_grad = model._xyz.grad
+
+    opacity_diff = opacity_grad.abs().mean() if opacity_grad is not None else torch.tensor(0.0, device="cuda")
+    scale_diff = scale_grad.abs().mean() if scale_grad is not None else torch.tensor(0.0, device="cuda")
+    xyz_diff = xyz_grad.abs().mean() if xyz_grad is not None else torch.tensor(0.0, device="cuda")
+
+    importance = opacity_diff + scale_diff + xyz_diff
+
+    if model_id not in block_importance_ema:
+        block_importance_ema[model_id] = importance.detach()
+        block_xyz_diff_ema[model_id] = xyz_diff.detach()
+        block_scaling_diff_ema[model_id] = scale_diff.detach()
+        block_opacity_diff_ema[model_id] = opacity_diff.detach()
+        loss_ema[model_id] = loss.detach()
+    else:
+        block_importance_ema[model_id] = alpha * block_importance_ema[model_id] + (1 - alpha) * importance.detach()
+        block_xyz_diff_ema[model_id] = alpha * block_xyz_diff_ema[model_id] + (1 - alpha) * xyz_diff.detach()
+        block_scaling_diff_ema[model_id] = alpha * block_scaling_diff_ema[model_id] + (1 - alpha) * scale_diff.detach()
+        block_opacity_diff_ema[model_id] = alpha * block_opacity_diff_ema[model_id] + (1 - alpha) * opacity_diff.detach()
+        loss_ema[model_id] = alpha * loss_ema[model_id] + (1 - alpha) * loss
 
 
 def prepare_output_and_logger(args):    
