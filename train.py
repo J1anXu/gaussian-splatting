@@ -179,10 +179,11 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
             
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
+                sh_deg = initial_gaussians.active_sh_degree
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "sh": sh_deg, "pts_in_frustum": visible_pts, "pts": pts_total})
                 progress_bar.update(10)
                 gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
+                log = {"iter": iteration, "loss": ema_loss_for_log, "sh": sh_deg, "pts_in_frustum": visible_pts, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
                 LOGGER.info(log)
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
@@ -439,14 +440,15 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             if iteration % 10 == 0:
                 pts_total = sum(submodel._xyz.shape[0] for submodel in submodel_list)
+                sh_deg = submodel_list[0].active_sh_degree
                 # progress bar
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "sh": sh_deg, "pts_in_frustum": visible_pts, "pts": pts_total})
                 progress_bar.update(10)
                 if iteration == opt.iterations:
                     progress_bar.close()
-                
+
                 gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
+                log = {"iter": iteration, "loss": ema_loss_for_log, "sh": sh_deg, "pts_in_frustum": visible_pts, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
 
                 # logging
                 LOGGER.info(log)
