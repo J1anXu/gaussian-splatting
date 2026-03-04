@@ -38,3 +38,20 @@ bash run_mip360_serial.sh --type indoor --gpu 2
 bash run_mip360_serial.sh --type outdoor
 
 bash run_deepblending_serial.sh --type outdoor
+
+
+  sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)                                                                                                                                
+                                                                                                                                                                                                       
+  配置是 sh_degree=3, sh_degree_interval=1000，所以：
+                                                                                                                                                                                                       
+  ┌───────────┬──────────────────┐                          
+  │ step 范围 │ sh_degree_to_use │
+  ├───────────┼──────────────────┤
+  │ 0-999     │ 0                │
+  ├───────────┼──────────────────┤
+  │ 1000-1999 │ 1                │
+  ├───────────┼──────────────────┤
+  │ 2000-2999 │ 2                │
+  ├───────────┼──────────────────┤
+  │ 3000+     │ 3                │
+  └───────────┴──────────────────┘
