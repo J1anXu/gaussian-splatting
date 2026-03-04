@@ -22,8 +22,8 @@ set -o pipefail
 # 场景分组
 ########################################
 # OUTDOOR_SCENES=(bicycle flowers garden stump treehill)
-OUTDOOR_SCENES=()
-INDOOR_SCENES=(room counter kitchen bonsai)
+OUTDOOR_SCENES=(bicycle flowers garden stump)
+INDOOR_SCENES=()
 ALL_SCENES=("${OUTDOOR_SCENES[@]}" "${INDOOR_SCENES[@]}")
 
 # 室内判断表
