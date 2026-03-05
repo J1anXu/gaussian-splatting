@@ -237,7 +237,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         
 
     start = time.time()
-
+    block_importance_ema = {}
+    block_xyz_diff_ema = {}
+    block_scaling_diff_ema = {}
+    block_opacity_diff_ema = {}
+    loss_ema = {}
 
     for iteration in range(first_iter, opt.iterations + 1):
         
@@ -281,11 +285,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         visible_model_id_list = []
         act_contribution_list = [] # 真的有渲染结果的 block
         visible_pts = 0
-        block_importance_ema = {}
-        block_xyz_diff_ema = {}
-        block_scaling_diff_ema = {}
-        block_opacity_diff_ema = {}
-        loss_ema = {}
+
         
         with torch.no_grad():
             for idx, model in enumerate(model_list):
