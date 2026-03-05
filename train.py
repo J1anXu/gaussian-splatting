@@ -260,6 +260,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     block_opacity_diff_ema = {}
     loss_ema = {}
     block_update_interval = {}  # 每个 block 的更新间隔
+    block_densify_interval = {}  # 每个 block 的增删点间隔
 
     for iteration in range(first_iter, opt.iterations + 1):
 
@@ -366,19 +367,28 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         loss_list = {}
         Ll1depth = 0
 
-        # 分层更新：根据 importance 排名决定更新频率（增点结束后生效）
-        if config.BLOCK_TIERED_UPDATE and iteration >= config.BLOCK_TIERED_START_ITER and len(block_importance_ema) > 1 and iteration % 100 == 0:
+        # 分层调度：根据 importance 排名决定更新频率和增删点频率
+        if len(block_importance_ema) > 1 and iteration % 100 == 0:
             sorted_ids = sorted(block_importance_ema.keys(), key=lambda k: block_importance_ema[k].item() if isinstance(block_importance_ema[k], torch.Tensor) else block_importance_ema[k], reverse=True)
             n_blocks = len(sorted_ids)
             top_k = max(1, int(n_blocks * config.BLOCK_TIERED_TOP_RATIO))
             bot_k = max(1, int(n_blocks * config.BLOCK_TIERED_BOT_RATIO))
             for rank, bid in enumerate(sorted_ids):
                 if rank < top_k:
-                    block_update_interval[bid] = config.BLOCK_TIERED_TOP_INTERVAL
+                    if config.BLOCK_TIERED_UPDATE and iteration >= config.BLOCK_TIERED_START_ITER:
+                        block_update_interval[bid] = config.BLOCK_TIERED_TOP_INTERVAL
+                    if config.BLOCK_TIERED_DENSIFY:
+                        block_densify_interval[bid] = config.BLOCK_TIERED_DENSIFY_TOP_INTERVAL
                 elif rank >= n_blocks - bot_k:
-                    block_update_interval[bid] = config.BLOCK_TIERED_BOT_INTERVAL
+                    if config.BLOCK_TIERED_UPDATE and iteration >= config.BLOCK_TIERED_START_ITER:
+                        block_update_interval[bid] = config.BLOCK_TIERED_BOT_INTERVAL
+                    if config.BLOCK_TIERED_DENSIFY:
+                        block_densify_interval[bid] = config.BLOCK_TIERED_DENSIFY_BOT_INTERVAL
                 else:
-                    block_update_interval[bid] = config.BLOCK_TIERED_MID_INTERVAL
+                    if config.BLOCK_TIERED_UPDATE and iteration >= config.BLOCK_TIERED_START_ITER:
+                        block_update_interval[bid] = config.BLOCK_TIERED_MID_INTERVAL
+                    if config.BLOCK_TIERED_DENSIFY:
+                        block_densify_interval[bid] = config.BLOCK_TIERED_DENSIFY_MID_INTERVAL
 
         # 遍历所有可见block 轮流当active block
         for index, model_id in enumerate(visible_model_id_list):
@@ -449,16 +459,17 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     model.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
 
                     # 判断本轮是否需要 densify / reset_opacity
+                    densify_interval = block_densify_interval.get(model_id, opt.densification_interval)
                     # GA模式下只在 step 迭代触发，避免替换参数时丢失累积梯度
                     if use_ga:
                         should_densify = (is_ga_step_iter
                                           and iteration > opt.densify_from_iter
-                                          and iteration % opt.densification_interval < ACCUMULATION_STEPS)
+                                          and iteration % densify_interval < ACCUMULATION_STEPS)
                         should_reset_opacity = (is_ga_step_iter
                                                 and (iteration % opt.opacity_reset_interval < ACCUMULATION_STEPS
                                                      or (dataset.white_background and iteration == opt.densify_from_iter)))
                     else:
-                        should_densify = iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0
+                        should_densify = iteration > opt.densify_from_iter and iteration % densify_interval == 0
                         should_reset_opacity = iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter)
 
                     # 非GA：保持原始顺序 densify → step
