@@ -26,7 +26,7 @@ GA_START_ITER = 5000  # 开始梯度累积的迭代次数
 GA_ACCUMULATION_STEPS = 5  # 累积步数
 GA_WARMUP_END_ITER = 6000  # LR warmup 结束迭代次数
 
-# ---- Block Tiered Update ----
+# ---- Adaptive optimization scheduling (V1) ----
 BLOCK_TIERED_UPDATE = True  # 是否启用分层更新频率
 BLOCK_TIERED_START_ITER = 15000  # 增点结束后开始
 BLOCK_TIERED_TOP_RATIO = 0.2  # top 20% 每步更新
