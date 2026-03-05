@@ -91,7 +91,8 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     first_iter += 1
     
     colors_bg = None
-    
+    phase1_start = time.time()
+
     for iteration in range(first_iter, opt.iterations + 1):
         # partition
         if config.PARTITIONING_ENABLED:
@@ -175,7 +176,9 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
                 progress_bar.update(10)
                 gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
+                p1_elapsed = time.time() - phase1_start
+                its = (iteration - first_iter) / p1_elapsed if p1_elapsed > 0 else 0
+                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "it/s": round(its, 2), "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
                 LOGGER.info(log)
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
@@ -361,7 +364,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         colors_bg = cpu_merge_result["bg_rgb"]
 
         loss_list = {}
-        
+        Ll1depth = 0
+
         # 分层更新：根据 importance 排名决定更新频率（增点结束后生效）
         if config.BLOCK_TIERED_UPDATE and iteration >= config.BLOCK_TIERED_START_ITER and len(block_importance_ema) > 1 and iteration % 100 == 0:
             sorted_ids = sorted(block_importance_ema.keys(), key=lambda k: block_importance_ema[k].item() if isinstance(block_importance_ema[k], torch.Tensor) else block_importance_ema[k], reverse=True)
@@ -381,6 +385,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # 分层更新：不在更新步的 block 跳过反向传播和优化
             interval = block_update_interval.get(model_id, 1)
             should_update = (interval <= 1) or (iteration % interval == 0)
+            if not should_update:
+                continue
 
             model: GaussianModel = model_list[model_id]
 
@@ -393,9 +399,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             # gaussian points level
             viewspace_point_tensor2, visibility_filter2, radii2 = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-
-            if not should_update:
-                continue
 
             rank_map = block_rank[index]  # [H,W]，当前block的渲染结果在每个像素上的排序位置
             idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
@@ -485,10 +488,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         
                         
         time_elapsed = time.time() - start
-          
+
         with torch.no_grad():
             # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            if loss_list:
+                ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
             
             pts_total = 0
@@ -503,7 +507,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     progress_bar.close()
                 
                 gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "cost": time_elapsed, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
+                its = (iteration - first_iter) / time_elapsed if time_elapsed > 0 else 0
+                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "cost": time_elapsed, "it/s": round(its, 2), "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
 
                 # logging
                 LOGGER.info(log)
@@ -516,6 +521,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     imp_min = importance_values.min()
                     imp_max = importance_values.max()
                     for model_id in visible_model_id_list:
+                        if model_id not in block_importance_ema:
+                            continue
                         raw_importance = block_importance_ema[model_id]
                         # 0-1 归一化
                         norm_importance = (raw_importance - imp_min) / (imp_max - imp_min + 1e-8)
@@ -525,7 +532,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         log_dict[f"scaling_diff/{model_id}"] = block_scaling_diff_ema[model_id].item()
                         log_dict[f"opacity_diff/{model_id}"] = block_opacity_diff_ema[model_id].item()
                         log_dict[f"block_size/{model_id}"] = model_list[model_id]._xyz.shape[0]
-                        log_dict[f"block_loss/{model_id}"] = loss_list[model_id]
+                        if model_id in loss_list:
+                            log_dict[f"block_loss/{model_id}"] = loss_list[model_id]
                     wandb.log(log_dict, step=iteration)
                         
         # saving Gaussians ply    

@@ -16,8 +16,10 @@ if [ ! -d "$DEBUG_DIR" ]; then
     exit 1
 fi
 
+LOG_DIR="$SCRIPT_DIR/logs/train/$BRANCH"
+
 W=15
-scenes=""; losses=""; pts_list=""; ssims=""; psnrs=""; lpipss=""
+scenes=""; losses=""; pts_list=""; ssims=""; psnrs=""; lpipss=""; times=""
 count=0
 
 for scene_dir in "$DEBUG_DIR"/*/; do
@@ -40,8 +42,18 @@ for scene_dir in "$DEBUG_DIR"/*/; do
         [ -z "$lpips" ] && lpips="N/A"
     fi
 
+    # Parse time from logs/train/<branch>/<scene>/
+    ttime="N/A"
+    if [ -d "$LOG_DIR/$scene" ]; then
+        latest_log=$(ls -t "$LOG_DIR/$scene"/*.log 2>/dev/null | head -1)
+        if [ -n "$latest_log" ]; then
+            ttime=$(grep -oP 'Total time: \K[0-9:]+' "$latest_log" | tail -1)
+            [ -z "$ttime" ] && ttime="N/A"
+        fi
+    fi
+
     scenes="$scenes $scene"; losses="$losses $loss"; pts_list="$pts_list $pts"
-    ssims="$ssims $ssim"; psnrs="$psnrs $psnr"; lpipss="$lpipss $lpips"
+    ssims="$ssims $ssim"; psnrs="$psnrs $psnr"; lpipss="$lpipss $lpips"; times="$times $ttime"
     count=$((count + 1))
 done
 
@@ -66,4 +78,5 @@ print_row "Pts"   $pts_list
 print_row "SSIM"  $ssims
 print_row "PSNR"  $psnrs
 print_row "LPIPS" $lpipss
+print_row "Time"  $times
 print_sep
