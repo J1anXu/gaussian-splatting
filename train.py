@@ -147,8 +147,8 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             image *= alpha_mask
         
 
-        if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+        # if viewpoint_cam.image_name == debug_image_name:
+        #     torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -325,6 +325,17 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         ssim_value = ssim(img, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
         Ll1depth = 0
+
+        # Per-block loss for logging
+        block_losses = {}
+        with torch.no_grad():
+            for index, model_id in enumerate(visible_model_id_list):
+                block_img = rendered_list[index]
+                if viewpoint_cam.alpha_mask is not None:
+                    block_img = block_img * alpha_mask
+                bl1 = l1_loss(block_img, gt_image)
+                block_losses[model_id] = bl1.item()
+
         diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
         loss.backward()
 
@@ -375,6 +386,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 log_dict[f"xyz_diff/{model_id}"] = block_xyz_diff_ema[model_id].item()
                 log_dict[f"scaling_diff/{model_id}"] = block_scaling_diff_ema[model_id].item()
                 log_dict[f"opacity_diff/{model_id}"] = block_opacity_diff_ema[model_id].item()
+                if model_id in block_losses:
+                    log_dict[f"block_loss/{model_id}"] = block_losses[model_id]
             wandb.log(log_dict, step=iteration)
 
 
@@ -413,8 +426,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 model.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{idx}.ply"), include_block=False)
                 
         # save debug image
-        if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(img, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+        # if viewpoint_cam.image_name == debug_image_name:
+        #     torchvision.utils.save_image(img, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
                     
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -518,8 +531,8 @@ if __name__ == "__main__":
         
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     os.makedirs("debug", exist_ok=True)
-    IMG_PATH_IN_DEBUG = os.path.join("/data/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
-    os.makedirs(IMG_PATH_IN_DEBUG, exist_ok=True)
+    # IMG_PATH_IN_DEBUG = os.path.join("/data/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
+    # os.makedirs(IMG_PATH_IN_DEBUG, exist_ok=True)
 
     res = training_phase_1(lp.extract(args), op.extract(args), pp.extract(args), args.start_checkpoint, args.debug_from)
     training_phase_2(lp.extract(args), op.extract(args), pp.extract(args), args.save_iterations, args.debug_from, res)
