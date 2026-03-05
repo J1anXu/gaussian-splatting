@@ -1,19 +1,24 @@
-#!/bin/bash
+#!/bin/sh
 # Collect training metrics (Loss, pts, SSIM, PSNR, LPIPS) per scene from debug logs.
-# Usage: bash collect_metrics.sh [branch_name]
+# Usage: sh summarize.sh [branch_name]
 # Defaults to current git branch if not specified.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BRANCH="${1:-$(git -C "$SCRIPT_DIR" branch --show-current)}"
 DEBUG_DIR="$SCRIPT_DIR/debug/$BRANCH"
 
+echo "Branch: $BRANCH"
+echo "Commit: $(git -C "$SCRIPT_DIR" log -1 --format='%h %s')"
+echo
+
 if [ ! -d "$DEBUG_DIR" ]; then
     echo "Directory not found: $DEBUG_DIR"
     exit 1
 fi
 
-# Collect scene names and metrics
-scenes=(); losses=(); pts_arr=(); ssims=(); psnrs=(); lpipss=()
+W=15
+scenes=""; losses=""; pts_list=""; ssims=""; psnrs=""; lpipss=""
+count=0
 
 for scene_dir in "$DEBUG_DIR"/*/; do
     scene=$(basename "$scene_dir")
@@ -35,33 +40,30 @@ for scene_dir in "$DEBUG_DIR"/*/; do
         [ -z "$lpips" ] && lpips="N/A"
     fi
 
-    scenes+=("$scene"); losses+=("$loss"); pts_arr+=("$pts")
-    ssims+=("$ssim"); psnrs+=("$psnr"); lpipss+=("$lpips")
+    scenes="$scenes $scene"; losses="$losses $loss"; pts_list="$pts_list $pts"
+    ssims="$ssims $ssim"; psnrs="$psnrs $psnr"; lpipss="$lpipss $lpips"
+    count=$((count + 1))
 done
-
-# Print table with borders
-n=${#scenes[@]}
-W=15
 
 print_sep() {
     printf "+--------+"
-    for ((i=0; i<n; i++)); do printf "%-${W}s+" "" | tr ' ' '-'; done
+    i=0; while [ $i -lt $count ]; do printf "%-${W}s+" "" | tr ' ' '-'; i=$((i+1)); done
     echo
 }
 
 print_row() {
-    local label="$1"; shift
+    label="$1"; shift
     printf "| %-6s |" "$label"
-    for val in "$@"; do printf " %-$((W-2))s|" "$val"; done
+    for val in $@; do printf " %-$((W-2))s|" "$val"; done
     echo
 }
 
 print_sep
-print_row "Scene" "${scenes[@]}"
+print_row "Scene" $scenes
 print_sep
-print_row "Loss"  "${losses[@]}"
-print_row "Pts"   "${pts_arr[@]}"
-print_row "SSIM"  "${ssims[@]}"
-print_row "PSNR"  "${psnrs[@]}"
-print_row "LPIPS" "${lpipss[@]}"
+print_row "Loss"  $losses
+print_row "Pts"   $pts_list
+print_row "SSIM"  $ssims
+print_row "PSNR"  $psnrs
+print_row "LPIPS" $lpipss
 print_sep
