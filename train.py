@@ -30,6 +30,7 @@ from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
 import time
 import math
+from collections import deque
 from logger import get_logger
 import config
 import diff_gaussian_rasterization_jian
@@ -261,6 +262,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     loss_ema = {}
     block_update_interval = {}  # 每个 block 的更新间隔
 
+    # 自适应densification频率
+    block_importance_history = {}   # model_id -> deque of float snapshots
+    effective_densification_interval = opt.densification_interval
+
     for iteration in range(first_iter, opt.iterations + 1):
 
         use_ga = config.GA_ENABLED and iteration >= GA_START_ITER
@@ -439,6 +444,40 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 statistic(model_id, model_list, loss, loss_ema, block_importance_ema, block_xyz_diff_ema, block_scaling_diff_ema, block_opacity_diff_ema)
 
+                # 自适应densification频率：检测importance趋势，平缓则降低densification频率
+                if config.ADAPTIVE_DENS_ENABLED and model_id in block_importance_ema:
+                    # 每隔 CHECK_INTERVAL 收集一次快照
+                    if iteration % config.ADAPTIVE_DENS_CHECK_INTERVAL == 0:
+                        imp_val = block_importance_ema[model_id].item() if isinstance(block_importance_ema[model_id], torch.Tensor) else float(block_importance_ema[model_id])
+                        if model_id not in block_importance_history:
+                            block_importance_history[model_id] = deque(maxlen=config.ADAPTIVE_DENS_HISTORY_LEN)
+                        block_importance_history[model_id].append(imp_val)
+                    # 在第一个model_id处统一更新interval，避免重复计算
+                    if model_id == 0 and iteration % config.ADAPTIVE_DENS_CHECK_INTERVAL == 0:
+                        histories_ready = [h for h in block_importance_history.values() if len(h) >= config.ADAPTIVE_DENS_HISTORY_LEN]
+                        if histories_ready:
+                            all_flat = True
+                            for h in histories_ready:
+                                h_list = list(h)
+                                mean_val = sum(h_list) / len(h_list) + 1e-8
+                                # 归一化斜率：(last - first) / mean / len
+                                norm_slope = (h_list[-1] - h_list[0]) / mean_val / len(h_list)
+                                # 归一化标准差
+                                variance = sum((x - mean_val) ** 2 for x in h_list) / len(h_list)
+                                norm_std = variance ** 0.5 / mean_val
+                                if abs(norm_slope) > config.ADAPTIVE_DENS_FLAT_SLOPE_THRESH or norm_std > config.ADAPTIVE_DENS_FLAT_VAR_THRESH:
+                                    all_flat = False
+                                    break
+                            if all_flat:
+                                # importance平缓 → 降低densification频率
+                                effective_densification_interval = min(
+                                    int(effective_densification_interval * config.ADAPTIVE_DENS_SCALE_FACTOR),
+                                    opt.densification_interval * config.ADAPTIVE_DENS_MAX_SCALE
+                                )
+                            else:
+                                # importance波动或下降 → 恢复原始频率
+                                effective_densification_interval = opt.densification_interval
+
                 # Densification stats accumulation (每个iter都做)
                 if iteration < opt.densify_until_iter:
                     global_viewspace_points_grad = torch.zeros(model.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
@@ -453,12 +492,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     if use_ga:
                         should_densify = (is_ga_step_iter
                                           and iteration > opt.densify_from_iter
-                                          and iteration % opt.densification_interval < ACCUMULATION_STEPS)
+                                          and iteration % effective_densification_interval < ACCUMULATION_STEPS)
                         should_reset_opacity = (is_ga_step_iter
                                                 and (iteration % opt.opacity_reset_interval < ACCUMULATION_STEPS
                                                      or (dataset.white_background and iteration == opt.densify_from_iter)))
                     else:
-                        should_densify = iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0
+                        should_densify = iteration > opt.densify_from_iter and iteration % effective_densification_interval == 0
                         should_reset_opacity = iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter)
 
                     # 非GA：保持原始顺序 densify → step
@@ -515,7 +554,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 
                 # wandb logging
                 if WANDB and not DEBUG_MODE:
-                    log_dict = {}
+                    log_dict = {"dens_interval": effective_densification_interval}
                     # 取所有importance
                     importance_values = torch.tensor( list(block_importance_ema.values()) )
                     imp_min = importance_values.min()
