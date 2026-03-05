@@ -29,6 +29,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
 import time
+import math
 from logger import get_logger
 import config
 import diff_gaussian_rasterization_jian
@@ -236,6 +237,19 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         LOGGER.info(f"GS {idx} size: {model._xyz.shape[0]}")  
         
 
+    # ---- Gradient Accumulation ----
+    GA_START_ITER = config.GA_START_ITER
+    ACCUMULATION_STEPS = config.GA_ACCUMULATION_STEPS
+    GA_WARMUP_END_ITER = config.GA_WARMUP_END_ITER
+    SQRT_K = math.sqrt(ACCUMULATION_STEPS)
+
+    original_lrs = {}
+    for mid, model in enumerate(model_list):
+        original_lrs[mid] = {}
+        for pg in model.optimizer.param_groups:
+            if pg["name"] != "xyz":
+                original_lrs[mid][pg["name"]] = pg['lr']
+
     start = time.time()
     block_importance_ema = {}
     block_xyz_diff_ema = {}
@@ -244,9 +258,25 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     loss_ema = {}
 
     for iteration in range(first_iter, opt.iterations + 1):
-        
+
+        use_ga = config.GA_ENABLED and iteration >= GA_START_ITER
+        is_ga_step_iter = use_ga and ((iteration - GA_START_ITER) % ACCUMULATION_STEPS == ACCUMULATION_STEPS - 1)
+
         for model in model_list:
             model.update_learning_rate(iteration)
+
+        # Apply sqrt LR scaling + warm-up for non-xyz params
+        if use_ga:
+            if iteration < GA_WARMUP_END_ITER:
+                warmup_factor = (iteration - GA_START_ITER) / (GA_WARMUP_END_ITER - GA_START_ITER)
+            else:
+                warmup_factor = 1.0
+            for mid, model in enumerate(model_list):
+                for pg in model.optimizer.param_groups:
+                    if pg["name"] != "xyz":
+                        base_lr = original_lrs[mid][pg["name"]]
+                        scale = 1.0 + warmup_factor * (SQRT_K - 1.0)
+                        pg['lr'] = base_lr * scale
         
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
@@ -384,26 +414,52 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 statistic(model_id, model_list, loss, loss_ema, block_importance_ema, block_xyz_diff_ema, block_scaling_diff_ema, block_opacity_diff_ema)
 
-                # Densification
+                # Densification stats accumulation (每个iter都做)
                 if iteration < opt.densify_until_iter:
                     global_viewspace_points_grad = torch.zeros(model.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
                     global_viewspace_points_grad[model.visible_idx] = viewspace_point_tensor2.grad
                     global_visibility_filter = model.visible_idx[visibility_filter2]
-                    
+
                     model.max_radii2D[global_visibility_filter] = torch.max(model.max_radii2D[global_visibility_filter], radii2[visibility_filter2])
                     model.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
-                    
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-                        
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        model.reset_opacity()
-                        
+
+                    # 判断本轮是否需要 densify / reset_opacity
+                    # GA模式下只在 step 迭代触发，避免替换参数时丢失累积梯度
+                    if use_ga:
+                        should_densify = (is_ga_step_iter
+                                          and iteration > opt.densify_from_iter
+                                          and iteration % opt.densification_interval < ACCUMULATION_STEPS)
+                        should_reset_opacity = (is_ga_step_iter
+                                                and (iteration % opt.opacity_reset_interval < ACCUMULATION_STEPS
+                                                     or (dataset.white_background and iteration == opt.densify_from_iter)))
+                    else:
+                        should_densify = iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0
+                        should_reset_opacity = iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter)
+
+                    # 非GA：保持原始顺序 densify → step
+                    if not use_ga:
+                        if should_densify:
+                            size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                            model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                        if should_reset_opacity:
+                            model.reset_opacity()
+
                 # Optimizer step
                 if iteration < opt.iterations:
+                    if not use_ga:
                         model.optimizer.step()
-                        model.optimizer.zero_grad(set_to_none = True)
+                        model.optimizer.zero_grad(set_to_none=True)
+                    elif is_ga_step_iter:
+                        model.optimizer.step()
+                        model.optimizer.zero_grad(set_to_none=True)
+
+                # GA：step 之后再 densify，保证累积梯度先被消费
+                if use_ga and iteration < opt.densify_until_iter:
+                    if should_densify:
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        model.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                    if should_reset_opacity:
+                        model.reset_opacity()
                         
                         
         time_elapsed = time.time() - start

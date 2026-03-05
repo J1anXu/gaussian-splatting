@@ -18,4 +18,10 @@ SAVE_DEPTH_LIST = True  # 是否保存各个block的深度图
 PARTITIONING_ENABLED = True  # 是否启用分块处理
 FRUSTUM_CULLING_ENABLED = False  # 是否启用视锥剔除
 
-BLOCK_NUMS = 8  
+BLOCK_NUMS = 8
+
+# ---- Gradient Accumulation ----
+GA_ENABLED = True  # 是否启用梯度累积
+GA_START_ITER = 5000  # 开始梯度累积的迭代次数
+GA_ACCUMULATION_STEPS = 5  # 累积步数
+GA_WARMUP_END_ITER = 6000  # LR warmup 结束迭代次数
