@@ -256,6 +256,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     block_scaling_diff_ema = {}
     block_opacity_diff_ema = {}
     loss_ema = {}
+    block_update_interval = {}  # 每个 block 的更新间隔
 
     for iteration in range(first_iter, opt.iterations + 1):
 
@@ -361,43 +362,64 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
         loss_list = {}
         
+        # 分层更新：根据 importance 排名决定更新频率（增点结束后生效）
+        if config.BLOCK_TIERED_UPDATE and iteration >= config.BLOCK_TIERED_START_ITER and len(block_importance_ema) > 1 and iteration % 100 == 0:
+            sorted_ids = sorted(block_importance_ema.keys(), key=lambda k: block_importance_ema[k].item() if isinstance(block_importance_ema[k], torch.Tensor) else block_importance_ema[k], reverse=True)
+            n_blocks = len(sorted_ids)
+            top_k = max(1, int(n_blocks * config.BLOCK_TIERED_TOP_RATIO))
+            bot_k = max(1, int(n_blocks * config.BLOCK_TIERED_BOT_RATIO))
+            for rank, bid in enumerate(sorted_ids):
+                if rank < top_k:
+                    block_update_interval[bid] = config.BLOCK_TIERED_TOP_INTERVAL
+                elif rank >= n_blocks - bot_k:
+                    block_update_interval[bid] = config.BLOCK_TIERED_BOT_INTERVAL
+                else:
+                    block_update_interval[bid] = config.BLOCK_TIERED_MID_INTERVAL
+
         # 遍历所有可见block 轮流当active block
         for index, model_id in enumerate(visible_model_id_list):
+            # 分层更新：不在更新步的 block 跳过反向传播和优化
+            interval = block_update_interval.get(model_id, 1)
+            should_update = (interval <= 1) or (iteration % interval == 0)
+
             model: GaussianModel = model_list[model_id]
-            
+
             model.set_subset(model.visible_idx)
             render_pkg = render(viewpoint_cam, model, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             model.clear_subset()
-            
-            # pixel level 
+
+            # pixel level
             image2 = render_pkg["render"]
-            
+
             # gaussian points level
             viewspace_point_tensor2, visibility_filter2, radii2 = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-            
+
+            if not should_update:
+                continue
+
             rank_map = block_rank[index]  # [H,W]，当前block的渲染结果在每个像素上的排序位置
             idx = rank_map.unsqueeze(0).unsqueeze(0)   # [1,1,H,W]
             idx = idx.expand(1, C, H, W)               # [1,3,H,W]
-            
+
             # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
             prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
 
             # 4. 当前块(index = idx)块提供的颜色
-            C_sorted_k = C_sorted.gather(dim=0, index=idx).squeeze(0)   # [3,H,W]   
-            
+            C_sorted_k = C_sorted.gather(dim=0, index=idx).squeeze(0)   # [3,H,W]
+
             # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
-            C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k                  
-            
+            C_base = cpu_merge_result["final_rgb"] - prefix_T_k * C_sorted_k
+
             # 6. 带梯度的渲染结果
-            C_active = image2      # [3,H,W], has grad   
-            
+            C_active = image2      # [3,H,W], has grad
+
             # 7. 把带梯度的渲染结果拼到背景上 用于计算loss
             image_with_block_grad = C_base + prefix_T_k * C_active
-            
+
             if viewpoint_cam.alpha_mask is not None:
                 alpha_mask = viewpoint_cam.alpha_mask.cuda()
                 image_with_block_grad *= alpha_mask
-                
+
             # Loss
             gt_image = viewpoint_cam.original_image.cuda()
             Ll1 = l1_loss(image_with_block_grad, gt_image)
@@ -409,7 +431,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
             loss.backward()
             loss_list[model_id] = loss.item()
-            
+
             with torch.no_grad():
 
                 statistic(model_id, model_list, loss, loss_ema, block_importance_ema, block_xyz_diff_ema, block_scaling_diff_ema, block_opacity_diff_ema)
