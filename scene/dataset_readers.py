@@ -234,7 +234,10 @@ def readCamerasFromTransforms(path, transformsfile, depths_folder, white_backgro
 
         frames = contents["frames"]
         for idx, frame in enumerate(frames):
-            cam_name = os.path.join(path, frame["file_path"] + extension)
+            file_path = frame["file_path"]
+            if not os.path.splitext(file_path)[1]:
+                file_path = file_path + extension
+            cam_name = os.path.join(path, file_path)
 
             # NeRF 'transform_matrix' is a camera-to-world transform
             c2w = np.array(frame["transform_matrix"])
@@ -276,7 +279,12 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
     print("Reading Training Transforms")
     train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", depths_folder, white_background, False, extension)
     print("Reading Test Transforms")
-    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", depths_folder, white_background, True, extension)
+    test_transforms = os.path.join(path, "transforms_test.json")
+    if os.path.exists(test_transforms):
+        test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", depths_folder, white_background, True, extension)
+    else:
+        print("No transforms_test.json found, skipping test cameras.")
+        test_cam_infos = []
     
     if not eval:
         train_cam_infos.extend(test_cam_infos)
