@@ -429,14 +429,19 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             if iteration % 10 == 0:
                 pts_total = sum(submodel._xyz.shape[0] for submodel in submodel_list)
-                gpu_mem_reserved_gb = torch.cuda.memory_reserved() / 1024**3
-                gpu_mem_allocated_gb = torch.cuda.memory_allocated() / 1024**3
+                vis_M = visible_pts / 1e6
+                pts_M = pts_total / 1e6
+                vis_pct = visible_pts / pts_total * 100 if pts_total > 0 else 0
+                alloc = torch.cuda.memory_allocated() / 1024**3
+                rsv = torch.cuda.memory_reserved() / 1024**3
+                elapsed = time.time() - time_start
+                its = (iteration - first_iter) / elapsed if elapsed > 0 else 0
                 # progress bar
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total, "blocks": len(submodel_list), "alloc_gb": f"{gpu_mem_allocated_gb:.2f}", "rsv_gb": f"{gpu_mem_reserved_gb:.2f}"})
+                progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": len(submodel_list), "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "it/s": f"{its:.1f}"})
                 progress_bar.update(10)
                 if iteration == opt.iterations:
                     progress_bar.close()
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total, "blocks": len(submodel_list), "gpu_reserved_gb": gpu_mem_reserved_gb, "gpu_allocated_gb": gpu_mem_allocated_gb}
+                log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "it/s": round(its, 1)}
 
                 # logging
                 LOGGER.info(log)
