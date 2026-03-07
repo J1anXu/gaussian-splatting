@@ -83,9 +83,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     debug_image_name = "_DSC8680.JPG"
     img_path_in_debug = os.path.join("debug", BRANCH, debug_image_name)
     # os.makedirs(img_path_in_debug, exist_ok=True)
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    progress_bar = tqdm(range(first_iter, opt.iterations), miniters=10, mininterval=1.0)
     first_iter += 1
-    start_time = time.time()
+    global_tic = time.time()
+    step_tic = global_tic
     for iteration in range(first_iter, opt.iterations + 1):
 
         iter_start.record()
@@ -156,27 +157,65 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         iter_end.record()
 
         with torch.no_grad():
-            # Progress bar
+            # EMA loss
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
             total_points = gaussians.get_xyz.shape[0]
-            
+            gpu_used = torch.cuda.memory_allocated() / 1024**3
+            gpu_rsv = torch.cuda.memory_reserved() / 1024**3
+
+            # wandb every iteration
+            if WANDB and not DEBUG_MODE:
+                wandb.log({
+                    "iter": iteration,
+                    "loss": ema_loss_for_log,
+                    "cost": time.time() - global_tic,
+                    "pts": total_points,
+                    "gpu_mem_gb": gpu_rsv,
+                }, step=iteration)
+
+            # Progress bar + file log every 10 iters
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "pts": total_points})
+                now = time.time()
+                throughput = 10.0 / max(now - step_tic, 1e-8)
+                step_tic = now
+                pts_m = total_points / 1e6
+                sh = gaussians.active_sh_degree
+                desc = (
+                    f"loss={ema_loss_for_log:.3f}| sh={sh}| "
+                    f"pts={pts_m:.2f}M| "
+                    f"mem={gpu_used:.2f}/{gpu_rsv:.2f}G| {throughput:.2f} it/s"
+                )
+                progress_bar.set_description(desc)
                 progress_bar.update(10)
+
+                elapsed = now - global_tic
+                LOGGER.info(
+                    f"step={iteration}/{opt.iterations} | loss={ema_loss_for_log:.4f} l1={Ll1.item():.4f} ssim={1.0 - ssim_value.item():.4f} | "
+                    f"pts={pts_m:.2f}M | "
+                    f"mem={gpu_used:.2f}/{gpu_rsv:.2f}G | sh={sh} | {throughput:.2f} it/s | elapsed={elapsed:.1f}s"
+                )
+
             if iteration == opt.iterations:
                 progress_bar.close()
-            time_elapsed = time.time() - start_time
-            gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
-            log = {"iter": iteration,"loss": ema_loss_for_log, "cost": time_elapsed, "pts": total_points, "gpu_mem_gb": gpu_mem_gb}
-            LOGGER.info(log)
-            if WANDB and not DEBUG_MODE:
-                wandb.log(log, step=iteration)
-            
-            # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
-            if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
+
+            # Tensorboard
+            if tb_writer and iteration % 10 == 0:
+                mem = torch.cuda.max_memory_allocated() / 1024**3
+                tb_writer.add_scalar("train/loss", loss.item(), iteration)
+                tb_writer.add_scalar("train/l1loss", Ll1.item(), iteration)
+                tb_writer.add_scalar("train/ssimloss", 1.0 - ssim_value.item(), iteration)
+                tb_writer.add_scalar("train/num_GS", total_points, iteration)
+                tb_writer.add_scalar("train/mem", mem, iteration)
+                tb_writer.flush()
+
+            # Eval
+            if iteration in testing_iterations:
+                training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+
+            # Save
+            if iteration in saving_iterations:
+                print(f"\n[ITER {iteration}] Saving Gaussians")
                 scene.save(iteration, BRANCH)
 
             # Densification
@@ -210,67 +249,64 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 os.makedirs(pth_path, exist_ok = True)
                 torch.save((gaussians.capture(), iteration), pth_path + "/chkpnt" + str(iteration) + ".pth")
 
-def prepare_output_and_logger(args):    
+def prepare_output_and_logger(args):
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
             unique_str=os.getenv('OAR_JOB_ID')
         else:
             unique_str = str(uuid.uuid4())
         args.model_path = os.path.join("./output/", unique_str[0:10])
-        
+
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
-    os.makedirs(args.model_path, exist_ok = True)
+    os.makedirs(args.model_path, exist_ok=True)
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
     # Create Tensorboard writer
     tb_writer = None
     if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.model_path)
+        tb_writer = SummaryWriter(log_dir=os.path.join(args.model_path, "tb"))
     else:
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, train_test_exp):
+    """Run evaluation on test/train splits and log to TB + file logger."""
+    torch.cuda.empty_cache()
+    validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()},
+                          {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+
+    for cfg in validation_configs:
+        if cfg['cameras'] and len(cfg['cameras']) > 0:
+            l1_test = 0.0
+            psnr_test = 0.0
+            for idx, viewpoint in enumerate(cfg['cameras']):
+                image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+                gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                if train_test_exp:
+                    image = image[..., image.shape[-1] // 2:]
+                    gt_image = gt_image[..., gt_image.shape[-1] // 2:]
+                if tb_writer and (idx < 5):
+                    tb_writer.add_images(cfg['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+                    if iteration == testing_iterations[0]:
+                        tb_writer.add_images(cfg['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                l1_test += l1_loss(image, gt_image).mean().double()
+                psnr_test += psnr(image, gt_image).mean().double()
+            psnr_test /= len(cfg['cameras'])
+            l1_test /= len(cfg['cameras'])
+            eval_msg = f"[Eval {cfg['name']} step={iteration}] L1={l1_test:.4f} PSNR={psnr_test:.3f}"
+            print(f"\n{eval_msg}")
+            LOGGER.info(eval_msg)
+            if tb_writer:
+                tb_writer.add_scalar(cfg['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
+                tb_writer.add_scalar(cfg['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+
     if tb_writer:
-        tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
-        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
-        tb_writer.add_scalar('iter_time', elapsed, iteration)
-
-    # Report test and samples of training set
-    if iteration in testing_iterations:
-        torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
-
-        for config in validation_configs:
-            if config['cameras'] and len(config['cameras']) > 0:
-                l1_test = 0.0
-                psnr_test = 0.0
-                for idx, viewpoint in enumerate(config['cameras']):
-                    image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
-                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
-                    if train_test_exp:
-                        image = image[..., image.shape[-1] // 2:]
-                        gt_image = gt_image[..., gt_image.shape[-1] // 2:]
-                    if tb_writer and (idx < 5):
-                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
-                        if iteration == testing_iterations[0]:
-                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
-                    l1_test += l1_loss(image, gt_image).mean().double()
-                    psnr_test += psnr(image, gt_image).mean().double()
-                psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])          
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
-                if tb_writer:
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
-
-        if tb_writer:
-            tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
-            tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
-        torch.cuda.empty_cache()
+        tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
+        tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+        tb_writer.flush()
+    torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -307,37 +343,35 @@ if __name__ == "__main__":
         BRANCH = args.git_branch
     else:
         BRANCH = get_git_branch()
-    
-    LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
+
+    LOGGER = get_logger(SCENE_NAME, os.path.join(args.model_path, "logs"))
     DEBUG_MODE = sys.gettrace() is not None
-    
+    LOGGER.info(f"Scene: {SCENE_NAME} | data_dir: {args.source_path} | max_steps: {op.extract(args).iterations} | sh_degree: {lp.extract(args).sh_degree}")
+
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
-            project = DATASET_NAME, 
-            name = f"{SCENE_NAME}_{BRANCH}", 
-            group = SCENE_NAME,
-            config = vars(op.extract(args)) 
+            project=DATASET_NAME,
+            name=f"{SCENE_NAME}_{BRANCH}",
+            group=SCENE_NAME,
+            config=vars(op.extract(args)),
         )
-        wandb.define_metric("iteration")  # 
+        wandb.define_metric("iteration")
         
 
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     
-    time_start = time.time()
+    global_tic = time.time()
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
-    time_end = time.time()
-    
-    cost = time_end - time_start
-    hours = int(cost // 3600)
-    minutes = int((cost % 3600) // 60)
-    hhmm = f"{hours:02d}:{minutes:02d}"
-    print("\nTraining complete.")
 
+    total_cost = time.time() - global_tic
+    hours = int(total_cost // 3600)
+    minutes = int((total_cost % 3600) // 60)
+    hhmm = f"{hours:02d}:{minutes:02d}"
+    LOGGER.info(f"Training complete. Total time: {hhmm}")
     print(f"\nTraining complete. Total time: {hhmm}")
-    LOGGER.info(f"\nTraining complete. Total time: {hhmm}")
+
     if WANDB and not DEBUG_MODE:
         wandb.log({"time_cost": hhmm})
-        run.finish()    
-        
+        run.finish()
 
