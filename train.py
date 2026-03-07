@@ -31,7 +31,7 @@ import time
 from logger import get_logger
 
 DEBUG_MODE = False
-WANDB = True
+WANDB = False
 LOGGER = None
 BRANCH = None
 
@@ -66,6 +66,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+
+    # Log resolution
+    train_cams = scene.getTrainCameras()
+    test_cams = scene.getTestCameras()
+    train_res = f"{train_cams[0].image_width}x{train_cams[0].image_height}" if train_cams else "N/A"
+    test_res = f"{test_cams[0].image_width}x{test_cams[0].image_height}" if test_cams else "N/A"
+    res_msg = f"Resolution: train={train_res} ({len(train_cams)} views), test={test_res} ({len(test_cams)} views)"
+    LOGGER.info(res_msg)
+    print(res_msg)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -249,6 +258,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 os.makedirs(pth_path, exist_ok = True)
                 torch.save((gaussians.capture(), iteration), pth_path + "/chkpnt" + str(iteration) + ".pth")
 
+    return scene
+
 def prepare_output_and_logger(args):
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
@@ -362,14 +373,20 @@ if __name__ == "__main__":
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     
     global_tic = time.time()
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    scene = training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     total_cost = time.time() - global_tic
     hours = int(total_cost // 3600)
     minutes = int((total_cost % 3600) // 60)
     hhmm = f"{hours:02d}:{minutes:02d}"
-    LOGGER.info(f"Training complete. Total time: {hhmm}")
-    print(f"\nTraining complete. Total time: {hhmm}")
+
+    train_cams = scene.getTrainCameras()
+    test_cams = scene.getTestCameras()
+    train_res = f"{train_cams[0].image_width}x{train_cams[0].image_height}" if train_cams else "N/A"
+    test_res = f"{test_cams[0].image_width}x{test_cams[0].image_height}" if test_cams else "N/A"
+    summary = f"Training complete. Total time: {hhmm} | Resolution: train={train_res}, test={test_res}"
+    LOGGER.info(summary)
+    print(f"\n{summary}")
 
     if WANDB and not DEBUG_MODE:
         wandb.log({"time_cost": hhmm})
