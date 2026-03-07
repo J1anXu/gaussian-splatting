@@ -1,6 +1,8 @@
+import math
 import torch
 import numpy as np
 from tqdm import tqdm
+import config
 
 
 # ============================================
@@ -133,6 +135,11 @@ def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05)
     dtype  = xyz.dtype
     N = xyz.shape[0]
 
+    num_blocks = config.NUM_BLOCKS
+    assert num_blocks > 0 and (num_blocks & (num_blocks - 1)) == 0, \
+        f"NUM_BLOCKS must be a power of 2, got {num_blocks}"
+    max_depth = int(math.log2(num_blocks))
+
     all_idx = torch.arange(N, device=device)
 
     # ---------- 1) 根 AABB（可 inflate 防漏） ----------
@@ -147,9 +154,9 @@ def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05)
     block_bounds  = []
     block_indices = []
 
-    # ---------- 2) KD-tree recursion: 3 levels => 8 leaves ----------
+    # ---------- 2) KD-tree recursion: max_depth levels => num_blocks leaves ----------
     def recurse(idx: torch.Tensor, bmin: torch.Tensor, bmax: torch.Tensor, depth: int):
-        if depth == 3:
+        if depth == max_depth:
             # 叶子：bounds 必须是 “由 split 平面传下来的” bmin/bmax，保证不重叠
             # 为了和你原 octant 一样“不会进 autograd / 可视化安全”，这里用 torch.tensor 重建
             min_xyz = torch.tensor([bmin[0], bmin[1], bmin[2]], device=device, dtype=dtype)

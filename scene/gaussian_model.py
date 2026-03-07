@@ -871,8 +871,15 @@ class GaussianModel:
         self.subset_mode_1 = True
         
     def deactivate_subset(self):
-        self.subset_mode_1 = False    
-        self.subset_mode_2 = False  
+        self.subset_mode_1 = False
+        self.subset_mode_2 = False
+        # 主动释放 GPU 张量，避免显存积压
+        self._xyz_gpu = None
+        self._features_dc_gpu = None
+        self._features_rest_gpu = None
+        self._scaling_gpu = None
+        self._rotation_gpu = None
+        self._opacity_gpu = None
 
     def move_and_activate_subset(self, requires_grad=True):
         """

@@ -54,13 +54,6 @@ except:
     SPARSE_ADAM_AVAILABLE = False
 
 
-debug_image_name = "_DSC8680.JPG"
-IMG_PATH_IN_DEBUG = None
-
-def print_config():
-    for k, v in vars(config).items():
-        if not k.startswith("__"):
-            print(f"{k} = {v}")
 
 def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
@@ -71,15 +64,6 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     prepare_output_and_logger(dataset)
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
-    
-    if DEBUG_MODE:
-    # TODO
-        scene.gaussians.load_ply("output/mip360/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply")
-        progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
-        opt.iterations = 1050
-        return scene, 1000, 0, 0, progress_bar, None
-    
-    
     initial_gaussians.training_setup(opt)
     
     if checkpoint:
@@ -99,7 +83,6 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     first_iter += 1
     
     colors_bg = None
-    
     
     for iteration in range(first_iter, opt.iterations + 1):
         # partition
@@ -156,9 +139,6 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
         
-
-        if viewpoint_cam.image_name == debug_image_name:
-            torchvision.utils.save_image(image, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
@@ -223,55 +203,66 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
 
 def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
-    scene, old_iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg = res
     
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
+
+    if config.KEEP_TRAINING:
+        trained_ply_path = res.get("trained_ply_path")
+        first_iter = res.get("first_iter")
+        initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
+        scene = Scene(dataset, initial_gaussians, on_cpu=True)
+        initial_gaussians.load_ply(trained_ply_path)
+        initial_gaussians.training_setup(opt)
+        ema_loss_for_log = 0.0
+        ema_Ll1depth_for_log = 0.0
+        progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    else:
+        scene, first_iter, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg = res
+
+    if DEBUG_MODE:
+        opt.iterations = 1050
+
+        
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
-
-    first_iter = old_iteration
     
     gaussians: GaussianModel = scene.gaussians
-    
-    # generate a initialized gs copy
     gaussians = gaussians.dump_to_cpu()
     
     # partition
     gaussians.build_split_indices()
+
+    ## blocks visualization
     # gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
     
     submodel_list: List[GaussianModel] = gaussians.split()
-    
+
+    LOGGER.info(f"Partitioned into {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
+    print(f"Partitioned into {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
+
     for submodel in submodel_list:
         submodel.training_setup(opt, device = "cpu")
-        # Initialize packed pinned buffer after parameters are created.
-        # This packs all 6 per-Gaussian attributes into a single [N, D]
-        # contiguous pinned tensor for efficient subset H2D transfer.
         submodel.pack_to_buffer()
 
     cpu_full_proj_transform_dict = {}
     for cam in scene.getTrainCameras():
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
 
-    # Cache frustum culling results per (submodel_id, camera) once positions are frozen
-    # (no densification after densify_until_iter, so results are stable)
-    # frustum_cache[submodel_id][image_name] = visible_indices (CPU tensor)
+
     frustum_cache: dict = {}
 
     # Pipeline: async D2H grad copies + deferred opt steps
     tracer = TraceManager(enabled=config.TIMELINE)
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer)
 
-    if DEBUG_MODE:
-        opt.iterations = 1050
-
     time_start = time.time()
+
     for iteration in range(first_iter, opt.iterations + 1):
         tracer.step(iteration)
 
@@ -311,9 +302,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                             if model._xyz.is_cuda:
                                 model.visible_indices = frustum_culling_idx(model._xyz, viewpoint_cam.full_proj_transform)
                             else:
-                                # Use pre-extracted contiguous [N,3] xyz cache.
-                                # Positions change ~1e-6 relative per iter and culling
-                                # has inflate_ratio=0.3 margin -> stale by 1 iter is safe.
                                 xyz_for_cull = model._xyz_contig if hasattr(model, '_xyz_contig') else model._xyz
                                 model.visible_indices = frustum_culling_idx(xyz_for_cull, cpu_full_proj_transform_dict[cam_name])
                             if use_fc_cache:
@@ -423,15 +411,17 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with tracer.gpu_span("backward", block_id=submodel_id):
                 loss.backward()
 
-            tracer.counter("pts", {"visible": visible_pts,
-                                   "total": sum(s._xyz.shape[0] for s in submodel_list)})
+            tracer.counter("pts", {"visible": visible_pts, "total": sum(s._xyz.shape[0] for s in submodel_list)})
 
             grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
 
         # flush the last submodel's pending work
         grad_sync.flush_last()
-                        
-                        
+
+        # reserved 超过 allocated 太多时才清缓存，避免频繁清导致性能下降
+        if torch.cuda.memory_reserved() > torch.cuda.memory_allocated() + config.GPU_CACHE_THRESHOLD_GB * 1024**3:
+            torch.cuda.empty_cache()
+
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -439,14 +429,14 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             if iteration % 10 == 0:
                 pts_total = sum(submodel._xyz.shape[0] for submodel in submodel_list)
+                gpu_mem_reserved_gb = torch.cuda.memory_reserved() / 1024**3
+                gpu_mem_allocated_gb = torch.cuda.memory_allocated() / 1024**3
                 # progress bar
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total, "blocks": len(submodel_list), "alloc_gb": f"{gpu_mem_allocated_gb:.2f}", "rsv_gb": f"{gpu_mem_reserved_gb:.2f}"})
                 progress_bar.update(10)
                 if iteration == opt.iterations:
                     progress_bar.close()
-                
-                gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
+                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total, "blocks": len(submodel_list), "gpu_reserved_gb": gpu_mem_reserved_gb, "gpu_allocated_gb": gpu_mem_allocated_gb}
 
                 # logging
                 LOGGER.info(log)
@@ -463,9 +453,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             for submodel_id, submodel in enumerate(submodel_list):
                 submodel.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{submodel_id}.ply"), include_block=False)
                 
-        # # save debug image
-        # if viewpoint_cam.image_name == debug_image_name:
-        #     torchvision.utils.save_image(composed_img, os.path.join(IMG_PATH_IN_DEBUG, f"{iteration}" + ".png"))
+
     time_end = time.time()
     cost = time_end - time_start
     print(f"Phase 2 training time cost: [{cost:.2f}] seconds.")
@@ -538,7 +526,6 @@ if __name__ == "__main__":
     
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
     DEBUG_MODE = sys.gettrace() is not None
-    print_config()
     
     if WANDB and not DEBUG_MODE:
         wandb.login()
@@ -552,12 +539,23 @@ if __name__ == "__main__":
         
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     os.makedirs("debug", exist_ok=True)
-    IMG_PATH_IN_DEBUG = os.path.join("/data/jian/debug", BRANCH, SCENE_NAME, debug_image_name)
-    os.makedirs(IMG_PATH_IN_DEBUG, exist_ok=True)
-    time_start = time.time()
-    res = training_phase_1(lp.extract(args), op.extract(args), pp.extract(args), args.start_checkpoint, args.debug_from)
-    
-    training_phase_2(lp.extract(args), op.extract(args), pp.extract(args), args.save_iterations, args.debug_from, res)
-    time_end = time.time()
-    cost = time_end - time_start
-    print(f"\nTraining complete. Total time: {cost}")
+
+    trained_ply_path = "/data2/jian/output/mip360/baseline/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply"
+
+    opt = op.extract(args)
+    if config.KEEP_TRAINING:
+        print("KEEP_TRAINING MODEL, LOADING FROM CHECKPOINT: ", trained_ply_path)
+        res = {
+            "first_iter": 30000,
+            "trained_ply_path": trained_ply_path,
+        }
+        opt.iterations = 60000
+    else:
+        res = training_phase_1(lp.extract(args), opt, pp.extract(args), args.start_checkpoint, args.debug_from)
+
+
+
+
+    training_phase_2(lp.extract(args), opt, pp.extract(args), args.save_iterations, args.debug_from, res)
+
+

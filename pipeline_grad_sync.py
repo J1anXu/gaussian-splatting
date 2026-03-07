@@ -75,8 +75,7 @@ class PipelinedGradSync:
 
         return cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad
 
-    def _make_pending(self, sm, sm_id, idx, gpu_grads,
-                       sub_vf, sub_radii, vpt_grad, iteration):
+    def _make_pending(self, sm, sm_id, idx, gpu_grads, sub_vf, sub_radii, vpt_grad, iteration):
         """Build a closure that performs densify + packed_sparse_adam for one submodel."""
         opt, dataset, scene = self.opt, self.dataset, self.scene
         tm = self.tracer
@@ -87,10 +86,9 @@ class PipelinedGradSync:
                 if iteration < opt.iterations:
                     with tm.span("assemble_grad", tid=TID_ADAM, block_id=sm_id):
                         grad_subset = sm._assemble_grad_subset(gpu_grads)
-                    with tm.span("packed_sparse_adam", tid=TID_ADAM, block_id=sm_id,
-                                 n_vis=idx.shape[0]):
+                    with tm.span("packed_sparse_adam", tid=TID_ADAM, block_id=sm_id, n_vis=idx.shape[0]):
                         sm.packed_sparse_adam_step(idx, grad_subset, iteration)
-
+                
                 if iteration < opt.densify_until_iter:
                     with tm.span("densify_stats", tid=TID_PIPELINE, block_id=sm_id):
                         gvpg = torch.zeros(sm.get_xyz.shape[0], 3, device="cpu", requires_grad=False)
@@ -124,8 +122,7 @@ class PipelinedGradSync:
             self._pending_opt()
             self._pending_opt = None
 
-    def flush_and_prepare(self, submodel: GaussianModel, submodel_id: int,
-                          render_pkg: dict, sub_viewspace_point_tensor, iteration: int):
+    def flush_and_prepare(self, submodel: GaussianModel, submodel_id: int, render_pkg: dict, sub_viewspace_point_tensor, iteration: int):
         """Kick async D2H, flush previous pending, sync, and prepare new pending.
 
         This is the single method the main loop calls per submodel.
@@ -144,10 +141,7 @@ class PipelinedGradSync:
         self.flush()
 
         # 4. prepare deferred work for current submodel (no sync needed here)
-        self._pending_opt = self._make_pending(
-            submodel, submodel_id, cur_idx, cur_gpu_grads,
-            pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration,
-        )
+        self._pending_opt = self._make_pending(submodel, submodel_id, cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration)
 
     def flush_last(self):
         """Flush the last submodel's pending work after the loop ends."""
