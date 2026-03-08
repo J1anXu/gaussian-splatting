@@ -40,6 +40,95 @@ for s in truck train drjohnson playroom; do
 done
 
 # ============================================================
+# Progress display
+# ============================================================
+
+STATUS_DIR="/tmp/run4090_status_$$"
+mkdir -p "$STATUS_DIR"
+touch "$STATUS_DIR/.running"
+
+# gpu_status <gpu> <scene> <phase> — 写状态文件, monitor 读取刷新
+gpu_status() {
+    local gpu=$1 scene=$2 phase=$3
+    echo "${scene}|${phase}|$(date +%s)" > "$STATUS_DIR/gpu_$gpu"
+}
+
+# 标记一个场景完成
+mark_done() {
+    touch "$STATUS_DIR/done_$1"
+}
+
+# 标记一个场景失败
+mark_fail() {
+    touch "$STATUS_DIR/fail_$1"
+}
+
+# monitor_progress — 后台循环刷新进度条
+monitor_progress() {
+    local num_gpus=${#GPUS[@]}
+    local total=$1
+    local lines=$((num_gpus + 3))
+
+    # 预留行
+    for ((i = 0; i < lines; i++)); do printf "\n"; done
+
+    while [ -f "$STATUS_DIR/.running" ]; do
+        printf "\033[${lines}A"
+
+        local done_count=$(ls "$STATUS_DIR"/done_* 2>/dev/null | wc -l)
+        local fail_count=$(ls "$STATUS_DIR"/fail_* 2>/dev/null | wc -l)
+
+        # 总进度条
+        local pct=0
+        if [ "$total" -gt 0 ]; then
+            pct=$(( (done_count + fail_count) * 100 / total ))
+        fi
+        local bar_len=30
+        local filled=$(( pct * bar_len / 100 ))
+        local empty=$(( bar_len - filled ))
+        local bar=$(printf '%0.s#' $(seq 1 $filled 2>/dev/null))$(printf '%0.s-' $(seq 1 $empty 2>/dev/null))
+
+        local fail_info=""
+        if [ "$fail_count" -gt 0 ]; then
+            fail_info="  ${fail_count} failed"
+        fi
+
+        printf "\033[2K  \033[1mTotal: [%s] %d/%d scenes  %d%%%s\033[0m\n" "$bar" "$((done_count + fail_count))" "$total" "$pct" "$fail_info"
+        printf "\033[2K\n"
+
+        for g in "${GPUS[@]}"; do
+            local st
+            st=$(cat "$STATUS_DIR/gpu_$g" 2>/dev/null || echo "")
+            if [ -z "$st" ]; then
+                printf "\033[2K  \033[36mGPU %s\033[0m | \033[90mwaiting...\033[0m\n" "$g"
+            else
+                IFS='|' read -r scene phase start_ts <<< "$st"
+                local now=$(date +%s)
+                local elapsed=$((now - start_ts))
+                local mins=$((elapsed / 60))
+                local secs=$((elapsed % 60))
+
+                local phase_icon phase_color
+                case "$phase" in
+                    train)   phase_icon=">>>" ; phase_color="\033[33m" ;;
+                    render)  phase_icon=">>>" ; phase_color="\033[35m" ;;
+                    metrics) phase_icon=">>>" ; phase_color="\033[34m" ;;
+                    done)    phase_icon="OK " ; phase_color="\033[32m" ;;
+                    FAIL)    phase_icon="ERR" ; phase_color="\033[31m" ;;
+                    *)       phase_icon="..." ; phase_color="\033[90m" ;;
+                esac
+
+                printf "\033[2K  \033[36mGPU %s\033[0m | %-14s ${phase_color}[%s] %-8s\033[0m  %dm%02ds\n" \
+                    "$g" "$scene" "$phase_icon" "$phase" "$mins" "$secs"
+            fi
+        done
+
+        printf "\033[2K\n"
+        sleep 1
+    done
+}
+
+# ============================================================
 # Helpers
 # ============================================================
 
@@ -54,7 +143,6 @@ find_dataset_for_scene() {
 }
 
 # run_scene <dataset> <scene> <gpu>
-# 在指定 GPU 上跑完整 train -> render -> metrics 流程
 run_scene() {
     local dataset="$1"
     local scene="$2"
@@ -67,24 +155,15 @@ run_scene() {
     local log_dir="${model_path}/logs"
 
     if [ ! -d "$data_dir" ]; then
-        echo "[SKIP] Data not found: $data_dir"
+        gpu_status "$gpu" "$scene" "FAIL"
+        mark_fail "$scene"
         return
     fi
 
     mkdir -p "$log_dir"
 
-    echo "============================================================"
-    echo "[${dataset}/${scene}] train -> render -> metrics"
-    echo "  GPU:        $gpu"
-    echo "  data_dir:   $data_dir"
-    echo "  model_path: $model_path"
-    echo "  images:     $img_flag"
-    echo "  branch:     $GIT_BRANCH"
-    echo "  time:       $(date)"
-    echo "============================================================"
-
     # 1. Train
-    echo "  [1/3] Training $scene on GPU $gpu ..."
+    gpu_status "$gpu" "$scene" "train"
     CUDA_VISIBLE_DEVICES=$gpu python "$SCRIPT_DIR/train.py" \
         -s "$data_dir" \
         --model_path "$model_path" \
@@ -94,7 +173,7 @@ run_scene() {
         > "$log_dir/train.log" 2>&1
 
     # 2. Render
-    echo "  [2/3] Rendering $scene on GPU $gpu ..."
+    gpu_status "$gpu" "$scene" "render"
     CUDA_VISIBLE_DEVICES=$gpu python "$SCRIPT_DIR/render.py" \
         -m "$model_path" \
         --git_branch "$GIT_BRANCH" \
@@ -102,45 +181,39 @@ run_scene() {
         > "$log_dir/render.log" 2>&1
 
     # 3. Metrics
-    echo "  [3/3] Metrics $scene on GPU $gpu ..."
+    gpu_status "$gpu" "$scene" "metrics"
     CUDA_VISIBLE_DEVICES=$gpu python "$SCRIPT_DIR/metrics.py" \
         -m "$model_path" \
         --git_branch "$GIT_BRANCH" \
         > "$log_dir/metrics.log" 2>&1
 
-    echo "[DONE] ${dataset}/${scene} on GPU $gpu"
-    echo ""
+    gpu_status "$gpu" "$scene" "done"
+    mark_done "$scene"
 }
 
 # ============================================================
-# Parallel scheduler: 每个 scene 独占一张卡，超出卡数则排队等待
+# Parallel scheduler
 # ============================================================
 
-# GPU 槽位管理 (FIFO)
 GPU_FIFO="/tmp/gpu_fifo_$$"
 mkfifo "$GPU_FIFO"
 exec 3<>"$GPU_FIFO"
 rm -f "$GPU_FIFO"
 
-# 将所有可用 GPU 写入 FIFO 作为令牌
 for g in "${GPUS[@]}"; do
     echo "$g" >&3
 done
 
-# dispatch_scene <dataset> <scene>
-# 从 FIFO 取一张空闲卡，后台跑完后归还令牌
 dispatch_scene() {
     local dataset="$1"
     local scene="$2"
 
-    # 阻塞等待空闲 GPU
     local gpu
     read -r gpu <&3
 
     (
+        trap 'echo "$gpu" >&3' EXIT
         run_scene "$dataset" "$scene" "$gpu"
-        # 归还 GPU 令牌
-        echo "$gpu" >&3
     ) &
 }
 
@@ -162,7 +235,6 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --gpus)
-            # 覆盖默认卡列表, e.g. --gpus "0 1 2 3"
             IFS=' ' read -ra GPUS <<< "$2"
             shift 2
             ;;
@@ -172,15 +244,13 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             echo "Usage:"
-            echo "  ./run.sh --scene bicycle                       # Single scene"
-            echo "  ./run.sh --scene bicycle/garden/room            # Multiple scenes"
-            echo "  ./run.sh --dataset mip360                       # One dataset"
-            echo "  ./run.sh --dataset mip360/tandt                 # Multiple datasets"
-            echo "  ./run.sh                                        # All datasets"
-            echo "  ./run.sh --gpus '0 1 2 3' --dataset mip360     # Specify GPUs"
-            echo "  ./run.sh --branch my_branch --scene room        # Override branch"
-            echo ""
-            echo "Scenes auto-dispatch to available GPUs. If scenes > GPUs, extras queue."
+            echo "  ./run4090.sh --scene bicycle                       # Single scene"
+            echo "  ./run4090.sh --scene bicycle/garden/room            # Multiple scenes"
+            echo "  ./run4090.sh --dataset mip360                       # One dataset"
+            echo "  ./run4090.sh --dataset mip360/tandt                 # Multiple datasets"
+            echo "  ./run4090.sh                                        # All datasets"
+            echo "  ./run4090.sh --gpus '0 1 2 3' --dataset mip360     # Specify GPUs"
+            echo "  ./run4090.sh --branch my_branch --scene room        # Override branch"
             echo ""
             echo "Available datasets and scenes:"
             for ds in mip360 tandt deepblending; do
@@ -196,7 +266,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 # 重新填充 FIFO（如果 --gpus 覆盖了默认值）
-# 先清空旧令牌，再写入新的
 exec 3>&-
 GPU_FIFO="/tmp/gpu_fifo_$$"
 mkfifo "$GPU_FIFO"
@@ -214,59 +283,71 @@ NUM_GPUS=${#GPUS[@]}
 
 cd "$SCRIPT_DIR"
 
-echo "Project: $PROJECT_NAME"
-echo "Branch:  $GIT_BRANCH"
-echo "GPUs:    ${GPUS[*]} (${NUM_GPUS} available)"
-echo ""
+# 收集所有要跑的场景，计算总数
+ALL_SCENE_LIST=()
 
 if [ -n "$SCENE" ]; then
-    # --scene bicycle 或 --scene bicycle/garden/room
-    IFS='/' read -ra SCENE_LIST <<< "$SCENE"
-    echo "Scenes: ${SCENE_LIST[*]}"
-    echo ""
-    for s in "${SCENE_LIST[@]}"; do
-        ds=$(find_dataset_for_scene "$s")
-        if [ -z "$ds" ]; then
-            echo "Error: scene '$s' not found in any dataset"
-            exit 1
-        fi
-        dispatch_scene "$ds" "$s"
-    done
-    wait
-    echo "All scenes completed!"
-
+    IFS='/' read -ra ALL_SCENE_LIST <<< "$SCENE"
 elif [ -n "$DATASET" ]; then
-    # --dataset mip360 或 --dataset mip360/tandt
     IFS='/' read -ra DS_LIST <<< "$DATASET"
-    echo "Datasets: ${DS_LIST[*]}"
-    echo ""
     for ds in "${DS_LIST[@]}"; do
         scenes="${DATASET_SCENES[$ds]}"
         if [ -z "$scenes" ]; then
             echo "Error: dataset '$ds' not found"
-            echo "Available: mip360 tandt deepblending"
             exit 1
         fi
-        echo "  ${ds}: ${scenes}"
-        for scene in $scenes; do
-            dispatch_scene "$ds" "$scene"
+        for s in $scenes; do
+            ALL_SCENE_LIST+=("$s")
         done
     done
-    wait
-    echo "All datasets completed!"
-
 else
-    # 全部 dataset 全部 scene
-    echo "Running ALL datasets"
-    echo ""
     for ds in mip360 tandt deepblending; do
-        for scene in ${DATASET_SCENES[$ds]}; do
-            dispatch_scene "$ds" "$scene"
+        for s in ${DATASET_SCENES[$ds]}; do
+            ALL_SCENE_LIST+=("$s")
         done
     done
-    wait
-    echo "All datasets completed!"
 fi
 
-# 关闭 FIFO
-exec 3>&-
+TOTAL_SCENES=${#ALL_SCENE_LIST[@]}
+
+echo "Project: $PROJECT_NAME"
+echo "Branch:  $GIT_BRANCH"
+echo "GPUs:    ${GPUS[*]} (${NUM_GPUS} available)"
+echo "Scenes:  ${ALL_SCENE_LIST[*]} (${TOTAL_SCENES} total)"
+echo ""
+
+# 启动后台 monitor
+monitor_progress "$TOTAL_SCENES" &
+MONITOR_PID=$!
+
+# cleanup on exit
+cleanup() {
+    rm -f "$STATUS_DIR/.running"
+    sleep 1.5  # 让 monitor 最后刷新一次
+    kill "$MONITOR_PID" 2>/dev/null
+    wait "$MONITOR_PID" 2>/dev/null
+    rm -rf "$STATUS_DIR"
+    exec 3>&-
+}
+trap cleanup EXIT
+
+# dispatch 所有场景
+for s in "${ALL_SCENE_LIST[@]}"; do
+    ds=$(find_dataset_for_scene "$s")
+    if [ -z "$ds" ]; then
+        echo "Error: scene '$s' not found in any dataset"
+        exit 1
+    fi
+    dispatch_scene "$ds" "$s"
+done
+
+wait $(jobs -rp | grep -v "$MONITOR_PID")
+
+# 停止 monitor
+rm -f "$STATUS_DIR/.running"
+sleep 1.5
+kill "$MONITOR_PID" 2>/dev/null
+wait "$MONITOR_PID" 2>/dev/null
+
+echo ""
+echo "All ${TOTAL_SCENES} scenes completed!"
