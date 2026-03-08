@@ -555,7 +555,7 @@ if __name__ == "__main__":
         assert trained_ply_path is not None, "KEEP_TRAINING=True but --trained_ply_path not provided"
         print("KEEP_TRAINING MODEL, LOADING FROM CHECKPOINT: ", trained_ply_path)
         res = {
-            "first_iter": 30000,
+            "first_iter": 30001,
             "trained_ply_path": trained_ply_path,
         }
         opt.iterations = 60000
