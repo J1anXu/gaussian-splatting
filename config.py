@@ -20,7 +20,7 @@ FRUSTUM_CULLING_ENABLED = True  # 是否启用视锥剔除
 FRUSTUM_CULLING_CACHE_ENABLED = True  # 是否缓存视锥剔除结果（densify_until_iter后位置不再增长，可复用）
 
 SPLIT_SIZE = 1000000
-NUM_BLOCKS = 16  # 分块数量，必须是2的幂次（如 2, 4, 8, 16）
+NUM_BLOCKS = 8  # 分块数量，必须是2的幂次（如 2, 4, 8, 16）
 
 GPU_CACHE_THRESHOLD_GB = 1.0  # reserved 超过 allocated 多少 GB 时清理 CUDA 缓存
 

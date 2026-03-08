@@ -158,9 +158,10 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
             
+            progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
+            progress_bar.update(1)
+
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
-                progress_bar.update(10)
                 gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
                 log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
                 LOGGER.info(log)
@@ -512,6 +513,7 @@ if __name__ == "__main__":
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 15_000, 30_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--trained_ply_path", type=str, default=None)
     parser.add_argument('--git_branch', type=str, default=None)
 
     args = parser.parse_args(sys.argv[1:])
@@ -545,10 +547,11 @@ if __name__ == "__main__":
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     os.makedirs("debug", exist_ok=True)
 
-    trained_ply_path = "/data2/jian/output/mip360/baseline/bicycle/point_cloud/baseline/iteration_30000/point_cloud.ply"
+    trained_ply_path = args.trained_ply_path
 
     opt = op.extract(args)
     if config.KEEP_TRAINING:
+        assert trained_ply_path is not None, "KEEP_TRAINING=True but --trained_ply_path not provided"
         print("KEEP_TRAINING MODEL, LOADING FROM CHECKPOINT: ", trained_ply_path)
         res = {
             "first_iter": 30000,
