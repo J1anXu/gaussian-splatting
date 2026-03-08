@@ -428,20 +428,21 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
 
+            pts_total = sum(submodel._xyz.shape[0] for submodel in submodel_list)
+            vis_M = visible_pts / 1e6
+            pts_M = pts_total / 1e6
+            vis_pct = visible_pts / pts_total * 100 if pts_total > 0 else 0
+            alloc = torch.cuda.memory_allocated() / 1024**3
+            rsv = torch.cuda.memory_reserved() / 1024**3
+            elapsed = time.time() - time_start
+            its = (iteration - first_iter) / elapsed if elapsed > 0 else 0
+            # progress bar - every iter
+            progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": len(submodel_list), "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "it/s": f"{its:.1f}"})
+            progress_bar.update(1)
+            if iteration == opt.iterations:
+                progress_bar.close()
+
             if iteration % 10 == 0:
-                pts_total = sum(submodel._xyz.shape[0] for submodel in submodel_list)
-                vis_M = visible_pts / 1e6
-                pts_M = pts_total / 1e6
-                vis_pct = visible_pts / pts_total * 100 if pts_total > 0 else 0
-                alloc = torch.cuda.memory_allocated() / 1024**3
-                rsv = torch.cuda.memory_reserved() / 1024**3
-                elapsed = time.time() - time_start
-                its = (iteration - first_iter) / elapsed if elapsed > 0 else 0
-                # progress bar
-                progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": len(submodel_list), "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "it/s": f"{its:.1f}"})
-                progress_bar.update(10)
-                if iteration == opt.iterations:
-                    progress_bar.close()
                 log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "it/s": round(its, 1)}
 
                 # logging
