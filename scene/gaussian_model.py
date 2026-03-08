@@ -752,6 +752,7 @@ class GaussianModel:
             setattr(self, name, nn.Parameter(view, requires_grad=True))
 
         self._packed_staging = torch.empty(N, D, dtype=torch.float32, pin_memory=True)
+        self._packed_staging_fp16 = torch.empty(N, D, dtype=torch.float16, pin_memory=True)
 
         if self.optimizer is not None:
             self._migrate_optimizer_state(old_params)
@@ -937,14 +938,17 @@ class GaussianModel:
         n = idx.shape[0]
 
         # Gather into pre-allocated pinned staging buffer.
-        # Using out= parameter ensures the result is written directly into
-        # page-locked memory without intermediate allocation.
         staging = self._packed_staging[:n]
         torch.index_select(self._packed, 0, idx, out=staging)
 
-        # Single DMA transfer: pinned -> GPU. non_blocking=True is effective
-        # only when the source tensor is in pinned (page-locked) memory.
-        gpu_packed = staging.cuda(non_blocking=True)
+        # H2D transfer: pinned -> GPU
+        if config.HALF_H2D:
+            # FP32→FP16 on CPU, transfer FP16 (half bandwidth), FP16→FP32 on GPU
+            staging_fp16 = self._packed_staging_fp16[:n]
+            staging_fp16.copy_(staging)  # CPU-side FP32→FP16 conversion
+            gpu_packed = staging_fp16.cuda(non_blocking=True).float()
+        else:
+            gpu_packed = staging.cuda(non_blocking=True)
 
         # Unpack on GPU.
         # requires_grad=True: clone() is mandatory — views share storage, causing

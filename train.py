@@ -218,9 +218,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
-    if config.KEEP_TRAINING:
-        trained_ply_path = res.get("trained_ply_path")
-        first_iter = res.get("first_iter")
+    if "trained_ply_path" in res:
+        trained_ply_path = res["trained_ply_path"]
+        first_iter = res["first_iter"]
         initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
         scene = Scene(dataset, initial_gaussians, on_cpu=True)
         initial_gaussians.load_ply(trained_ply_path)
@@ -267,9 +267,28 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer)
 
     time_start = time.time()
+    bench_start_time = None
+    bench_start_iter = None
 
     for iteration in range(first_iter, opt.iterations + 1):
         tracer.step(iteration)
+
+        # Benchmark: start timer after warmup
+        if config.BENCHMARK and bench_start_time is None and (iteration - first_iter) >= config.BENCH_WARMUP:
+            torch.cuda.synchronize()
+            bench_start_time = time.time()
+            bench_start_iter = iteration
+
+        # Benchmark: stop after measuring BENCH_ITERS
+        if config.BENCHMARK and bench_start_time is not None and (iteration - bench_start_iter) >= config.BENCH_ITERS:
+            torch.cuda.synchronize()
+            bench_elapsed = time.time() - bench_start_time
+            bench_its = config.BENCH_ITERS / bench_elapsed
+            print(f"\n{'='*60}")
+            print(f"BENCHMARK: {config.BENCH_ITERS} iters in {bench_elapsed:.2f}s | {bench_its:.2f} it/s | {bench_elapsed/config.BENCH_ITERS*1000:.1f} ms/it")
+            print(f"  warmup={config.BENCH_WARMUP}, range=[{bench_start_iter}, {bench_start_iter + config.BENCH_ITERS})")
+            print(f"{'='*60}\n")
+            break
 
         for submodel in submodel_list:
             submodel.update_learning_rate(iteration)
@@ -559,8 +578,7 @@ if __name__ == "__main__":
     trained_ply_path = args.trained_ply_path
 
     opt = op.extract(args)
-    if config.KEEP_TRAINING:
-        assert trained_ply_path is not None, "KEEP_TRAINING=True but --trained_ply_path not provided"
+    if trained_ply_path is not None:
         print("KEEP_TRAINING MODEL, LOADING FROM CHECKPOINT: ", trained_ply_path)
         res = {
             "first_iter": 30001,

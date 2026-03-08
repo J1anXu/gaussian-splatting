@@ -4,17 +4,6 @@ LIMITED_DATASIZE = True
 DATASIZE_LIMIT = 5
 
 
-CAL_RES_2_CPU = False  #把计算结果移动到CPU节省内存 (能节省内存但是移动非常慢)
-
-SAVE_BLOCK_IMG = True  # 是否保存 block 渲染结果
-DRAW_BOX = False # 是否在 block 渲染结果上绘制点云和block的边界框
-
-
-SAVE_RGB_LAYERS = False  # 是否保存合并前的各个RGB图层
-SAVE_LAYERS_CONTRIBUTION = False  # 是否保存每个block对各个图层的贡献
-SAVE_DEPTH_LIST = False  # 是否保存各个block的深度图
-
-
 PARTITIONING_ENABLED = True  # 是否启用分块处理
 FRUSTUM_CULLING_ENABLED = True  # 是否启用视锥剔除
 FRUSTUM_CULLING_USE_GSPLAT = True  # True=gsplat CUDA kernel（考虑Gaussian范围），False=自己实现的中心点culling
@@ -25,8 +14,13 @@ NUM_BLOCKS = 8  # 分块数量，必须是2的幂次（如 2, 4, 8, 16）
 
 GPU_CACHE_THRESHOLD_GB = 1.0  # reserved 超过 allocated 多少 GB 时清理 CUDA 缓存
 
-HALF = False        # 半精度梯度拷贝加速
+HALF_H2D = True    # FP16 H2D transfer（CPU→GPU，SH等属性传输减半带宽）
+HALF_D2H = True    # FP16 D2H transfer（GPU→CPU，梯度传输减半带宽）
+
+
 TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
 
-
-KEEP_TRAINING = True  # 是否继续之前的训练（从上次保存的点云继续训练）
+# 测速：跳过前 BENCH_WARMUP 次 iteration，测后 BENCH_ITERS 次的平均耗时
+BENCHMARK = True
+BENCH_WARMUP = 200   # 预热迭代数（跳过 densification、JIT 编译等不稳定阶段）
+BENCH_ITERS = 500    # 计时迭代数
