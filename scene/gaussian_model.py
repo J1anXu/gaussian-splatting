@@ -765,6 +765,27 @@ class GaussianModel:
         s, e, _ = slices['_xyz']
         self._xyz_contig = packed[:, s:e].contiguous()  # [N,3], stride=(3,1)
 
+        self.sync_geometry_to_gpu()
+
+    def sync_geometry_to_gpu(self):
+        """Copy geometry params (_xyz, _scaling, _rotation) to GPU for frustum culling.
+
+        These are lightweight copies (~40 bytes/point) used only for
+        GPU-based frustum culling. The authoritative params remain in the
+        CPU packed buffer and are updated by packed_sparse_adam.
+        """
+        if hasattr(self, '_xyz_contig'):
+            xyz_src = self._xyz_contig
+        else:
+            xyz_src = self._xyz.data.reshape(-1, 3).contiguous()
+
+        scaling_src = self._scaling.data.reshape(-1, 3).contiguous()
+        rotation_src = self._rotation.data.reshape(-1, 4).contiguous()
+
+        self._xyz_cuda = xyz_src.cuda(non_blocking=True)
+        self._scaling_cuda = scaling_src.cuda(non_blocking=True)
+        self._rotation_cuda = rotation_src.cuda(non_blocking=True)
+
     def _migrate_optimizer_state(self, old_params):
         """Migrate optimizer state from old params to new view-params after pack_to_buffer."""
         for group in self.optimizer.param_groups:

@@ -24,7 +24,7 @@ from utils.general_utils import get_git_branch, safe_state, get_expon_lr_func, g
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
-from utils.camera_utils import frustum_culling, frustum_culling_idx
+from utils.camera_utils import frustum_culling, frustum_culling_idx, frustum_culling_gpu_ext
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
@@ -112,9 +112,18 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         
-        # frustum culling (cuda)
+        # frustum culling
         if config.FRUSTUM_CULLING_ENABLED:
-            initial_gaussians.visible_indices = frustum_culling_idx(initial_gaussians._xyz, viewpoint_cam.full_proj_transform)
+            if config.FRUSTUM_CULLING_USE_GSPLAT:
+                initial_gaussians.visible_indices = frustum_culling_gpu_ext(
+                    initial_gaussians._xyz, initial_gaussians._scaling,
+                    initial_gaussians._rotation,
+                    viewpoint_cam.world_view_transform,
+                    viewpoint_cam.FoVx, viewpoint_cam.FoVy,
+                    viewpoint_cam.image_width, viewpoint_cam.image_height)
+            else:
+                initial_gaussians.visible_indices = frustum_culling_idx(
+                    initial_gaussians._xyz, viewpoint_cam.full_proj_transform)
         else:
             initial_gaussians.visible_indices = torch.arange(initial_gaussians._xyz.shape[0], device="cuda")
         
@@ -251,11 +260,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         submodel.training_setup(opt, device = "cpu")
         submodel.pack_to_buffer()
 
-    cpu_full_proj_transform_dict = {}
-    for cam in scene.getTrainCameras():
-        cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
-
-
     frustum_cache: dict = {}
 
     # Pipeline: async D2H grad copies + deferred opt steps
@@ -299,16 +303,20 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         cached = use_fc_cache and submodel_id in frustum_cache and cam_name in frustum_cache[submodel_id]
                         if cached:
                             model.visible_indices = frustum_cache[submodel_id][cam_name]
+                        elif config.FRUSTUM_CULLING_USE_GSPLAT:
+                            model.visible_indices = frustum_culling_gpu_ext(
+                                model._xyz_cuda, model._scaling_cuda,
+                                model._rotation_cuda,
+                                viewpoint_cam.world_view_transform,
+                                viewpoint_cam.FoVx, viewpoint_cam.FoVy,
+                                viewpoint_cam.image_width, viewpoint_cam.image_height)
                         else:
-                            if model._xyz.is_cuda:
-                                model.visible_indices = frustum_culling_idx(model._xyz, viewpoint_cam.full_proj_transform)
-                            else:
-                                xyz_for_cull = model._xyz_contig if hasattr(model, '_xyz_contig') else model._xyz
-                                model.visible_indices = frustum_culling_idx(xyz_for_cull, cpu_full_proj_transform_dict[cam_name])
-                            if use_fc_cache:
-                                if submodel_id not in frustum_cache:
-                                    frustum_cache[submodel_id] = {}
-                                frustum_cache[submodel_id][cam_name] = model.visible_indices
+                            xyz_for_cull = model._xyz_contig if hasattr(model, '_xyz_contig') else model._xyz
+                            model.visible_indices = frustum_culling_idx(xyz_for_cull, viewpoint_cam.full_proj_transform.cpu())
+                        if not cached and use_fc_cache:
+                            if submodel_id not in frustum_cache:
+                                frustum_cache[submodel_id] = {}
+                            frustum_cache[submodel_id][cam_name] = model.visible_indices
             else:
                 for model in submodel_list:
                     model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")

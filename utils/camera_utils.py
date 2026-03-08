@@ -14,10 +14,12 @@ import numpy as np
 from utils.graphics_utils import fov2focal
 from PIL import Image
 import cv2
+import math
 import torch
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
+from gsplat.rendering import frustum_culling_gpu as _gsplat_frustum_culling
 
 # C+OMP frustum culling (5x faster than PyTorch on CPU).
 # Provided by diff_gaussian_rasterization_wenqi_tam._C (pip install -e submodules/diff-gaussian-rasterization)
@@ -340,3 +342,42 @@ def frustum_culling_idx(xyz: torch.Tensor, full_proj_transform: torch.Tensor, in
             return _FC_EXT.frustum_culling_idx(xyz_.contiguous(), M.contiguous(), inflate_ratio)
         mask = _frustum_culling_pytorch(xyz_, M, inflate_ratio)
         return torch.nonzero(mask, as_tuple=True)[0]
+
+
+def frustum_culling_gpu_ext(
+    xyz: torch.Tensor,
+    scales: torch.Tensor,
+    quats: torch.Tensor,
+    world_view_transform: torch.Tensor,
+    fov_x: float,
+    fov_y: float,
+    width: int,
+    height: int,
+) -> torch.Tensor:
+    """GPU frustum culling via gsplat CUDA kernel (considers full Gaussian extent).
+
+    Args:
+        xyz: [N, 3] Gaussian centers (GPU)
+        scales: [N, 3] Gaussian log-scales (GPU, pre-exp)
+        quats: [N, 4] Gaussian quaternions (GPU)
+        world_view_transform: [4, 4] row-vector convention
+        fov_x, fov_y: field of view in radians
+        width, height: image dimensions
+
+    Returns:
+        indices: [M] int64 tensor of visible Gaussian indices
+    """
+    with torch.no_grad():
+        # Convert row-vector convention → column-vector convention for gsplat
+        viewmat = world_view_transform.T.unsqueeze(0)  # [1, 4, 4]
+
+        # Build intrinsic matrix from FoV
+        fx = fov2focal(fov_x, width)
+        fy = fov2focal(fov_y, height)
+        K = torch.tensor([[fx, 0, width / 2.0],
+                          [0, fy, height / 2.0],
+                          [0, 0, 1.0]], device=xyz.device, dtype=xyz.dtype).unsqueeze(0)  # [1, 3, 3]
+
+        return _gsplat_frustum_culling(
+            xyz, quats, torch.exp(scales),
+            viewmat, K, width, height)
