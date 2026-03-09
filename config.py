@@ -24,6 +24,8 @@ NUM_BLOCKS = 8  # 分块数量，必须是2的幂次（如 2, 4, 8, 16）
 
 GPU_CACHE_THRESHOLD_GB = 1.0  # reserved 超过 allocated 多少 GB 时清理 CUDA 缓存
 
+MERGE_CHUNKED = False  # True: 分块merge(省显存), False: 全图merge(快但多用~90MB)
+
 HALF = False        # 半精度梯度拷贝加速
 TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
 
