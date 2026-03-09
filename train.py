@@ -251,6 +251,17 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         submodel.training_setup(opt, device = "cpu")
         submodel.pack_to_buffer()
 
+    # Shared double-buffer for nograd ping-pong (only 2 buffers total, ~472MB)
+    _pack_D = submodel_list[0]._pack_D
+    _db_max = 1_000_000
+    _db_bufs = [
+        torch.empty(_db_max, _pack_D, dtype=torch.float32, device="cuda")
+        for _ in range(2)
+    ]
+
+    # Dedicated CUDA stream for H2D transfers (overlaps with render on default stream)
+    h2d_stream = torch.cuda.Stream()
+
     cpu_full_proj_transform_dict = {}
     for cam in scene.getTrainCameras():
         cpu_full_proj_transform_dict[cam.image_name] = cam.full_proj_transform.detach().cpu()
@@ -331,28 +342,55 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         visible_pts = 0
 
         with torch.no_grad():
-            # Phase 1: 连续发射所有 block 的 render，不做任何 CPU 同步
+            # Phase 1: double-buffer ping-pong — H2D on h2d_stream overlaps render on default stream
+            # Filter visible blocks and pre-gather all staging data (CPU-bound, no GPU)
+            visible_blocks = []
             for submodel_id, submodel in enumerate(submodel_list):
-
                 if submodel.visible_indices.shape[0] == 0:
                     continue
-
                 visible_pts += submodel.visible_indices.shape[0]
+                with tracer.span("pre_gather", block_id=submodel_id,
+                                 n_vis=submodel.visible_indices.shape[0]):
+                    submodel.pre_gather()
+                visible_blocks.append((submodel_id, submodel))
 
-                with tracer.transfer_span("h2d_nograd", block_id=submodel_id,
-                                          n_vis=submodel.visible_indices.shape[0]):
-                    submodel.move_and_activate_subset(requires_grad = False)
+            if visible_blocks:
+                # Kick first block's DMA on transfer stream (buf 0)
+                first_id, first_sm = visible_blocks[0]
+                with tracer.transfer_span("h2d_nograd", block_id=first_id,
+                                          stream=h2d_stream):
+                    first_sm.kick_h2d(_db_bufs, 0, stream=h2d_stream)
+                h2d_done = torch.cuda.Event()
+                h2d_stream.record_event(h2d_done)
 
-                with tracer.gpu_span("render_nograd", block_id=submodel_id):
-                    render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                for i, (submodel_id, submodel) in enumerate(visible_blocks):
+                    cur_buf = i % 2
 
-                submodel.deactivate_subset()
+                    # Wait for current block's H2D to finish on default stream
+                    torch.cuda.current_stream().wait_event(h2d_done)
+                    submodel.activate_from_buffer(_db_bufs, cur_buf)
 
-                image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
-                all_rendered.append(image)
-                all_depth.append(depth)
-                all_alpha.append(alphaLeft)
-                all_submodel_ids.append(submodel_id)
+                    # Kick next block's DMA while GPU renders current block
+                    if i + 1 < len(visible_blocks):
+                        next_id, next_sm = visible_blocks[i + 1]
+                        next_buf = (i + 1) % 2
+                        with tracer.transfer_span("h2d_nograd", block_id=next_id,
+                                                  stream=h2d_stream):
+                            next_sm.kick_h2d(_db_bufs, next_buf, stream=h2d_stream)
+                        h2d_done = torch.cuda.Event()
+                        h2d_stream.record_event(h2d_done)
+
+                    # Render current block on default stream
+                    with tracer.gpu_span("render_nograd", block_id=submodel_id):
+                        render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+
+                    submodel.deactivate_subset_views_only()
+
+                    image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
+                    all_rendered.append(image)
+                    all_depth.append(depth)
+                    all_alpha.append(alphaLeft)
+                    all_submodel_ids.append(submodel_id)
 
             # Phase 2: 所有 render 完成后，批量过滤低贡献 block（此时 .item() 不会阻塞 render pipeline）
             for image, depth, alphaLeft, submodel_id in zip(all_rendered, all_depth, all_alpha, all_submodel_ids):

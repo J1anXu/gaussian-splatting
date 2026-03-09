@@ -11,6 +11,7 @@
 
 import config
 import torch
+from contextlib import nullcontext
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
@@ -968,8 +969,75 @@ class GaussianModel:
 
         self.subset_mode_2 = True
 
+    # ── Double-buffer for nograd H2D / render overlap ──────────────────────
 
-        
+    def pre_gather(self):
+        """CPU-side gather of visible indices into pinned staging buffer.
+
+        Call this before kick_h2d(). Separating gather from DMA allows
+        pre-gathering all blocks before the render loop so that the
+        CPU gather cost does not block the GPU pipeline.
+        """
+        idx = self.visible_indices
+        if not torch.is_tensor(idx):
+            idx = torch.tensor(idx, dtype=torch.long)
+        idx = idx.to("cpu")
+        n = idx.shape[0]
+        staging = self._packed_staging[:n]
+        torch.index_select(self._packed, 0, idx, out=staging)
+        self._db_n = n
+
+    def kick_h2d(self, db_bufs, buf_idx: int, stream: torch.cuda.Stream = None):
+        """Async H2D copy from pre-gathered staging to shared GPU double-buffer.
+
+        Must call pre_gather() first. The copy is dispatched on `stream`.
+        """
+        n = self._db_n
+        staging = self._packed_staging[:n]
+        dst = db_bufs[buf_idx][:n]
+        ctx = torch.cuda.stream(stream) if stream is not None else nullcontext()
+        with ctx:
+            dst.copy_(staging, non_blocking=True)
+        self._db_active_buf = buf_idx
+
+    def activate_from_buffer(self, db_bufs, buf_idx: int = None):
+        """Unpack the shared double-buffer slot into _xyz_gpu etc. (nograd views, no clone).
+
+        Call this on the default stream after ensuring the H2D on the transfer
+        stream has completed (via event.wait or stream.synchronize).
+        """
+        if buf_idx is None:
+            buf_idx = self._db_active_buf
+        n = self._db_n
+        gpu_packed = db_bufs[buf_idx][:n]
+        slices = self._pack_slices
+
+        s, e, _ = slices['_xyz']
+        self._xyz_gpu = gpu_packed[:, s:e]
+        s, e, reshape = slices['_features_dc']
+        self._features_dc_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2])
+        s, e, reshape = slices['_features_rest']
+        self._features_rest_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2])
+        s, e, _ = slices['_scaling']
+        self._scaling_gpu = gpu_packed[:, s:e]
+        s, e, _ = slices['_rotation']
+        self._rotation_gpu = gpu_packed[:, s:e]
+        s, e, _ = slices['_opacity']
+        self._opacity_gpu = gpu_packed[:, s:e]
+
+        self.subset_mode_2 = True
+
+    def deactivate_subset_views_only(self):
+        """Release GPU attribute views but keep double-buffer memory alive."""
+        self.subset_mode_1 = False
+        self.subset_mode_2 = False
+        self._xyz_gpu = None
+        self._features_dc_gpu = None
+        self._features_rest_gpu = None
+        self._scaling_gpu = None
+        self._rotation_gpu = None
+        self._opacity_gpu = None
+
     def build_split_indices(self):
         block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz)
         self.block_bounds = block_bounds

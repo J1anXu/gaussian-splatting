@@ -82,20 +82,24 @@ class TraceManager:
     # ── GPU span (accurate device-side timing) ────────────────────────────────
 
     @contextmanager
-    def gpu_span(self, name: str, block_id=None, tid: int = 1, **kwargs):
+    def gpu_span(self, name: str, block_id=None, tid: int = 1,
+                 stream=None, **kwargs):
         """
         Wraps CUDA work with torch.cuda.Event markers.
         GPU start time and duration are resolved in flush_gpu_events() using
         the per-iteration reference event for accurate positioning.
+
+        Args:
+            stream: CUDA stream to record events on. None = current stream.
         """
         if not self._active or not _TORCH_AVAILABLE:
             yield
             return
         e_start = torch.cuda.Event(enable_timing=True)
         e_end   = torch.cuda.Event(enable_timing=True)
-        e_start.record()
+        e_start.record(stream)
         yield
-        e_end.record()
+        e_end.record(stream)
         meta = {"name": name, "pid": PID_GPU, "tid": tid,
                 "block_id": block_id, "iter": self._iter,
                 "ref_event": self._ref_event, "ref_cpu_ts": self._ref_cpu_ts,
@@ -106,19 +110,23 @@ class TraceManager:
     # ── Transfer span (H2D / D2H, accurate device-side timing) ───────────────
 
     @contextmanager
-    def transfer_span(self, name: str, block_id=None, tid: int = 1, **kwargs):
+    def transfer_span(self, name: str, block_id=None, tid: int = 1,
+                      stream=None, **kwargs):
         """
         Like gpu_span but placed on the PID_TRANSFER lane.
         Use for H2D / D2H data transfers.
+
+        Args:
+            stream: CUDA stream to record events on. None = current stream.
         """
         if not self._active or not _TORCH_AVAILABLE:
             yield
             return
         e_start = torch.cuda.Event(enable_timing=True)
         e_end   = torch.cuda.Event(enable_timing=True)
-        e_start.record()
+        e_start.record(stream)
         yield
-        e_end.record()
+        e_end.record(stream)
         meta = {"name": name, "pid": PID_TRANSFER, "tid": tid,
                 "block_id": block_id, "iter": self._iter,
                 "ref_event": self._ref_event, "ref_cpu_ts": self._ref_cpu_ts,
