@@ -487,8 +487,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     if bench_its_list:
         n = len(bench_its_list)
         p = sys.__stdout__.write
+        import socket
+        hostname = socket.gethostname()
         p(f"\n{'='*50}\n")
-        p(f"  Benchmark (iter {BENCH_START}-{BENCH_END}, {n} samples)\n")
+        p(f"  [{hostname}] Benchmark (iter {BENCH_START}-{BENCH_END}, {n} samples)\n")
         p(f"{'='*50}\n")
         p(f"  平均 it/s:           {sum(bench_its_list)/n:.2f}\n")
         p(f"  平均 visible pts:    {sum(bench_vis_list)/n/1e6:.2f}M\n")
