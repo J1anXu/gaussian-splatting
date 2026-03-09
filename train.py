@@ -209,7 +209,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
-    if config.KEEP_TRAINING:
+    if isinstance(res, dict):
         trained_ply_path = res.get("trained_ply_path")
         first_iter = res.get("first_iter")
         initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
@@ -261,6 +261,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     # Pipeline: async D2H grad copies + deferred opt steps
     # Timeline tracing: only sample last 5 iters to avoid CUDA event overhead
     TRACE_START = 681
+    TRACE_END = 700
     tracer = TraceManager(enabled=False)
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer)
 
@@ -485,6 +486,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 submodel.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{submodel_id}.ply"), include_block=False)
                 
 
+        if iteration == TRACE_END:
+             tracer.enabled = False
+             
     time_end = time.time()
     cost = time_end - time_start
     print(f"Phase 2 training time cost: [{cost:.2f}] seconds.")
@@ -556,6 +560,7 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--trained_ply_path", type=str, default=None)
     parser.add_argument('--git_branch', type=str, default=None)
+    parser.add_argument('--keep_training', action='store_true', default=False)
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -591,8 +596,8 @@ if __name__ == "__main__":
     trained_ply_path = args.trained_ply_path
 
     opt = op.extract(args)
-    if config.KEEP_TRAINING:
-        assert trained_ply_path is not None, "KEEP_TRAINING=True but --trained_ply_path not provided"
+    if args.keep_training:
+        assert trained_ply_path is not None, "--keep_training requires --trained_ply_path"
         print("KEEP_TRAINING MODEL, LOADING FROM CHECKPOINT: ", trained_ply_path)
         res = {
             "first_iter": 1,

@@ -22,6 +22,7 @@ python "$SCRIPT_DIR/train.py" \
     --model_path "$MODEL_PATH" \
     --git_branch "$BRANCH" \
     --trained_ply_path "$TRAINED_PLY_PATH" \
+    --keep_training \
     --eval \
     -i "$IMG_FLAG"
 
