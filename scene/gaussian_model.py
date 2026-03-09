@@ -968,6 +968,66 @@ class GaussianModel:
 
         self.subset_mode_2 = True
 
+    def pre_gather(self):
+        """CPU-side gather of visible indices into pinned staging buffer.
+
+        Call this before kick_h2d_and_activate(). Separates the CPU-bound
+        gather from the GPU-bound DMA so they can be independently timed
+        or overlapped with other work.
+        """
+        idx = self.visible_indices
+        if not torch.is_tensor(idx):
+            idx = torch.tensor(idx, dtype=torch.long)
+        idx = idx.to("cpu")
+        n = idx.shape[0]
+        staging = self._packed_staging[:n]
+        torch.index_select(self._packed, 0, idx, out=staging)
+        self._db_n = n
+
+    def kick_h2d_and_activate(self, requires_grad=True):
+        """H2D transfer + GPU unpack. Assumes pre_gather() was already called."""
+        n = self._db_n
+        staging = self._packed_staging[:n]
+        gpu_packed = staging.cuda(non_blocking=True)
+
+        slices = self._pack_slices
+        if requires_grad:
+            s, e, _ = slices['_xyz']
+            self._xyz_gpu = gpu_packed[:, s:e].clone()
+            s, e, reshape = slices['_features_dc']
+            self._features_dc_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2]).clone()
+            s, e, reshape = slices['_features_rest']
+            self._features_rest_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2]).clone()
+            s, e, _ = slices['_scaling']
+            self._scaling_gpu = gpu_packed[:, s:e].clone()
+            s, e, _ = slices['_rotation']
+            self._rotation_gpu = gpu_packed[:, s:e].clone()
+            s, e, _ = slices['_opacity']
+            self._opacity_gpu = gpu_packed[:, s:e].clone()
+        else:
+            s, e, _ = slices['_xyz']
+            self._xyz_gpu = gpu_packed[:, s:e]
+            s, e, reshape = slices['_features_dc']
+            self._features_dc_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2])
+            s, e, reshape = slices['_features_rest']
+            self._features_rest_gpu = gpu_packed[:, s:e].reshape(n, reshape[1], reshape[2])
+            s, e, _ = slices['_scaling']
+            self._scaling_gpu = gpu_packed[:, s:e]
+            s, e, _ = slices['_rotation']
+            self._rotation_gpu = gpu_packed[:, s:e]
+            s, e, _ = slices['_opacity']
+            self._opacity_gpu = gpu_packed[:, s:e]
+
+        if requires_grad:
+            self._xyz_gpu.requires_grad_(True)
+            self._features_dc_gpu.requires_grad_(True)
+            self._features_rest_gpu.requires_grad_(True)
+            self._scaling_gpu.requires_grad_(True)
+            self._rotation_gpu.requires_grad_(True)
+            self._opacity_gpu.requires_grad_(True)
+
+        self.subset_mode_2 = True
+
 
         
     def build_split_indices(self):

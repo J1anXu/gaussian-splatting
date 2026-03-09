@@ -339,9 +339,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 visible_pts += submodel.visible_indices.shape[0]
 
-                with tracer.transfer_span("h2d_nograd", block_id=submodel_id,
-                                          n_vis=submodel.visible_indices.shape[0]):
-                    submodel.move_and_activate_subset(requires_grad = False)
+                with tracer.span("gather_nograd", block_id=submodel_id,
+                                 n_vis=submodel.visible_indices.shape[0]):
+                    submodel.pre_gather()
+                with tracer.transfer_span("h2d_nograd", block_id=submodel_id):
+                    submodel.kick_h2d_and_activate(requires_grad=False)
 
                 with tracer.gpu_span("render_nograd", block_id=submodel_id):
                     render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -386,9 +388,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
 
-            with tracer.transfer_span("h2d_grad", block_id=submodel_id,
-                                      n_vis=submodel.visible_indices.shape[0]):
-                submodel.move_and_activate_subset(requires_grad = True)
+            with tracer.span("gather_grad", block_id=submodel_id,
+                             n_vis=submodel.visible_indices.shape[0]):
+                submodel.pre_gather()
+            with tracer.transfer_span("h2d_grad", block_id=submodel_id):
+                submodel.kick_h2d_and_activate(requires_grad=True)
 
             with tracer.gpu_span("render_grad", block_id=submodel_id):
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
