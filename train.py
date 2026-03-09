@@ -273,6 +273,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     bench_alloc_list = []
     bench_rsv_list = []
     bench_vis_list = []
+    bench_loss_list = []
 
     for iteration in range(first_iter, opt.iterations + 1):
         if iteration == TRACE_START:
@@ -486,6 +487,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 bench_alloc_list.append(alloc)
                 bench_rsv_list.append(rsv)
                 bench_vis_list.append(visible_pts)
+                bench_loss_list.append(ema_loss_for_log)
 
             # progress bar - every iter
             progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": len(submodel_list), "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "it/s": f"{its:.1f}"})
@@ -523,12 +525,15 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     if bench_its_list:
         n = len(bench_its_list)
         p = sys.__stdout__.write
-        import socket
+        import socket, subprocess
         hostname = socket.gethostname()
+        commit_id = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
         p(f"\n{'='*50}\n")
         p(f"  [{hostname}] Benchmark (iter {BENCH_START}-{BENCH_END}, {n} samples)\n")
+        p(f"  Branch: {BRANCH}  Commit: {commit_id}\n")
         p(f"{'='*50}\n")
         p(f"  平均 it/s:           {sum(bench_its_list)/n:.2f}\n")
+        p(f"  平均 loss:           {sum(bench_loss_list)/n:.6f}\n")
         p(f"  平均 visible pts:    {sum(bench_vis_list)/n/1e6:.2f}M\n")
         p(f"  平均占用 mem (alloc): {sum(bench_alloc_list)/n:.2f} GB\n")
         p(f"  平均分配 mem (rsv):   {sum(bench_rsv_list)/n:.2f} GB\n")
