@@ -1,5 +1,6 @@
 import torch
 from typing import List, Optional, Callable
+from concurrent.futures import ThreadPoolExecutor, Future
 from scene import GaussianModel
 from TimerManager import TraceManager, TID_PIPELINE, TID_ADAM, PID_CPU
 
@@ -19,6 +20,8 @@ class PipelinedGradSync:
         self.tracer = tracer or TraceManager(enabled=False)
 
         self._pending_opt: Optional[Callable] = None
+        self._adam_executor = ThreadPoolExecutor(max_workers=1)
+        self._adam_future: Optional[Future] = None
 
         # Pre-allocate pinned buffers for each submodel
         for submodel in submodel_list:
@@ -111,16 +114,22 @@ class PipelinedGradSync:
 
         return _do
 
+    def _wait_adam(self):
+        """等待上一个 adam 线程完成。"""
+        if self._adam_future is not None:
+            self._adam_future.result()
+            self._adam_future = None
+
     def flush(self):
-        """Execute the previous submodel's deferred scatter_grad + densify + opt_step.
-        Syncs D2H before reading pinned grad buffers.
-        """
+        """Sync D2H, then提交 adam 到后台线程（不等完成）。"""
         if self._pending_opt is not None:
             with self.tracer.span("cuda_synchronize", tid=TID_PIPELINE):
                 torch.cuda.synchronize()
             self.tracer.flush_gpu_events()
-            self._pending_opt()
+            # 提交到线程池，主线程继续走
+            fn = self._pending_opt
             self._pending_opt = None
+            self._adam_future = self._adam_executor.submit(fn)
 
     def flush_and_prepare(self, submodel: GaussianModel, submodel_id: int, render_pkg: dict, sub_viewspace_point_tensor, iteration: int):
         """Kick async D2H, flush previous pending, sync, and prepare new pending.
@@ -136,13 +145,16 @@ class PipelinedGradSync:
         # 2. deactivate current submodel's GPU subset
         submodel.deactivate_subset()
 
-        # 3. flush PREVIOUS submodel's opt step (sync happens inside flush())
-        #    while current submodel's D2H is still in flight -> maximizes overlap
+        # 3. 等上一个 adam 线程完成（adam 写 _packed，gather 读 _packed，必须保证顺序）
+        self._wait_adam()
+
+        # 4. flush PREVIOUS submodel's D2H sync + 提交 adam 到线程
         self.flush()
 
-        # 4. prepare deferred work for current submodel (no sync needed here)
+        # 5. prepare deferred work for current submodel
         self._pending_opt = self._make_pending(submodel, submodel_id, cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration)
 
     def flush_last(self):
         """Flush the last submodel's pending work after the loop ends."""
         self.flush()
+        self._wait_adam()
