@@ -34,6 +34,7 @@ import config
 import diff_gaussian_rasterization_wenqi_tam
 from TimerManager import  TraceManager, TID_MAIN, PID_CPU
 from pipeline_grad_sync import PipelinedGradSync
+from concurrent.futures import ThreadPoolExecutor
 SCENE_NAME = None
 BRANCH = None
 DEBUG_MODE = False
@@ -261,6 +262,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
     # Dedicated CUDA stream for H2D transfers (overlaps with render on default stream)
     h2d_stream = torch.cuda.Stream()
+    # Thread pool for parallel CPU gather (index_select releases GIL)
+    gather_pool = ThreadPoolExecutor(max_workers=len(submodel_list))
 
     cpu_full_proj_transform_dict = {}
     for cam in scene.getTrainCameras():
@@ -343,16 +346,17 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
         with torch.no_grad():
             # Phase 1: double-buffer ping-pong — H2D on h2d_stream overlaps render on default stream
-            # Filter visible blocks and pre-gather all staging data (CPU-bound, no GPU)
+            # Filter visible blocks and pre-gather all staging data in parallel (CPU-bound, no GPU)
             visible_blocks = []
             for submodel_id, submodel in enumerate(submodel_list):
                 if submodel.visible_indices.shape[0] == 0:
                     continue
                 visible_pts += submodel.visible_indices.shape[0]
-                with tracer.span("pre_gather", block_id=submodel_id,
-                                 n_vis=submodel.visible_indices.shape[0]):
-                    submodel.pre_gather()
                 visible_blocks.append((submodel_id, submodel))
+
+            with tracer.span("pre_gather_all", n_blocks=len(visible_blocks)):
+                list(gather_pool.map(lambda sm: sm.pre_gather(),
+                                     [sm for _, sm in visible_blocks]))
 
             if visible_blocks:
                 # Kick first block's DMA on transfer stream (buf 0)
