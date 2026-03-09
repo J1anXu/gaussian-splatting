@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ============================================================
-# Benchmark: 加载固定点云 → Phase 2 分块训练 → 统计 iter 300-700
+# Benchmark (4090): 加载固定点云 → Phase 2 分块训练 → 统计 iter 301-700
 # ============================================================
 
-TRAINED_PLY_PATH="/home/jian/Partitioned-3dgs/output/mip360/bicycle/point_cloud/iteration_30000/point_cloud.ply"
-DATA_PATH="/data2/jian/data/mip360/bicycle"
-MODEL_PATH="/home/jian/gaussian-splatting/output/benchmark"
+TRAINED_PLY_PATH="/home/jian/output/mip360/baseline/bicycle/point_cloud.ply"   
+DATA_PATH="/home/jian/data/mip360/bicycle"         
+MODEL_PATH="/home/jian/output"      
 GPU=0
 BRANCH="cpu_timer_fast"
 IMG_FLAG="images_4"
@@ -25,5 +25,4 @@ python "$SCRIPT_DIR/train.py" \
     --eval \
     -i "$IMG_FLAG"
 
-# 清理残留进程
-pkill -f "train.py.*benchmark" 2>/dev/null
+pkill -f "train.py.*$MODEL_PATH" 2>/dev/null

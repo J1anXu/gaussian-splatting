@@ -264,6 +264,13 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
     time_start = time.time()
 
+    # benchmark 统计收集 (iter 301-700, 共 400 个)
+    BENCH_START, BENCH_END = 301, 700
+    bench_its_list = []
+    bench_alloc_list = []
+    bench_rsv_list = []
+    bench_vis_list = []
+
     for iteration in range(first_iter, opt.iterations + 1):
         tracer.step(iteration)
 
@@ -436,6 +443,13 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             rsv = torch.cuda.memory_reserved() / 1024**3
             elapsed = time.time() - time_start
             its = (iteration - first_iter) / elapsed if elapsed > 0 else 0
+            # benchmark 收集
+            if BENCH_START <= iteration <= BENCH_END:
+                bench_its_list.append(its)
+                bench_alloc_list.append(alloc)
+                bench_rsv_list.append(rsv)
+                bench_vis_list.append(visible_pts)
+
             # progress bar - every iter
             progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": len(submodel_list), "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "it/s": f"{its:.1f}"})
             progress_bar.update(1)
@@ -464,6 +478,20 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     time_end = time.time()
     cost = time_end - time_start
     print(f"Phase 2 training time cost: [{cost:.2f}] seconds.")
+
+    # 打印 benchmark 统计（用 sys.__stdout__ 避免时间戳）
+    if bench_its_list:
+        n = len(bench_its_list)
+        p = sys.__stdout__.write
+        p(f"\n{'='*50}\n")
+        p(f"  Benchmark (iter {BENCH_START}-{BENCH_END}, {n} samples)\n")
+        p(f"{'='*50}\n")
+        p(f"  平均 it/s:           {sum(bench_its_list)/n:.2f}\n")
+        p(f"  平均 visible pts:    {sum(bench_vis_list)/n:.0f}\n")
+        p(f"  平均占用 mem (alloc): {sum(bench_alloc_list)/n:.2f} GB\n")
+        p(f"  平均分配 mem (rsv):   {sum(bench_rsv_list)/n:.2f} GB\n")
+        p(f"  总平均 mem:           {(sum(bench_alloc_list)+sum(bench_rsv_list))/(2*n):.2f} GB\n")
+        p(f"{'='*50}\n")
 
     if config.TIMELINE:
         os.makedirs("timeline", exist_ok=True)
@@ -555,10 +583,10 @@ if __name__ == "__main__":
         assert trained_ply_path is not None, "KEEP_TRAINING=True but --trained_ply_path not provided"
         print("KEEP_TRAINING MODEL, LOADING FROM CHECKPOINT: ", trained_ply_path)
         res = {
-            "first_iter": 30001,
+            "first_iter": 1,
             "trained_ply_path": trained_ply_path,
         }
-        opt.iterations = 60000
+        opt.iterations = 700
     else:
         res = training_phase_1(lp.extract(args), opt, pp.extract(args), args.start_checkpoint, args.debug_from)
 

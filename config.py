@@ -28,4 +28,4 @@ HALF = False        # 半精度梯度拷贝加速
 TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
 
 
-KEEP_TRAINING = False  # 是否继续之前的训练（从上次保存的点云继续训练）
+KEEP_TRAINING = True  # 是否继续之前的训练（从上次保存的点云继续训练）
