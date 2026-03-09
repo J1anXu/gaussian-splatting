@@ -882,48 +882,27 @@ class GaussianModel:
         self._rotation_gpu = None
         self._opacity_gpu = None
 
-    def move_and_activate_subset(self, requires_grad=True):
+    def move_and_activate_subset(self, requires_grad=True, skip_gather=False):
         """
         Gather visible Gaussian attributes from CPU and transfer to GPU.
 
-        This method replaces the naive per-attribute implementation that performed
-        six independent fancy-indexing + H2D transfers. The optimized pipeline:
-
-        1. **Single gather**: torch.index_select on the packed [N, D] pinned buffer
-           writes directly into a pre-allocated pinned staging buffer, avoiding
-           memory allocation and ensuring the result resides in page-locked memory.
-
-        2. **Single H2D transfer**: The pinned staging buffer is transferred to GPU
-           via .cuda(non_blocking=True). Because the source is pinned, PyTorch
-           dispatches a true cudaMemcpyAsync on the current stream, enabling
-           overlap with concurrent CPU work or GPU computation on other streams.
-
-        3. **GPU-side unpack**: The packed GPU tensor is sliced and cloned into
-           individual attribute tensors. clone() is mandatory — views would share
-           the same storage, causing gradient accumulation conflicts during
-           backward (scatter_grad expects independent .grad tensors per attribute).
-           GPU-internal memcpy (clone) is negligible (~0.1ms) compared to the
-           PCIe transfer savings.
-
-        Complexity reduction:
-            - CPU indexing: 6 random-access passes -> 1 pass (better cache locality)
-            - PCIe transactions: 6 -> 1 (reduced launch overhead)
-            - Memory allocation: 6 temporary tensors -> 0 (pre-allocated staging)
+        Args:
+            requires_grad: If True, clone GPU tensors and enable gradients.
+            skip_gather: If True, skip CPU gather (assumes pre_gather() was
+                         already called). Saves ~2-5ms per block.
         """
-        idx = self.visible_indices
-        if not torch.is_tensor(idx):
-            idx = torch.tensor(idx, dtype=torch.long)
-        idx = idx.to("cpu")
-        n = idx.shape[0]
+        if not skip_gather:
+            idx = self.visible_indices
+            if not torch.is_tensor(idx):
+                idx = torch.tensor(idx, dtype=torch.long)
+            idx = idx.to("cpu")
+            n = idx.shape[0]
+            staging = self._packed_staging[:n]
+            torch.index_select(self._packed, 0, idx, out=staging)
+        else:
+            n = self._db_n  # set by pre_gather()
 
-        # Gather into pre-allocated pinned staging buffer.
-        # Using out= parameter ensures the result is written directly into
-        # page-locked memory without intermediate allocation.
         staging = self._packed_staging[:n]
-        torch.index_select(self._packed, 0, idx, out=staging)
-
-        # Single DMA transfer: pinned -> GPU. non_blocking=True is effective
-        # only when the source tensor is in pinned (page-locked) memory.
         gpu_packed = staging.cuda(non_blocking=True)
 
         # Unpack on GPU.

@@ -409,15 +409,22 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 visible_submodel_id_list.append(submodel_id)
 
 
-        # execute merge
+        # execute merge (GPU) while CPU pre-gathers grad data in parallel
         with torch.no_grad():
             with tracer.gpu_span("merge_opt_kid"):
                 merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
-            
+
+            # CPU pre-gather for grad phase runs while merge GPU kernels execute
+            # (merge is async on default stream, CPU returns immediately)
+            grad_blocks = [(sid, submodel_list[sid]) for sid in visible_submodel_id_list]
+            with tracer.span("pre_gather_grad", n_blocks=len(grad_blocks)):
+                list(gather_pool.map(lambda sm: sm.pre_gather(),
+                                     [sm for _, sm in grad_blocks]))
+
         C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
         prefix_T = merge_res["prefix_T"]
         block_rank = merge_res["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
-        K, C, H, W = C_sorted.shape   
+        K, C, H, W = C_sorted.shape
         colors_bg = merge_res["bg_rgb"]
         diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
 
@@ -430,7 +437,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             with tracer.transfer_span("h2d_grad", block_id=submodel_id,
                                       n_vis=submodel.visible_indices.shape[0]):
-                submodel.move_and_activate_subset(requires_grad = True)
+                submodel.move_and_activate_subset(requires_grad=True, skip_gather=True)
 
             with tracer.gpu_span("render_grad", block_id=submodel_id):
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
