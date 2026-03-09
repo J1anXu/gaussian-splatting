@@ -272,8 +272,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     bench_vis_list = []
 
     for iteration in range(first_iter, opt.iterations + 1):
-        # 最后两个 iter 启用 timeline 用于分析流水线
-        if iteration >= opt.iterations - 1:
+        # 最后 5 个 iter 启用 timeline 用于分析流水线
+        if iteration >= opt.iterations - 4:
             tracer.enabled = True
             tracer._active = True
         tracer.step(iteration)
