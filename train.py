@@ -259,7 +259,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     frustum_cache: dict = {}
 
     # Pipeline: async D2H grad copies + deferred opt steps
-    tracer = TraceManager(enabled=True)
+    # Timeline tracing: only sample last 5 iters to avoid CUDA event overhead
+    TRACE_START = 681
+    tracer = TraceManager(enabled=False)
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer)
 
     time_start = time.time()
@@ -272,6 +274,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     bench_vis_list = []
 
     for iteration in range(first_iter, opt.iterations + 1):
+        if iteration == TRACE_START:
+            tracer.enabled = True
         tracer.step(iteration)
 
         for submodel in submodel_list:
@@ -335,8 +339,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 visible_pts += submodel.visible_indices.shape[0]
 
-                with tracer.span("h2d_nograd", tid=TID_MAIN, block_id=submodel_id,
-                                 n_vis=submodel.visible_indices.shape[0]):
+                with tracer.transfer_span("h2d_nograd", block_id=submodel_id,
+                                          n_vis=submodel.visible_indices.shape[0]):
                     submodel.move_and_activate_subset(requires_grad = False)
 
                 with tracer.gpu_span("render_nograd", block_id=submodel_id):
@@ -382,8 +386,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
             submodel: GaussianModel = submodel_list[submodel_id]
 
-            with tracer.span("h2d_grad", tid=TID_MAIN, block_id=submodel_id,
-                             n_vis=submodel.visible_indices.shape[0]):
+            with tracer.transfer_span("h2d_grad", block_id=submodel_id,
+                                      n_vis=submodel.visible_indices.shape[0]):
                 submodel.move_and_activate_subset(requires_grad = True)
 
             with tracer.gpu_span("render_grad", block_id=submodel_id):

@@ -49,7 +49,7 @@ class PipelinedGradSync:
         Returns captured state tuple for deferred work.
         """
         tm = self.tracer
-        with tm.span("d2h_kick", tid=TID_PIPELINE, block_id=submodel_id):
+        with tm.transfer_span("d2h_kick", block_id=submodel_id):
             cur_idx = submodel.visible_indices.to("cpu")
             n_vis = cur_idx.shape[0]
             cur_gpu_grads = []

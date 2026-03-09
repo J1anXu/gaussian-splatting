@@ -17,7 +17,7 @@ export CUDA_VISIBLE_DEVICES=$GPU
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-python "$SCRIPT_DIR/train.py" \
+python3 "$SCRIPT_DIR/train.py" \
     -s "$DATA_PATH" \
     --model_path "$MODEL_PATH" \
     --git_branch "$BRANCH" \
