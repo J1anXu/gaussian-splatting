@@ -333,7 +333,14 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
         with torch.no_grad():
             # Phase 1: 连续发射所有 block 的 render，不做任何 CPU 同步
-            for submodel_id, submodel in enumerate(submodel_list):
+            # 按点数从多到少排序，让大 block 先上 GPU
+            sorted_submodel_ids = sorted(
+                range(len(submodel_list)),
+                key=lambda i: submodel_list[i].visible_indices.shape[0],
+                reverse=True
+            )
+            for submodel_id in sorted_submodel_ids:
+                submodel = submodel_list[submodel_id]
 
                 if submodel.visible_indices.shape[0] == 0:
                     continue
@@ -385,8 +392,15 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         with torch.no_grad():
             gt_image = viewpoint_cam.original_image.cuda()
 
-        # 遍历所有可见block 轮流当active block
-        for submodel_id, rank_map in zip(visible_submodel_id_list, block_rank):
+        # 遍历所有可见block 轮流当active block，按点数从多到少排序
+        grad_order = sorted(
+            range(len(visible_submodel_id_list)),
+            key=lambda i: submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0],
+            reverse=True
+        )
+        for idx in grad_order:
+            submodel_id = visible_submodel_id_list[idx]
+            rank_map = block_rank[idx]
             submodel: GaussianModel = submodel_list[submodel_id]
 
             with tracer.span("gather_grad", block_id=submodel_id,
