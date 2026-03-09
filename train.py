@@ -321,11 +321,13 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
         
         # 无渲染全部结果 为计算Loss做准备
+        all_rendered, all_depth, all_alpha, all_submodel_ids = [], [], [], []
         rendered_list, depth_list, alpha_list = [], [], []
         visible_submodel_id_list = []
         visible_pts = 0
 
         with torch.no_grad():
+            # Phase 1: 连续发射所有 block 的 render，不做任何 CPU 同步
             for submodel_id, submodel in enumerate(submodel_list):
 
                 if submodel.visible_indices.shape[0] == 0:
@@ -342,22 +344,22 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 submodel.deactivate_subset()
 
-                # pixel level
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
+                all_rendered.append(image)
+                all_depth.append(depth)
+                all_alpha.append(alphaLeft)
+                all_submodel_ids.append(submodel_id)
 
-                # 能被视锥看见并不一定真的有贡献
-                # image: [3, H, W]
-                valid_mask = (image > 0).any(dim=0)   # [H, W] bool
-                valid_pixels = valid_mask.sum().item()
-                total_pixels = valid_mask.numel()
-                contributed_percent = valid_pixels / total_pixels
-                if contributed_percent < 0.05:
+            # Phase 2: 所有 render 完成后，批量过滤低贡献 block（此时 .item() 不会阻塞 render pipeline）
+            for image, depth, alphaLeft, submodel_id in zip(all_rendered, all_depth, all_alpha, all_submodel_ids):
+                valid_pixels = (image > 0).any(dim=0).sum().item()
+                total_pixels = image.shape[1] * image.shape[2]
+                if valid_pixels / total_pixels < 0.05:
                     continue
 
                 rendered_list.append(image)
                 depth_list.append(depth)
                 alpha_list.append(alphaLeft)
-
                 visible_submodel_id_list.append(submodel_id)
 
 
