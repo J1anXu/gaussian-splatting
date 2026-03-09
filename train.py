@@ -272,6 +272,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     bench_vis_list = []
 
     for iteration in range(first_iter, opt.iterations + 1):
+        # 最后两个 iter 启用 timeline 用于分析流水线
+        if iteration >= opt.iterations - 1:
+            tracer.enabled = True
+            tracer._active = True
         tracer.step(iteration)
 
         for submodel in submodel_list:
@@ -493,9 +497,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         p(f"  总平均 mem:           {(sum(bench_alloc_list)+sum(bench_rsv_list))/(2*n):.2f} GB\n")
         p(f"{'='*50}\n")
 
-    if config.TIMELINE:
-        os.makedirs("timeline", exist_ok=True)
-        tracer.export(f"timeline/trace_{BRANCH}_{SCENE_NAME}.json")
+    # 导出最后两个 iter 的 timeline
+    os.makedirs("timeline", exist_ok=True)
+    tracer.export(f"timeline/trace_{BRANCH}_{SCENE_NAME}.json")
         
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
