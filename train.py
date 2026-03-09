@@ -334,22 +334,20 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         with torch.no_grad():
             # Phase 1: 连续发射所有 block 的 render，不做任何 CPU 同步
             # 按点数从多到少排序，让大 block 先上 GPU
-            sorted_submodel_ids = sorted(
-                range(len(submodel_list)),
-                key=lambda i: submodel_list[i].visible_indices.shape[0],
-                reverse=True
-            )
+            sorted_submodel_ids = sorted( range(len(submodel_list)), key=lambda i: submodel_list[i].visible_indices.shape[0], reverse=True )
+            max_vis = submodel_list[sorted_submodel_ids[0]].visible_indices.shape[0] if sorted_submodel_ids else 0
             for submodel_id in sorted_submodel_ids:
                 submodel = submodel_list[submodel_id]
 
-                if submodel.visible_indices.shape[0] == 0:
+                n_vis = submodel.visible_indices.shape[0]
+                if n_vis == 0 or (config.SKIP_SMALL_BLOCK_THRESH > 0 and n_vis < max_vis * config.SKIP_SMALL_BLOCK_THRESH):
                     continue
 
                 visible_pts += submodel.visible_indices.shape[0]
 
-                with tracer.span("gather_nograd", block_id=submodel_id,
-                                 n_vis=submodel.visible_indices.shape[0]):
+                with tracer.span("gather_nograd", block_id=submodel_id, n_vis=submodel.visible_indices.shape[0]):
                     submodel.pre_gather()
+                    
                 with tracer.transfer_span("h2d_nograd", block_id=submodel_id):
                     submodel.kick_h2d_and_activate(requires_grad=False)
 
