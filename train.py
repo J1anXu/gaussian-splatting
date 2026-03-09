@@ -259,7 +259,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     frustum_cache: dict = {}
 
     # Pipeline: async D2H grad copies + deferred opt steps
-    tracer = TraceManager(enabled=config.TIMELINE)
+    tracer = TraceManager(enabled=True)
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer)
 
     time_start = time.time()
@@ -272,10 +272,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     bench_vis_list = []
 
     for iteration in range(first_iter, opt.iterations + 1):
-        # 最后 5 个 iter 启用 timeline 用于分析流水线
-        if iteration >= opt.iterations - 4:
-            tracer.enabled = True
-            tracer._active = True
         tracer.step(iteration)
 
         for submodel in submodel_list:
