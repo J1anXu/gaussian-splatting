@@ -409,17 +409,26 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 visible_submodel_id_list.append(submodel_id)
 
 
-        # execute merge (GPU) while CPU pre-gathers grad data in parallel
+        # Kick grad pre-gather in background threads BEFORE merge,
+        # so CPU gather overlaps with merge's CPU+GPU work.
+        grad_blocks = [(sid, submodel_list[sid]) for sid in visible_submodel_id_list]
+        def _timed_gather(sid_sm):
+            sid, sm = sid_sm
+            with tracer.span("pre_gather_grad", block_id=sid,
+                             n_vis=sm.visible_indices.shape[0]):
+                sm.pre_gather()
+        grad_gather_futures = [gather_pool.submit(_timed_gather, (sid, sm))
+                               for sid, sm in grad_blocks]
+
+        # execute merge (CPU dispatches GPU kernels)
         with torch.no_grad():
             with tracer.gpu_span("merge_opt_kid"):
                 merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
 
-            # CPU pre-gather for grad phase runs while merge GPU kernels execute
-            # (merge is async on default stream, CPU returns immediately)
-            grad_blocks = [(sid, submodel_list[sid]) for sid in visible_submodel_id_list]
-            with tracer.span("pre_gather_grad", n_blocks=len(grad_blocks)):
-                list(gather_pool.map(lambda sm: sm.pre_gather(),
-                                     [sm for _, sm in grad_blocks]))
+            # Wait for background gather to finish (should be done by now)
+            with tracer.span("wait_pre_gather_grad"):
+                for f in grad_gather_futures:
+                    f.result()
 
         C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
         prefix_T = merge_res["prefix_T"]
