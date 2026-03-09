@@ -487,7 +487,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         p(f"  Benchmark (iter {BENCH_START}-{BENCH_END}, {n} samples)\n")
         p(f"{'='*50}\n")
         p(f"  平均 it/s:           {sum(bench_its_list)/n:.2f}\n")
-        p(f"  平均 visible pts:    {sum(bench_vis_list)/n:.0f}\n")
+        p(f"  平均 visible pts:    {sum(bench_vis_list)/n/1e6:.2f}M\n")
         p(f"  平均占用 mem (alloc): {sum(bench_alloc_list)/n:.2f} GB\n")
         p(f"  平均分配 mem (rsv):   {sum(bench_rsv_list)/n:.2f} GB\n")
         p(f"  总平均 mem:           {(sum(bench_alloc_list)+sum(bench_rsv_list))/(2*n):.2f} GB\n")
