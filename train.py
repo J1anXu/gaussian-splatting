@@ -336,20 +336,34 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # 按点数从多到少排序，让大 block 先上 GPU
             sorted_submodel_ids = sorted( range(len(submodel_list)), key=lambda i: submodel_list[i].visible_indices.shape[0], reverse=True )
             max_vis = submodel_list[sorted_submodel_ids[0]].visible_indices.shape[0] if sorted_submodel_ids else 0
-            for submodel_id in sorted_submodel_ids:
-                submodel = submodel_list[submodel_id]
 
-                n_vis = submodel.visible_indices.shape[0]
+            # 过滤出有效 block
+            valid_ids = []
+            for sid in sorted_submodel_ids:
+                n_vis = submodel_list[sid].visible_indices.shape[0]
                 if n_vis == 0 or (config.SKIP_SMALL_BLOCK_THRESH > 0 and n_vis < max_vis * config.SKIP_SMALL_BLOCK_THRESH):
                     continue
+                valid_ids.append(sid)
 
+            # 流水线: 提前 gather 下一个 block，与当前 block 的 h2d+render 重叠
+            # 每个 submodel 有自己的 _packed_staging，天然双缓冲
+            if valid_ids:
+                # 预热: gather 第一个 block
+                with tracer.span("gather_nograd", block_id=valid_ids[0], n_vis=submodel_list[valid_ids[0]].visible_indices.shape[0]):
+                    submodel_list[valid_ids[0]].pre_gather()
+
+            for i, submodel_id in enumerate(valid_ids):
+                submodel = submodel_list[submodel_id]
                 visible_pts += submodel.visible_indices.shape[0]
 
-                with tracer.span("gather_nograd", block_id=submodel_id, n_vis=submodel.visible_indices.shape[0]):
-                    submodel.pre_gather()
-                    
                 with tracer.transfer_span("h2d_nograd", block_id=submodel_id):
                     submodel.kick_h2d_and_activate(requires_grad=False)
+
+                # 趁 h2d (non_blocking) + render 占 GPU 时，CPU 提前 gather 下一个 block
+                if i + 1 < len(valid_ids):
+                    next_id = valid_ids[i + 1]
+                    with tracer.span("gather_nograd", block_id=next_id, n_vis=submodel_list[next_id].visible_indices.shape[0]):
+                        submodel_list[next_id].pre_gather()
 
                 with tracer.gpu_span("render_nograd", block_id=submodel_id):
                     render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
