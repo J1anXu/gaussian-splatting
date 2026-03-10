@@ -18,6 +18,9 @@ PID_CPU      = 3
 TID_MAIN     = 1
 TID_PIPELINE = 2
 TID_ADAM     = 3
+TID_OPTIMIZE = 4
+TID_H2D      = 1
+TID_D2H      = 2
 
 
 class TraceManager:
@@ -230,6 +233,8 @@ class TraceManager:
              "args": {"name": "pipeline_grad_sync"}},
             {"name": "thread_name",  "ph": "M", "pid": PID_CPU, "tid": TID_ADAM,
              "args": {"name": "adam_step"}},
+            {"name": "thread_name",  "ph": "M", "pid": PID_CPU, "tid": TID_OPTIMIZE,
+             "args": {"name": "optimize"}},
             {"name": "thread_name",  "ph": "M", "pid": PID_GPU, "tid": 1,
              "args": {"name": "stream_0"}},
             {"name": "thread_name",  "ph": "M", "pid": PID_TRANSFER, "tid": 1,

@@ -1,7 +1,7 @@
 import torch
 from typing import List, Optional, Callable
 from scene import GaussianModel
-from TimerManager import TraceManager, TID_PIPELINE, TID_ADAM, PID_CPU
+from TimerManager import TraceManager, TID_PIPELINE, TID_ADAM, PID_CPU, TID_D2H, TID_OPTIMIZE
 
 
 ATTR_NAMES = ['_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation', '_opacity']
@@ -86,13 +86,13 @@ class PipelinedGradSync:
             with torch.no_grad():
                 # Adam step first — before densify/prune which may change N
                 if iteration < opt.iterations:
-                    with tm.span("assemble_grad", tid=TID_ADAM, block_id=sm_id):
+                    with tm.span("assemble_grad", tid=TID_OPTIMIZE, block_id=sm_id):
                         grad_subset = sm._assemble_grad_subset(gpu_grads)
-                    with tm.span("packed_sparse_adam", tid=TID_ADAM, block_id=sm_id, n_vis=idx.shape[0]):
+                    with tm.span("packed_sparse_adam", tid=TID_OPTIMIZE, block_id=sm_id, n_vis=idx.shape[0]):
                         sm.packed_sparse_adam_step(idx, grad_subset, iteration)
 
                 if iteration < opt.densify_until_iter:
-                    with tm.span("densify_stats", tid=TID_PIPELINE, block_id=sm_id):
+                    with tm.span("densify_stats", tid=TID_OPTIMIZE, block_id=sm_id):
                         gvpg = torch.zeros(sm.get_xyz.shape[0], 3, device="cpu", requires_grad=False)
                         gvpg[sm.visible_indices] = vpt_grad
                         gvf = sm.visible_indices[sub_vf]
@@ -100,14 +100,14 @@ class PipelinedGradSync:
                         sm.add_densification_stats2(gvpg, gvf)
 
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        with tm.span("densify_and_prune", tid=TID_PIPELINE, block_id=sm_id):
+                        with tm.span("densify_and_prune", tid=TID_OPTIMIZE, block_id=sm_id):
                             size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                             sm.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
                             sm.pack_to_buffer()
                             self.reallocate_pinned_buffers(sm)
 
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        with tm.span("reset_opacity", tid=TID_PIPELINE, block_id=sm_id):
+                        with tm.span("reset_opacity", tid=TID_OPTIMIZE, block_id=sm_id):
                             sm.reset_opacity()
                             sm._re_view_opacity()
 
@@ -134,7 +134,7 @@ class PipelinedGradSync:
         #    Event.sync waits only for PREV D2H (not current block's GPU work!)
         #    → adam runs while GPU continues processing current block's D2H
         if self._pending_opt is not None:
-            with tm.span("d2h_event_sync", tid=TID_PIPELINE):
+            with tm.span("d2h_event_sync", tid=TID_OPTIMIZE):
                 self._d2h_event.synchronize()
             tm.flush_gpu_events()
             self._pending_opt()
