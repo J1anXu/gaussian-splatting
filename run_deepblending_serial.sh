@@ -69,7 +69,8 @@ for s in "${INDOOR_SCENES[@]}"; do
   IS_INDOOR[$s]=1
 done
 
-GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
 DATA_ROOT=/data2/jian/data/deepblending
 OUT_ROOT=/data2/jian/output/deepblending/$GIT_BRANCH
 LOG_ROOT=debug

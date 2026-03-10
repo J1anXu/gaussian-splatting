@@ -8,7 +8,6 @@ TRAINED_PLY_PATH="/home/jian/Partitioned-3dgs/output/mip360/bicycle/point_cloud/
 DATA_PATH="/data2/jian/data/mip360/bicycle"
 MODEL_PATH="/home/jian/gaussian-splatting/output/benchmark"
 GPU=0
-BRANCH="cpu_timer_fast"
 IMG_FLAG="images_4"
 
 # ============================================================
@@ -16,6 +15,7 @@ IMG_FLAG="images_4"
 export CUDA_VISIBLE_DEVICES=$GPU
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BRANCH="$(git -C "$SCRIPT_DIR" branch --show-current)"
 
 python "$SCRIPT_DIR/train.py" \
     -s "$DATA_PATH" \

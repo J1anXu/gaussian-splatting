@@ -5,10 +5,10 @@ TRAINED_PLY_PATH="/home/jian/output/mip360/baseline/bicycle/point_cloud.ply"
 DATA_PATH="/home/jian/data/mip360/bicycle"
 MODEL_PATH="/home/jian/output"
 GPU=0
-BRANCH="cpu_timer_fast"
 IMG_FLAG="images_4"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BRANCH="$(git -C "$SCRIPT_DIR" branch --show-current)"
 OUT_DIR="$SCRIPT_DIR/timeline"
 OUT_PREFIX="$OUT_DIR/nsys_nograd"
 

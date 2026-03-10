@@ -41,7 +41,8 @@ NUM_GPUS=${#GPUS[@]}
 DATA_ROOT=/home/jian/data/mip360
 LOG_ROOT=debug
 
-GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
 OUT_ROOT=/home/jian/output/mip360/$GIT_BRANCH
 
 mkdir -p "$LOG_ROOT"
