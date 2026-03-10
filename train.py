@@ -32,7 +32,7 @@ import time
 from logger import get_logger
 import config
 import diff_gaussian_rasterization_wenqi_tam
-from TimerManager import  TraceManager, TID_MAIN, PID_CPU
+from TimerManager import  TraceManager, TID_MAIN, PID_CPU, TID_OPTIMIZE
 from pipeline_grad_sync import PipelinedGradSync
 SCENE_NAME = None
 BRANCH = None
@@ -411,58 +411,129 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             key=lambda i: submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0],
             reverse=True
         )
-        for idx in grad_order:
-            submodel_id = visible_submodel_id_list[idx]
-            rank_map = block_rank[idx]
-            submodel: GaussianModel = submodel_list[submodel_id]
+        if config.THREADED_OPTIMIZE and len(grad_order) > 0:
+            import threading
 
-            with tracer.span("gather_grad", block_id=submodel_id,
-                             n_vis=submodel.visible_indices.shape[0]):
-                submodel.pre_gather()
-            with tracer.transfer_span("h2d_grad", block_id=submodel_id):
-                submodel.kick_h2d_and_activate(requires_grad=True)
+            def _gpu_pipeline(gi, out):
+                """Background thread: gather → h2d → render → compose → loss → backward → D2H."""
+                idx = grad_order[gi]
+                sm_id = visible_submodel_id_list[idx]
+                rm = block_rank[idx]
+                sm = submodel_list[sm_id]
 
-            with tracer.gpu_span("render_grad", block_id=submodel_id):
-                render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                with tracer.span("gather_grad", block_id=sm_id, n_vis=sm.visible_indices.shape[0]):
+                    sm.pre_gather()
+                with tracer.transfer_span("h2d_grad", block_id=sm_id):
+                    sm.kick_h2d_and_activate(requires_grad=True)
+                with tracer.gpu_span("render_grad", block_id=sm_id):
+                    rp = render(viewpoint_cam, sm, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
 
-            # pixel level
-            sub_img = render_pkg["render"]
+                sub_img = rp["render"]
+                sub_vpt = rp["viewspace_points"]
 
-            # gaussian points level
-            sub_viewspace_point_tensor = render_pkg["viewspace_points"]
+                with torch.no_grad():
+                    rank_px = rm.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)
+                    pT_k = prefix_T[:, 0].gather(dim=0, index=rm.unsqueeze(0)).squeeze(0)
+                    Cs_k = C_sorted.gather(dim=0, index=rank_px).squeeze(0)
+                    C_base = merge_res["final_rgb"] - pT_k * Cs_k
 
-            with torch.no_grad():
-                # 当前subset的渲染结果在每个像素上的排序位置
-                submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
-                # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
-                prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
-                # 4. 当前块(index = idx)块提供的颜色
-                C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]
-                # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
-                C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k
-                # 6. 带梯度的渲染结果
-                C_active = sub_img      # [3,H,W], has grad
+                composed = C_base + pT_k * sub_img
+                Ll1_v = l1_loss(composed, gt_image)
+                ssim_v = fast_ssim(composed, gt_image)
+                loss_v = (1.0 - opt.lambda_dssim) * Ll1_v + opt.lambda_dssim * (1.0 - ssim_v)
 
-            # 把带梯度的渲染结果拼到背景上 用于计算loss
-            composed_img = C_base + prefix_T_k * C_active
+                with tracer.gpu_span("backward", block_id=sm_id):
+                    loss_v.backward()
 
-            # Loss
-            Ll1 = l1_loss(composed_img, gt_image)
-            ssim_value = fast_ssim(composed_img, gt_image)
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+                d2h_state = grad_sync.kick_async_d2h(sm, sm_id, rp, sub_vpt)
+                sm.deactivate_subset()
+                evt = torch.cuda.Event()
+                evt.record()
 
-            # Depth regularization
+                out['d2h_state'] = d2h_state
+                out['d2h_event'] = evt
+                out['sm'] = sm
+                out['sm_id'] = sm_id
+                out['loss'] = loss_v
+
+            def _run_optimize(res):
+                """Main thread: sync D2H → assemble_grad → adam → densify_stats."""
+                with tracer.span("d2h_event_sync", tid=TID_OPTIMIZE):
+                    res['d2h_event'].synchronize()
+                tracer.flush_gpu_events()
+                cur_idx, grads, vf, radii, vpt_g = res['d2h_state']
+                pending = grad_sync._make_pending(
+                    res['sm'], res['sm_id'],
+                    cur_idx, grads, vf, radii, vpt_g, iteration)
+                pending()
+
+            # Ensure all merge data is visible to bg thread's CUDA stream
+            torch.cuda.synchronize()
+
+            # First block: run on main thread (no previous optimize to overlap)
+            cur = {}
+            _gpu_pipeline(0, cur)
+
+            for gi in range(1, len(grad_order)):
+                nxt = {}
+                bg_thread = threading.Thread(target=_gpu_pipeline, args=(gi, nxt))
+                bg_thread.start()
+
+                # Main thread: optimize previous block (overlaps with bg GPU pipeline)
+                _run_optimize(cur)
+
+                bg_thread.join()
+                cur = nxt
+
+            # Optimize last block
+            _run_optimize(cur)
+
+            loss = cur['loss']
             Ll1depth = 0
-
-            with tracer.gpu_span("backward", block_id=submodel_id):
-                loss.backward()
-
             tracer.counter("pts", {"visible": visible_pts, "total": sum(s._xyz.shape[0] for s in submodel_list)})
 
-            grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
+        else:
+            for idx in grad_order:
+                submodel_id = visible_submodel_id_list[idx]
+                rank_map = block_rank[idx]
+                submodel: GaussianModel = submodel_list[submodel_id]
 
-        # flush the last submodel's pending work
-        grad_sync.flush_last()
+                with tracer.span("gather_grad", block_id=submodel_id,
+                                 n_vis=submodel.visible_indices.shape[0]):
+                    submodel.pre_gather()
+                with tracer.transfer_span("h2d_grad", block_id=submodel_id):
+                    submodel.kick_h2d_and_activate(requires_grad=True)
+
+                with tracer.gpu_span("render_grad", block_id=submodel_id):
+                    render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+
+                sub_img = render_pkg["render"]
+                sub_viewspace_point_tensor = render_pkg["viewspace_points"]
+
+                with torch.no_grad():
+                    submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)
+                    prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)
+                    C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)
+                    C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k
+                    C_active = sub_img
+
+                composed_img = C_base + prefix_T_k * C_active
+
+                Ll1 = l1_loss(composed_img, gt_image)
+                ssim_value = fast_ssim(composed_img, gt_image)
+                loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+                Ll1depth = 0
+
+                with tracer.gpu_span("backward", block_id=submodel_id):
+                    loss.backward()
+
+                tracer.counter("pts", {"visible": visible_pts, "total": sum(s._xyz.shape[0] for s in submodel_list)})
+
+                grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
+
+            # flush the last submodel's pending work
+            grad_sync.flush_last()
 
         # reserved 超过 allocated 太多时才清缓存，避免频繁清导致性能下降
         if torch.cuda.memory_reserved() > torch.cuda.memory_allocated() + config.GPU_CACHE_THRESHOLD_GB * 1024**3:
