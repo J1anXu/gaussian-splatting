@@ -32,7 +32,7 @@ import time
 from logger import get_logger
 import config
 import diff_gaussian_rasterization_wenqi_tam
-from TimerManager import  TraceManager, TID_MAIN, PID_CPU
+from TimerManager import  TraceManager, TID_MAIN, PID_CPU, TID_H2D
 from pipeline_grad_sync import PipelinedGradSync
 SCENE_NAME = None
 BRANCH = None
@@ -334,7 +334,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         with torch.no_grad():
             # Phase 1: 连续发射所有 block 的 render，不做任何 CPU 同步
             # 按点数从多到少排序，让大 block 先上 GPU
-            sorted_submodel_ids = sorted( range(len(submodel_list)), key=lambda i: submodel_list[i].visible_indices.shape[0], reverse=True )
+            sorted_submodel_ids = sorted( range(len(submodel_list)), key=lambda i: submodel_list[i].visible_indices.shape[0], reverse=(config.BLOCK_ORDER_NOGRAD == "descent") )
             max_vis = submodel_list[sorted_submodel_ids[0]].visible_indices.shape[0] if sorted_submodel_ids else 0
 
             # 过滤出有效 block
@@ -365,7 +365,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 gather_ready[i].wait()
 
-                with tracer.transfer_span("h2d_nograd", block_id=submodel_id):
+                with tracer.transfer_span("h2d_nograd", block_id=submodel_id, tid=TID_H2D):
                     submodel.kick_h2d_and_activate(requires_grad=False)
 
                 with tracer.gpu_span("render_nograd", block_id=submodel_id):
@@ -413,14 +413,14 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         grad_order = sorted(
             range(len(visible_submodel_id_list)),
             key=lambda i: submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0],
-            reverse=True
+            reverse=(config.BLOCK_ORDER_GRAD == "descent")
         )
         for idx in grad_order:
             submodel_id = visible_submodel_id_list[idx]
             rank_map = block_rank[idx]
             submodel: GaussianModel = submodel_list[submodel_id]
 
-            with tracer.transfer_span("h2d_grad", block_id=submodel_id):
+            with tracer.transfer_span("h2d_grad", block_id=submodel_id, tid=TID_H2D):
                 submodel.kick_h2d_and_activate(requires_grad=True)
 
             with tracer.gpu_span("render_grad", block_id=submodel_id):
