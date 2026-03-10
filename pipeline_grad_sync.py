@@ -8,7 +8,16 @@ ATTR_NAMES = ['_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation',
 
 
 class PipelinedGradSync:
-    """Manages async D2H gradient copies and deferred optimizer steps for submodel pipeline."""
+    """Pipelined D2H gradient sync with one-block stagger.
+
+    Usage in main loop:
+        for block in blocks:
+            ... render + backward ...
+            grad_sync.kick_d2h(block)        # 1. async D2H current
+            grad_sync.step_previous()        # 2. wait prev D2H + adam prev
+            grad_sync.commit(block, iter)    # 3. record event + defer current
+        grad_sync.step_previous()            # flush last block
+    """
 
     def __init__(self, submodel_list: List[GaussianModel], opt, dataset, scene,
                  tracer: Optional[TraceManager] = None):
@@ -19,8 +28,10 @@ class PipelinedGradSync:
         self.tracer = tracer or TraceManager(enabled=False)
 
         self._pending_opt: Optional[Callable] = None
-        # CUDA Event 用于精确同步 D2H，替代 cuda.synchronize()
         self._d2h_event = torch.cuda.Event()
+
+        # Captured state from kick_d2h, consumed by commit
+        self._current_state = None
 
         # Pre-allocate pinned buffers for each submodel
         for submodel in submodel_list:
@@ -44,19 +55,19 @@ class PipelinedGradSync:
     def reallocate_pinned_buffers(self, submodel: GaussianModel):
         self._allocate_pinned_buffers(submodel)
 
-    def kick_async_d2h(self, submodel: GaussianModel, submodel_id: int,
-                        render_pkg: dict, sub_viewspace_point_tensor):
-        """Kick off non-blocking D2H copies of grads into pre-allocated pinned buffers.
-
-        Returns captured state tuple for deferred work.
-        """
+    # ------------------------------------------------------------------
+    # Step 1: kick off async D2H for current block
+    # ------------------------------------------------------------------
+    def kick_d2h(self, submodel: GaussianModel, submodel_id: int,
+                 render_pkg: dict, sub_viewspace_point_tensor):
+        """Start non-blocking D2H copies of gradients, then free GPU subset."""
         tm = self.tracer
         with tm.transfer_span("d2h_kick", block_id=submodel_id):
             cur_idx = submodel.visible_indices.to("cpu")
             n_vis = cur_idx.shape[0]
             cur_gpu_grads = []
             gpu_attrs = [submodel._xyz_gpu, submodel._features_dc_gpu, submodel._features_rest_gpu,
-                            submodel._scaling_gpu, submodel._rotation_gpu, submodel._opacity_gpu]
+                         submodel._scaling_gpu, submodel._rotation_gpu, submodel._opacity_gpu]
             for name, gpu_p in zip(ATTR_NAMES, gpu_attrs):
                 g = gpu_p.grad
                 if g is None:
@@ -75,16 +86,48 @@ class PipelinedGradSync:
             pin_vpt_grad = submodel._pinned_vpt_grad_buf[:n_vis]
             pin_vpt_grad.copy_(sub_viewspace_point_tensor.grad, non_blocking=True)
 
-        return cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad
+        submodel.deactivate_subset()
 
+        self._current_state = (submodel, submodel_id, cur_idx, cur_gpu_grads,
+                               pin_sub_vf, pin_sub_radii, pin_vpt_grad)
+
+    # ------------------------------------------------------------------
+    # Step 2: wait for previous block's D2H and run its optimizer
+    # ------------------------------------------------------------------
+    def step_previous(self):
+        """Sync previous block's D2H event and execute its deferred adam/densify."""
+        if self._pending_opt is None:
+            return
+        tm = self.tracer
+        with tm.span("d2h_event_sync", tid=TID_OPTIMIZE):
+            self._d2h_event.synchronize()
+        tm.flush_gpu_events()
+        self._pending_opt()
+        self._pending_opt = None
+
+    # ------------------------------------------------------------------
+    # Step 3: record D2H event and defer current block's optimizer
+    # ------------------------------------------------------------------
+    def commit(self, iteration: int):
+        """Record CUDA event for current D2H and prepare deferred optimizer closure."""
+        self._d2h_event.record()
+
+        sm, sm_id, idx, gpu_grads, sub_vf, sub_radii, vpt_grad = self._current_state
+        self._current_state = None
+
+        self._pending_opt = self._make_pending(
+            sm, sm_id, idx, gpu_grads, sub_vf, sub_radii, vpt_grad, iteration)
+
+    # ------------------------------------------------------------------
+    # internals
+    # ------------------------------------------------------------------
     def _make_pending(self, sm, sm_id, idx, gpu_grads, sub_vf, sub_radii, vpt_grad, iteration):
-        """Build a closure that performs densify + packed_sparse_adam for one submodel."""
+        """Build a closure that performs adam + densify for one submodel."""
         opt, dataset, scene = self.opt, self.dataset, self.scene
         tm = self.tracer
 
         def _do():
             with torch.no_grad():
-                # Adam step first — before densify/prune which may change N
                 if iteration < opt.iterations:
                     with tm.span("assemble_grad", tid=TID_OPTIMIZE, block_id=sm_id):
                         grad_subset = sm._assemble_grad_subset(gpu_grads)
@@ -112,44 +155,3 @@ class PipelinedGradSync:
                             sm._re_view_opacity()
 
         return _do
-
-    def flush_and_prepare(self, submodel: GaussianModel, submodel_id: int, render_pkg: dict, sub_viewspace_point_tensor, iteration: int):
-        """Kick async D2H, flush previous pending, sync, and prepare new pending.
-
-        Key optimization: use Event.synchronize() instead of cuda.synchronize().
-        Event only waits for the PREVIOUS block's D2H, not current block's.
-        This lets GPU continue processing current D2H + next block's H2D/render
-        while CPU runs adam.
-        """
-        tm = self.tracer
-
-        # 1. kick off async D2H for current submodel
-        state = self.kick_async_d2h(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor)
-        cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad = state
-
-        # 2. deactivate current submodel's GPU subset
-        submodel.deactivate_subset()
-
-        # 3. flush PREVIOUS submodel's opt step:
-        #    Event.sync waits only for PREV D2H (not current block's GPU work!)
-        #    → adam runs while GPU continues processing current block's D2H
-        if self._pending_opt is not None:
-            with tm.span("d2h_event_sync", tid=TID_OPTIMIZE):
-                self._d2h_event.synchronize()
-            tm.flush_gpu_events()
-            self._pending_opt()
-            self._pending_opt = None
-
-        # 4. record Event AFTER current D2H is queued (next call will sync on this)
-        self._d2h_event.record()
-
-        # 5. prepare deferred work for current submodel
-        self._pending_opt = self._make_pending(submodel, submodel_id, cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration)
-
-    def flush_last(self):
-        """Flush the last submodel's pending work after the loop ends."""
-        if self._pending_opt is not None:
-            self._d2h_event.synchronize()
-            self.tracer.flush_gpu_events()
-            self._pending_opt()
-            self._pending_opt = None

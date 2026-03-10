@@ -459,10 +459,13 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             tracer.counter("pts", {"visible": visible_pts, "total": sum(s._xyz.shape[0] for s in submodel_list)})
 
-            grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
+            # Pipeline: kick D2H for current block, run previous block's adam, defer current
+            grad_sync.kick_d2h(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor)
+            grad_sync.step_previous()
+            grad_sync.commit(iteration)
 
-        # flush the last submodel's pending work
-        grad_sync.flush_last()
+        # flush last block's deferred adam
+        grad_sync.step_previous()
 
         # reserved 超过 allocated 太多时才清缓存，避免频繁清导致性能下降
         if torch.cuda.memory_reserved() > torch.cuda.memory_allocated() + config.GPU_CACHE_THRESHOLD_GB * 1024**3:
