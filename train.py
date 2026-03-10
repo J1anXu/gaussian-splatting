@@ -10,6 +10,7 @@
 #
 
 import os
+import threading
 from typing import List
 import torch
 from random import randint
@@ -263,7 +264,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     TRACE_START = 681
     TRACE_END = 700
     tracer = TraceManager(enabled=False)
-    grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer)
+    grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer, threaded=config.THREADED_ADAM)
 
     time_start = time.time()
 
@@ -411,66 +412,74 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             key=lambda i: submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0],
             reverse=True
         )
+        # Shared state for subthread results
+        _thread_loss = [None]
+
         for idx in grad_order:
             submodel_id = visible_submodel_id_list[idx]
             rank_map = block_rank[idx]
             submodel: GaussianModel = submodel_list[submodel_id]
 
-            with tracer.span("gather_grad", block_id=submodel_id,
-                             n_vis=submodel.visible_indices.shape[0]):
-                submodel.pre_gather()
-            with tracer.transfer_span("h2d_grad", block_id=submodel_id):
-                submodel.kick_h2d_and_activate(requires_grad=True)
+            def _gpu_work(_sm=submodel, _sm_id=submodel_id, _rank_map=rank_map, _idx=idx):
+                """All GPU work for one block: pre_gather → h2d → render → loss → backward → kick_d2h."""
+                with tracer.span("gather_grad", block_id=_sm_id,
+                                 n_vis=_sm.visible_indices.shape[0]):
+                    _sm.pre_gather()
+                with tracer.transfer_span("h2d_grad", block_id=_sm_id):
+                    _sm.kick_h2d_and_activate(requires_grad=True)
 
-            with tracer.gpu_span("render_grad", block_id=submodel_id):
-                render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                with tracer.gpu_span("render_grad", block_id=_sm_id):
+                    _rp = render(viewpoint_cam, _sm, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
 
-            # pixel level
-            sub_img = render_pkg["render"]
+                _sub_img = _rp["render"]
+                _sub_vpt = _rp["viewspace_points"]
 
-            # gaussian points level
-            sub_viewspace_point_tensor = render_pkg["viewspace_points"]
+                with torch.no_grad():
+                    _submodel_rank_per_pixel = _rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)
+                    _prefix_T_k = prefix_T[:, 0].gather(dim=0, index=_rank_map.unsqueeze(0)).squeeze(0)
+                    _C_sorted_k = C_sorted.gather(dim=0, index=_submodel_rank_per_pixel).squeeze(0)
+                    _C_base = merge_res["final_rgb"] - _prefix_T_k * _C_sorted_k
+                    _C_active = _sub_img
 
-            with torch.no_grad():
-                # 当前subset的渲染结果在每个像素上的排序位置
-                submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
-                # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
-                prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
-                # 4. 当前块(index = idx)块提供的颜色
-                C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]
-                # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
-                C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k
-                # 6. 带梯度的渲染结果
-                C_active = sub_img      # [3,H,W], has grad
+                _composed_img = _C_base + _prefix_T_k * _C_active
 
-            # 把带梯度的渲染结果拼到背景上 用于计算loss
-            composed_img = C_base + prefix_T_k * C_active
+                _Ll1 = l1_loss(_composed_img, gt_image)
+                _ssim_value = fast_ssim(_composed_img, gt_image)
+                _loss = (1.0 - opt.lambda_dssim) * _Ll1 + opt.lambda_dssim * (1.0 - _ssim_value)
 
-            # Loss
-            Ll1 = l1_loss(composed_img, gt_image)
-            ssim_value = fast_ssim(composed_img, gt_image)
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+                with tracer.gpu_span("backward", block_id=_sm_id):
+                    _loss.backward()
 
-            # Depth regularization
-            Ll1depth = 0
+                grad_sync.kick_d2h(_sm, _sm_id, _rp, _sub_vpt)
+                _thread_loss[0] = _loss
 
-            with tracer.gpu_span("backward", block_id=submodel_id):
-                loss.backward()
+            pending = grad_sync.pop_pending()
+            if pending and config.THREADED_ADAM:
+                # GS-Scale pattern: GPU work on subthread, CPU adam on main thread
+                torch.cuda.synchronize()
+                t = threading.Thread(target=_gpu_work)
+                t.start()
+                pending()   # main thread: CPU adam for previous block
+                t.join()
+            else:
+                # First block or non-threaded: GPU work on main thread
+                _gpu_work()
+
+            grad_sync.submit(iteration)
 
             tracer.counter("pts", {"visible": visible_pts, "total": sum(s._xyz.shape[0] for s in submodel_list)})
 
-            # Pipeline: kick D2H for current block, run previous block's adam, defer current
-            grad_sync.kick_d2h(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor)
-            grad_sync.step_previous()
-            grad_sync.commit(iteration)
+            # Track loss from the last block for logging
+            Ll1depth = 0
 
-        # flush last block's deferred adam
-        grad_sync.step_previous()
+        # Run last block's adam
+        grad_sync.drain()
 
         # reserved 超过 allocated 太多时才清缓存，避免频繁清导致性能下降
         if torch.cuda.memory_reserved() > torch.cuda.memory_allocated() + config.GPU_CACHE_THRESHOLD_GB * 1024**3:
             torch.cuda.empty_cache()
 
+        loss = _thread_loss[0]
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log

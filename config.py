@@ -33,3 +33,5 @@ TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
 KEEP_TRAINING = False  # 由命令行参数 --keep_training 控制
 
 SKIP_SMALL_BLOCK_THRESH = 0.05  # 跳过可见点数小于最大块该比例的小块，设为0关闭
+
+THREADED_ADAM = True  # True: adam在worker线程跑(与GPU并行), False: 主线程顺序执行

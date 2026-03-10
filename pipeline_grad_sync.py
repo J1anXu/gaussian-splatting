@@ -1,37 +1,44 @@
 import torch
-from typing import List, Optional, Callable
+from typing import List, Optional
 from scene import GaussianModel
-from TimerManager import TraceManager, TID_PIPELINE, TID_ADAM, PID_CPU, TID_D2H, TID_OPTIMIZE
+from TimerManager import TraceManager, TID_OPTIMIZE
 
 
 ATTR_NAMES = ['_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation', '_opacity']
 
 
 class PipelinedGradSync:
-    """Pipelined D2H gradient sync with one-block stagger.
+    """Pipelined adam — overlap CPU adam(N) with GPU render(N+1).
 
-    Usage in main loop:
+    GS-Scale pattern: GPU work runs on subthread, CPU adam runs on main thread.
+    Main thread does ZERO CUDA calls during overlap period.
+
+    Usage in main loop (threaded=True):
         for block in blocks:
-            ... render + backward ...
-            grad_sync.kick_d2h(block)        # 1. async D2H current
-            grad_sync.step_previous()        # 2. wait prev D2H + adam prev
-            grad_sync.commit(block, iter)    # 3. record event + defer current
-        grad_sync.step_previous()            # flush last block
+            pending = grad_sync.pop_pending()
+            if pending:
+                launch GPU work for current block on subthread
+                pending()          # main thread: adam for prev block
+                join subthread
+            else:
+                do GPU work on main thread
+            grad_sync.kick_d2h(block)
+            grad_sync.submit(iteration)   # sync D2H, save closure
+        grad_sync.drain()                 # run last adam
     """
 
     def __init__(self, submodel_list: List[GaussianModel], opt, dataset, scene,
-                 tracer: Optional[TraceManager] = None):
+                 tracer: Optional[TraceManager] = None, threaded: bool = False):
         self.submodel_list = submodel_list
         self.opt = opt
         self.dataset = dataset
         self.scene = scene
         self.tracer = tracer or TraceManager(enabled=False)
+        self.threaded = threaded
 
-        self._pending_opt: Optional[Callable] = None
-        self._d2h_event = torch.cuda.Event()
-
-        # Captured state from kick_d2h, consumed by commit
         self._current_state = None
+        self._d2h_event = torch.cuda.Event()
+        self._pending_closure = None  # adam closure waiting to run on main thread
 
         # Pre-allocate pinned buffers for each submodel
         for submodel in submodel_list:
@@ -56,7 +63,7 @@ class PipelinedGradSync:
         self._allocate_pinned_buffers(submodel)
 
     # ------------------------------------------------------------------
-    # Step 1: kick off async D2H for current block
+    # Main thread API
     # ------------------------------------------------------------------
     def kick_d2h(self, submodel: GaussianModel, submodel_id: int,
                  render_pkg: dict, sub_viewspace_point_tensor):
@@ -88,41 +95,51 @@ class PipelinedGradSync:
 
         submodel.deactivate_subset()
 
+        # Record event AFTER all D2H copies are queued
+        self._d2h_event.record()
+
         self._current_state = (submodel, submodel_id, cur_idx, cur_gpu_grads,
                                pin_sub_vf, pin_sub_radii, pin_vpt_grad)
 
-    # ------------------------------------------------------------------
-    # Step 2: wait for previous block's D2H and run its optimizer
-    # ------------------------------------------------------------------
-    def step_previous(self):
-        """Sync previous block's D2H event and execute its deferred adam/densify."""
-        if self._pending_opt is None:
-            return
+    def submit(self, iteration: int):
+        """Sync D2H on main thread, build closure. Threaded mode saves it for later."""
         tm = self.tracer
-        with tm.span("d2h_event_sync", tid=TID_OPTIMIZE):
+
+        with tm.span("d2h_sync", tid=TID_OPTIMIZE):
             self._d2h_event.synchronize()
         tm.flush_gpu_events()
-        self._pending_opt()
-        self._pending_opt = None
-
-    # ------------------------------------------------------------------
-    # Step 3: record D2H event and defer current block's optimizer
-    # ------------------------------------------------------------------
-    def commit(self, iteration: int):
-        """Record CUDA event for current D2H and prepare deferred optimizer closure."""
-        self._d2h_event.record()
 
         sm, sm_id, idx, gpu_grads, sub_vf, sub_radii, vpt_grad = self._current_state
         self._current_state = None
 
-        self._pending_opt = self._make_pending(
-            sm, sm_id, idx, gpu_grads, sub_vf, sub_radii, vpt_grad, iteration)
+        closure = self._make_closure(sm, sm_id, idx, gpu_grads, sub_vf, sub_radii, vpt_grad, iteration)
+
+        if self.threaded:
+            self._pending_closure = closure  # save for main thread to run during overlap
+        else:
+            closure()
+
+    def pop_pending(self):
+        """Retrieve and clear the pending adam closure. Returns None if none."""
+        c = self._pending_closure
+        self._pending_closure = None
+        return c
+
+    def drain(self):
+        """Run last pending adam closure. Call at end of each iteration."""
+        if self._pending_closure is not None:
+            self._pending_closure()
+            self._pending_closure = None
+
+    def shutdown(self):
+        """No-op (no persistent worker thread)."""
+        pass
 
     # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
-    def _make_pending(self, sm, sm_id, idx, gpu_grads, sub_vf, sub_radii, vpt_grad, iteration):
-        """Build a closure that performs adam + densify for one submodel."""
+    def _make_closure(self, sm, sm_id, idx, gpu_grads, sub_vf, sub_radii, vpt_grad, iteration):
+        """Build a closure that performs assemble_grad + adam + densify (pure CPU)."""
         opt, dataset, scene = self.opt, self.dataset, self.scene
         tm = self.tracer
 
