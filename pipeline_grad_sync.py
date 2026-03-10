@@ -136,7 +136,6 @@ class PipelinedGradSync:
         if self._pending_opt is not None:
             with tm.span("d2h_event_sync", tid=TID_PIPELINE):
                 self._d2h_event.synchronize()
-            tm.flush_gpu_events()
             self._pending_opt()
             self._pending_opt = None
 
@@ -150,6 +149,5 @@ class PipelinedGradSync:
         """Flush the last submodel's pending work after the loop ends."""
         if self._pending_opt is not None:
             self._d2h_event.synchronize()
-            self.tracer.flush_gpu_events()
             self._pending_opt()
             self._pending_opt = None

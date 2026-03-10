@@ -192,8 +192,9 @@ class TraceManager:
                              if k not in ("cpu_ts",)},
                 }
                 resolved.append(ev)
-            except Exception:
-                pass
+            except Exception as exc:
+                import sys
+                print(f"[TraceManager] WARNING: dropped event '{meta.get('name')}' block={meta.get('block_id')}: {exc}", file=sys.stderr)
         with self._lock:
             self.events.extend(resolved)
             self._gpu_pending.clear()
