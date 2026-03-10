@@ -29,14 +29,8 @@ class PipelinedGradSync:
     @staticmethod
     def _allocate_pinned_buffers(submodel: GaussianModel):
         n_vis = submodel._xyz.shape[0]  # worst case: all visible
-        submodel._pinned_grad_bufs = {
-            '_xyz': torch.empty(n_vis, 3, dtype=torch.float32, pin_memory=True),
-            '_features_dc': torch.empty_like(submodel._features_dc, pin_memory=True),
-            '_features_rest': torch.empty_like(submodel._features_rest, pin_memory=True),
-            '_scaling': torch.empty(n_vis, 3, dtype=torch.float32, pin_memory=True),
-            '_rotation': torch.empty(n_vis, 4, dtype=torch.float32, pin_memory=True),
-            '_opacity': torch.empty(n_vis, 1, dtype=torch.float32, pin_memory=True),
-        }
+        # Grad D2H now goes directly into _packed_staging (GPU-side cat + single DMA),
+        # so per-attr _pinned_grad_bufs are no longer needed.
         submodel._pinned_vf_buf = torch.empty(n_vis, 1, dtype=torch.long, pin_memory=True)
         submodel._pinned_radii_buf = torch.empty(n_vis, dtype=torch.int32, pin_memory=True)
         submodel._pinned_vpt_grad_buf = torch.empty(n_vis, 3, dtype=torch.float32, pin_memory=True)
@@ -48,22 +42,28 @@ class PipelinedGradSync:
                         render_pkg: dict, sub_viewspace_point_tensor):
         """Kick off non-blocking D2H copies of grads into pre-allocated pinned buffers.
 
+        Packs grads on GPU with torch.cat, then single D2H into _packed_staging.
+        This eliminates the CPU-side _assemble_grad_subset (column-scatter into pinned memory).
+
         Returns captured state tuple for deferred work.
         """
         tm = self.tracer
         with tm.transfer_span("d2h_kick", block_id=submodel_id):
             cur_idx = submodel.visible_indices.to("cpu")
             n_vis = cur_idx.shape[0]
-            cur_gpu_grads = []
+
+            # Pack 6 grad tensors into [n_vis, D] on GPU, then single D2H
             gpu_attrs = [submodel._xyz_gpu, submodel._features_dc_gpu, submodel._features_rest_gpu,
                             submodel._scaling_gpu, submodel._rotation_gpu, submodel._opacity_gpu]
-            for name, gpu_p in zip(ATTR_NAMES, gpu_attrs):
+            grads_flat = []
+            for gpu_p in gpu_attrs:
                 g = gpu_p.grad
-                if g is None:
-                    continue
-                pinned = submodel._pinned_grad_bufs[name][:n_vis]
-                pinned.copy_(g, non_blocking=True)
-                cur_gpu_grads.append(pinned)
+                grads_flat.append(g.reshape(n_vis, -1))
+            gpu_grad_packed = torch.cat(grads_flat, dim=1)  # [n_vis, D], contiguous
+
+            # Single contiguous D2H into pinned staging (H2D already consumed it)
+            staging = submodel._packed_staging[:n_vis]
+            staging.copy_(gpu_grad_packed, non_blocking=True)
 
             sub_visibility_filter = render_pkg["visibility_filter"]
             sub_radii = render_pkg["radii"]
@@ -75,9 +75,9 @@ class PipelinedGradSync:
             pin_vpt_grad = submodel._pinned_vpt_grad_buf[:n_vis]
             pin_vpt_grad.copy_(sub_viewspace_point_tensor.grad, non_blocking=True)
 
-        return cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad
+        return cur_idx, n_vis, pin_sub_vf, pin_sub_radii, pin_vpt_grad
 
-    def _make_pending(self, sm, sm_id, idx, gpu_grads, sub_vf, sub_radii, vpt_grad, iteration):
+    def _make_pending(self, sm, sm_id, idx, n_vis, sub_vf, sub_radii, vpt_grad, iteration):
         """Build a closure that performs densify + packed_sparse_adam for one submodel."""
         opt, dataset, scene = self.opt, self.dataset, self.scene
         tm = self.tracer
@@ -85,9 +85,9 @@ class PipelinedGradSync:
         def _do():
             with torch.no_grad():
                 # Adam step first — before densify/prune which may change N
+                # Grads already packed in _packed_staging by GPU-side cat + single D2H
                 if iteration < opt.iterations:
-                    with tm.span("assemble_grad", tid=TID_OPTIMIZE, block_id=sm_id):
-                        grad_subset = sm._assemble_grad_subset(gpu_grads)
+                    grad_subset = sm._packed_staging[:n_vis]
                     with tm.span("packed_sparse_adam", tid=TID_OPTIMIZE, block_id=sm_id, n_vis=idx.shape[0]):
                         sm.packed_sparse_adam_step(idx, grad_subset, iteration)
 
@@ -125,7 +125,7 @@ class PipelinedGradSync:
 
         # 1. kick off async D2H for current submodel
         state = self.kick_async_d2h(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor)
-        cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad = state
+        cur_idx, cur_n_vis, pin_sub_vf, pin_sub_radii, pin_vpt_grad = state
 
         # 2. deactivate current submodel's GPU subset
         submodel.deactivate_subset()
@@ -144,7 +144,7 @@ class PipelinedGradSync:
         self._d2h_event.record()
 
         # 5. prepare deferred work for current submodel
-        self._pending_opt = self._make_pending(submodel, submodel_id, cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration)
+        self._pending_opt = self._make_pending(submodel, submodel_id, cur_idx, cur_n_vis, pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration)
 
     def flush_last(self):
         """Flush the last submodel's pending work after the loop ends."""
