@@ -18,7 +18,8 @@ class PipelinedGradSync:
         self.scene = scene
         self.tracer = tracer or TraceManager(enabled=False)
 
-        self._pending_opt: Optional[Callable] = None
+        self._pending_adam: Optional[Callable] = None
+        self._pending_densify: Optional[Callable] = None
         # CUDA Event 用于精确同步 D2H，替代 cuda.synchronize()
         self._d2h_event = torch.cuda.Event()
 
@@ -78,19 +79,23 @@ class PipelinedGradSync:
         return cur_idx, n_vis, pin_sub_vf, pin_sub_radii, pin_vpt_grad
 
     def _make_pending(self, sm, sm_id, idx, n_vis, sub_vf, sub_radii, vpt_grad, iteration):
-        """Build a closure that performs densify + packed_sparse_adam for one submodel."""
+        """Build two closures: adam (latency-critical) and densify (deferrable).
+
+        Splitting allows densify_stats to overlap with GPU H2D of the next block.
+        """
         opt, dataset, scene = self.opt, self.dataset, self.scene
         tm = self.tracer
 
-        def _do():
+        def _adam():
             with torch.no_grad():
-                # Adam step first — before densify/prune which may change N
                 # Grads already packed in _packed_staging by GPU-side cat + single D2H
                 if iteration < opt.iterations:
                     grad_subset = sm._packed_staging[:n_vis]
                     with tm.span("packed_sparse_adam", tid=TID_OPTIMIZE, block_id=sm_id, n_vis=idx.shape[0]):
                         sm.packed_sparse_adam_step(idx, grad_subset, iteration)
 
+        def _densify():
+            with torch.no_grad():
                 if iteration < opt.densify_until_iter:
                     with tm.span("densify_stats", tid=TID_OPTIMIZE, block_id=sm_id):
                         gvf = sm.visible_indices[sub_vf]
@@ -111,15 +116,18 @@ class PipelinedGradSync:
                             sm.reset_opacity()
                             sm._re_view_opacity()
 
-        return _do
+        return _adam, _densify
 
     def flush_and_prepare(self, submodel: GaussianModel, submodel_id: int, render_pkg: dict, sub_viewspace_point_tensor, iteration: int):
-        """Kick async D2H, flush previous pending, sync, and prepare new pending.
+        """Kick async D2H, flush previous pending adam, sync, and prepare new pending.
 
-        Key optimization: use Event.synchronize() instead of cuda.synchronize().
-        Event only waits for the PREVIOUS block's D2H, not current block's.
-        This lets GPU continue processing current D2H + next block's H2D/render
-        while CPU runs adam.
+        Pipeline:
+          1. Enqueue D2H for current block
+          2. Event.sync prev → run prev's adam (latency-critical)
+          3. Record event for current D2H
+          4. Store current's (adam, densify) closures
+          5. Prev's densify is NOT run here — caller runs it via run_deferred_densify()
+             after enqueuing next block's H2D, so CPU densify overlaps with GPU H2D.
         """
         tm = self.tracer
 
@@ -130,26 +138,48 @@ class PipelinedGradSync:
         # 2. deactivate current submodel's GPU subset
         submodel.deactivate_subset()
 
-        # 3. flush PREVIOUS submodel's opt step:
+        # 3. flush PREVIOUS submodel's adam step:
         #    Event.sync waits only for PREV D2H (not current block's GPU work!)
         #    → adam runs while GPU continues processing current block's D2H
-        if self._pending_opt is not None:
+        if self._pending_adam is not None:
             with tm.span("d2h_event_sync", tid=TID_OPTIMIZE):
                 self._d2h_event.synchronize()
             tm.flush_gpu_events()
-            self._pending_opt()
-            self._pending_opt = None
+            self._pending_adam()
+            self._pending_adam = None
 
         # 4. record Event AFTER current D2H is queued (next call will sync on this)
         self._d2h_event.record()
 
         # 5. prepare deferred work for current submodel
-        self._pending_opt = self._make_pending(submodel, submodel_id, cur_idx, cur_n_vis, pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration)
+        adam_fn, densify_fn = self._make_pending(submodel, submodel_id, cur_idx, cur_n_vis, pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration)
+        self._pending_adam = adam_fn
+        self._pending_densify = densify_fn
+
+    def run_deferred_densify(self):
+        """Run the previous block's deferred densify_stats.
+
+        Call this AFTER enqueuing the next block's H2D so GPU does H2D
+        while CPU runs densify_stats (overlap saves ~1-3ms per block).
+
+        Must sync the D2H event first — densify reads pinned buffers
+        (sub_vf, sub_radii, vpt_grad) that were D2H'd with non_blocking=True.
+        After sync, D2H is complete and GPU has already started the next H2D
+        (same stream, H2D was enqueued after D2H), giving us the overlap.
+        The subsequent event_sync in flush_and_prepare will be a no-op.
+        """
+        if self._pending_densify is not None:
+            self._d2h_event.synchronize()
+            self._pending_densify()
+            self._pending_densify = None
 
     def flush_last(self):
         """Flush the last submodel's pending work after the loop ends."""
-        if self._pending_opt is not None:
+        if self._pending_adam is not None:
             self._d2h_event.synchronize()
             self.tracer.flush_gpu_events()
-            self._pending_opt()
-            self._pending_opt = None
+            self._pending_adam()
+            self._pending_adam = None
+        if self._pending_densify is not None:
+            self._pending_densify()
+            self._pending_densify = None

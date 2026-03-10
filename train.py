@@ -420,6 +420,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with tracer.transfer_span("h2d_grad", block_id=submodel_id):
                 submodel.kick_h2d_and_activate(requires_grad=True)
 
+            # GPU 正在做 H2D，CPU 趁机跑上一个 block 的 densify_stats
+            grad_sync.run_deferred_densify()
+
             with tracer.gpu_span("render_grad", block_id=submodel_id):
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
 
