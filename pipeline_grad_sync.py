@@ -1,7 +1,7 @@
 import torch
 from typing import List, Optional, Callable
 from scene import GaussianModel
-from TimerManager import TraceManager, TID_PIPELINE, TID_ADAM, PID_CPU
+from TimerManager import TraceManager, TID_PIPELINE, TID_ADAM, PID_CPU, TID_D2H
 
 
 ATTR_NAMES = ['_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation', '_opacity']
@@ -51,7 +51,7 @@ class PipelinedGradSync:
         Returns captured state tuple for deferred work.
         """
         tm = self.tracer
-        with tm.transfer_span("d2h_kick", block_id=submodel_id):
+        with tm.transfer_span("d2h", block_id=submodel_id, tid=TID_D2H):
             cur_idx = submodel.visible_indices.to("cpu")
             n_vis = cur_idx.shape[0]
             cur_gpu_grads = []
@@ -136,7 +136,6 @@ class PipelinedGradSync:
         if self._pending_opt is not None:
             with tm.span("d2h_event_sync", tid=TID_PIPELINE):
                 self._d2h_event.synchronize()
-            tm.flush_gpu_events()
             self._pending_opt()
             self._pending_opt = None
 
@@ -150,6 +149,8 @@ class PipelinedGradSync:
         """Flush the last submodel's pending work after the loop ends."""
         if self._pending_opt is not None:
             self._d2h_event.synchronize()
-            self.tracer.flush_gpu_events()
             self._pending_opt()
             self._pending_opt = None
+        # 全部 block 处理完后，同步所有 GPU 操作，一次性 resolve 所有 pending trace events
+        torch.cuda.synchronize()
+        self.tracer.flush_gpu_events()

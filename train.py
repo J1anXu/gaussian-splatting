@@ -32,7 +32,7 @@ import time
 from logger import get_logger
 import config
 import diff_gaussian_rasterization_wenqi_tam
-from TimerManager import  TraceManager, TID_MAIN, PID_CPU
+from TimerManager import  TraceManager, TID_MAIN, PID_CPU, TID_H2D
 from pipeline_grad_sync import PipelinedGradSync
 SCENE_NAME = None
 BRANCH = None
@@ -357,7 +357,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 submodel = submodel_list[submodel_id]
                 visible_pts += submodel.visible_indices.shape[0]
 
-                with tracer.transfer_span("h2d_nograd", block_id=submodel_id):
+                with tracer.transfer_span("h2d_nograd", block_id=submodel_id, tid=TID_H2D):
                     submodel.kick_h2d_and_activate(requires_grad=False)
 
                 # 趁 h2d (non_blocking) + render 占 GPU 时，CPU 提前 gather 下一个 block
@@ -419,7 +419,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             with tracer.span("gather_grad", block_id=submodel_id,
                              n_vis=submodel.visible_indices.shape[0]):
                 submodel.pre_gather()
-            with tracer.transfer_span("h2d_grad", block_id=submodel_id):
+            with tracer.transfer_span("h2d_grad", block_id=submodel_id, tid=TID_H2D):
                 submodel.kick_h2d_and_activate(requires_grad=True)
 
             with tracer.gpu_span("render_grad", block_id=submodel_id):
@@ -521,28 +521,51 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     cost = time_end - time_start
     print(f"Phase 2 training time cost: [{cost:.2f}] seconds.")
 
+    # 获取 commit id
+    import socket, subprocess
+    hostname = socket.gethostname()
+    commit_id = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+
+    # 输出目录：output/{BRANCH}_{commit_id}_{timestamp}/
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%m%d_%H%M%S")
+    run_output_dir = os.path.join("output", f"{BRANCH}_{commit_id}_{timestamp}")
+    os.makedirs(run_output_dir, exist_ok=True)
+
     # 打印 benchmark 统计（用 sys.__stdout__ 避免时间戳）
+    bench_text = ""
     if bench_its_list:
         n = len(bench_its_list)
+        lines = []
+        lines.append(f"\n{'='*50}")
+        lines.append(f"  [{hostname}] Benchmark (iter {BENCH_START}-{BENCH_END}, {n} samples)")
+        lines.append(f"  Branch: {BRANCH}  Commit: {commit_id}")
+        lines.append(f"{'='*50}")
+        lines.append(f"  平均 it/s:           {sum(bench_its_list)/n:.2f}")
+        lines.append(f"  平均 loss:           {sum(bench_loss_list)/n:.6f}")
+        lines.append(f"  平均 visible pts:    {sum(bench_vis_list)/n/1e6:.2f}M")
+        lines.append(f"  平均占用 mem (alloc): {sum(bench_alloc_list)/n:.2f} GB")
+        lines.append(f"  平均分配 mem (rsv):   {sum(bench_rsv_list)/n:.2f} GB")
+        lines.append(f"  总平均 mem:           {(sum(bench_alloc_list)+sum(bench_rsv_list))/(2*n):.2f} GB")
+        lines.append(f"{'='*50}")
+        bench_text = "\n".join(lines)
         p = sys.__stdout__.write
-        import socket, subprocess
-        hostname = socket.gethostname()
-        commit_id = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
-        p(f"\n{'='*50}\n")
-        p(f"  [{hostname}] Benchmark (iter {BENCH_START}-{BENCH_END}, {n} samples)\n")
-        p(f"  Branch: {BRANCH}  Commit: {commit_id}\n")
-        p(f"{'='*50}\n")
-        p(f"  平均 it/s:           {sum(bench_its_list)/n:.2f}\n")
-        p(f"  平均 loss:           {sum(bench_loss_list)/n:.6f}\n")
-        p(f"  平均 visible pts:    {sum(bench_vis_list)/n/1e6:.2f}M\n")
-        p(f"  平均占用 mem (alloc): {sum(bench_alloc_list)/n:.2f} GB\n")
-        p(f"  平均分配 mem (rsv):   {sum(bench_rsv_list)/n:.2f} GB\n")
-        p(f"  总平均 mem:           {(sum(bench_alloc_list)+sum(bench_rsv_list))/(2*n):.2f} GB\n")
-        p(f"{'='*50}\n")
+        p(bench_text + "\n")
 
-    # 导出最后两个 iter 的 timeline
-    os.makedirs("timeline", exist_ok=True)
-    tracer.export(f"timeline/trace_{BRANCH}_{SCENE_NAME}.json")
+        # 保存 benchmark 到 output
+        with open(os.path.join(run_output_dir, f"bench_{SCENE_NAME}.txt"), "w") as f:
+            f.write(bench_text + "\n")
+
+    # 导出 timeline
+    tracer.export(os.path.join(run_output_dir, f"trace_{SCENE_NAME}.json"))
+
+    # 保存训练日志
+    if LOGGER and hasattr(LOGGER, 'handlers'):
+        for h in LOGGER.handlers:
+            if hasattr(h, 'baseFilename') and os.path.exists(h.baseFilename):
+                import shutil
+                shutil.copy2(h.baseFilename, os.path.join(run_output_dir, f"train_{SCENE_NAME}.log"))
+                break
         
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))

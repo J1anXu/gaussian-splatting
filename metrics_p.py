@@ -118,6 +118,17 @@ def evaluate(model_paths):
 
             with open(per_view_path, "w") as fp:
                 json.dump(old_per_view, fp, indent=2)
+
+            # 额外保存到 output/{BRANCH}_{commit_id}/
+            import subprocess as _sp
+            from datetime import datetime as _dt
+            _commit = _sp.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+            _ts = _dt.now().strftime("%m%d_%H%M%S")
+            _out_dir = os.path.join("output", f"{BRANCH}_{_commit}_{_ts}")
+            os.makedirs(_out_dir, exist_ok=True)
+            _scene_name = os.path.basename(scene_dir)
+            with open(os.path.join(_out_dir, f"metrics_{_scene_name}.json"), "w") as fp:
+                json.dump(full_dict[scene_dir], fp, indent=2)
         except:
             print("Unable to compute metrics for model", scene_dir)
 

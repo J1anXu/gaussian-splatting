@@ -8,7 +8,7 @@ TRAINED_PLY_PATH="/home/jian/output/mip360/baseline/bicycle/point_cloud.ply"
 DATA_PATH="/home/jian/data/mip360/bicycle"         
 MODEL_PATH="/home/jian/output"      
 GPU=0
-BRANCH="cpu_timer_fast"
+BRANCH="$(git branch --show-current)"
 IMG_FLAG="images_4"
 
 # ============================================================
