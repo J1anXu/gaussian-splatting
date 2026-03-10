@@ -113,44 +113,37 @@ class PipelinedGradSync:
 
         return _do
 
-    def flush_and_prepare(self, submodel: GaussianModel, submodel_id: int, render_pkg: dict, sub_viewspace_point_tensor, iteration: int):
-        """Kick async D2H, flush previous pending, sync, and prepare new pending.
-
-        Key optimization: use Event.synchronize() instead of cuda.synchronize().
-        Event only waits for the PREVIOUS block's D2H, not current block's.
-        This lets GPU continue processing current D2H + next block's H2D/render
-        while CPU runs adam.
-        """
+    def after_backward(self, submodel: GaussianModel, submodel_id: int,
+                       render_pkg: dict, sub_viewspace_point_tensor, iteration: int):
+        """backward 后立即调用：发起 D2H，释放 GPU，准备 pending。"""
         tm = self.tracer
 
-        # 1. kick off async D2H for current submodel
+        # 1. D2H（non_blocking）
         state = self.kick_async_d2h(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor)
         cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad = state
 
-        # 2. deactivate current submodel's GPU subset
+        # 2. 释放 GPU subset
         submodel.deactivate_subset()
 
-        # 3. flush PREVIOUS submodel's opt step:
-        #    Event.sync waits only for PREV D2H (not current block's GPU work!)
-        #    → adam runs while GPU continues processing current block's D2H
+        # 3. 记录 D2H event（下一次 flush_pending 会等这个）
+        self._d2h_event.record()
+
+        # 4. 准备 deferred adam
+        self._pending_opt = self._make_pending(submodel, submodel_id, cur_idx, cur_gpu_grads,
+                                                pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration)
+
+    def flush_pending(self):
+        """h2d 前调用：等上一个 block 的 D2H 完成，立即执行 adam。"""
         if self._pending_opt is not None:
+            tm = self.tracer
             with tm.span("d2h_event_sync", tid=TID_PIPELINE):
                 self._d2h_event.synchronize()
             self._pending_opt()
             self._pending_opt = None
 
-        # 4. record Event AFTER current D2H is queued (next call will sync on this)
-        self._d2h_event.record()
-
-        # 5. prepare deferred work for current submodel
-        self._pending_opt = self._make_pending(submodel, submodel_id, cur_idx, cur_gpu_grads, pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration)
-
     def flush_last(self):
-        """Flush the last submodel's pending work after the loop ends."""
-        if self._pending_opt is not None:
-            self._d2h_event.synchronize()
-            self._pending_opt()
-            self._pending_opt = None
+        """最后一个 block 的 pending work。"""
+        self.flush_pending()
         # 全部 block 处理完后，同步所有 GPU 操作，一次性 resolve 所有 pending trace events
         torch.cuda.synchronize()
         self.tracer.flush_gpu_events()

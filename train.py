@@ -348,6 +348,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             # 流水线: 提前 gather 下一个 block，与当前 block 的 h2d+render 重叠
             # 每个 submodel 有自己的 _packed_staging，天然双缓冲
+            first_grad_h2d_done = False
+            first_grad_sid = -1
             if valid_ids:
                 # 预热: gather 第一个 block
                 with tracer.span("gather_nograd", block_id=valid_ids[0], n_vis=submodel_list[valid_ids[0]].visible_indices.shape[0]):
@@ -365,9 +367,21 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     next_id = valid_ids[i + 1]
                     with tracer.span("gather_nograd", block_id=next_id, n_vis=submodel_list[next_id].visible_indices.shape[0]):
                         submodel_list[next_id].pre_gather()
+                else:
+                    # 最后一个 nograd block：提前 gather 第一个 grad block（valid_ids[0] 最大块，必过 filter）
+                    with tracer.span("gather_grad", block_id=valid_ids[0], n_vis=submodel_list[valid_ids[0]].visible_indices.shape[0]):
+                        submodel_list[valid_ids[0]].pre_gather()
 
                 with tracer.gpu_span("render_nograd", block_id=submodel_id):
                     render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+
+                # 最后一个 nograd block: render dispatch 后 CPU 空闲，立刻 h2d 第一个 grad block
+                # GPU stream 上: render_nograd → h2d_grad 顺序执行，CPU 不阻塞
+                if i == len(valid_ids) - 1:
+                    first_grad_sid = valid_ids[0]  # 最大块，必过 filter
+                    with tracer.transfer_span("h2d_grad", block_id=first_grad_sid, tid=TID_H2D):
+                        submodel_list[first_grad_sid].kick_h2d_and_activate(requires_grad=True)
+                    first_grad_h2d_done = True
 
                 submodel.deactivate_subset()
 
@@ -394,11 +408,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         with torch.no_grad():
             with tracer.gpu_span("merge_opt_kid"):
                 merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
-            
+
         C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
         prefix_T = merge_res["prefix_T"]
         block_rank = merge_res["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
-        K, C, H, W = C_sorted.shape   
+        K, C, H, W = C_sorted.shape
         colors_bg = merge_res["bg_rgb"]
         diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
 
@@ -411,16 +425,27 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             key=lambda i: submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0],
             reverse=True
         )
-        for idx in grad_order:
+
+        for gi, idx in enumerate(grad_order):
             submodel_id = visible_submodel_id_list[idx]
             rank_map = block_rank[idx]
             submodel: GaussianModel = submodel_list[submodel_id]
 
-            with tracer.span("gather_grad", block_id=submodel_id,
-                             n_vis=submodel.visible_indices.shape[0]):
-                submodel.pre_gather()
-            with tracer.transfer_span("h2d_grad", block_id=submodel_id, tid=TID_H2D):
-                submodel.kick_h2d_and_activate(requires_grad=True)
+            # D2H 完成后立刻执行上一个 block 的 adam
+            grad_sync.flush_pending()
+
+            # 第一个 block 的 h2d 已经在 nograd→grad bridge 中完成
+            if gi == 0 and first_grad_h2d_done and submodel_id == first_grad_sid:
+                pass  # 已在最后一个 nograd iter 中完成 h2d
+            else:
+                with tracer.transfer_span("h2d_grad", block_id=submodel_id, tid=TID_H2D):
+                    submodel.kick_h2d_and_activate(requires_grad=True)
+
+            # 趁 h2d (non_blocking) + render 占 GPU 时，CPU 提前 gather 下一个 block
+            if gi + 1 < len(grad_order):
+                next_sid = visible_submodel_id_list[grad_order[gi + 1]]
+                with tracer.span("gather_grad", block_id=next_sid, n_vis=submodel_list[next_sid].visible_indices.shape[0]):
+                    submodel_list[next_sid].pre_gather()
 
             with tracer.gpu_span("render_grad", block_id=submodel_id):
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -459,7 +484,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             tracer.counter("pts", {"visible": visible_pts, "total": sum(s._xyz.shape[0] for s in submodel_list)})
 
-            grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
+            # backward 后立即发起 D2H + 准备 pending
+            grad_sync.after_backward(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
 
         # flush the last submodel's pending work
         grad_sync.flush_last()
