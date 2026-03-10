@@ -367,10 +367,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     next_id = valid_ids[i + 1]
                     with tracer.span("gather_nograd", block_id=next_id, n_vis=submodel_list[next_id].visible_indices.shape[0]):
                         submodel_list[next_id].pre_gather()
-                else:
-                    # 最后一个 nograd block：提前 gather 第一个 grad block（valid_ids[0] 最大块，必过 filter）
-                    with tracer.span("gather_grad", block_id=valid_ids[0], n_vis=submodel_list[valid_ids[0]].visible_indices.shape[0]):
-                        submodel_list[valid_ids[0]].pre_gather()
 
                 with tracer.gpu_span("render_nograd", block_id=submodel_id):
                     render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -440,12 +436,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             else:
                 with tracer.transfer_span("h2d_grad", block_id=submodel_id, tid=TID_H2D):
                     submodel.kick_h2d_and_activate(requires_grad=True)
-
-            # 趁 h2d (non_blocking) + render 占 GPU 时，CPU 提前 gather 下一个 block
-            if gi + 1 < len(grad_order):
-                next_sid = visible_submodel_id_list[grad_order[gi + 1]]
-                with tracer.span("gather_grad", block_id=next_sid, n_vis=submodel_list[next_sid].visible_indices.shape[0]):
-                    submodel_list[next_sid].pre_gather()
 
             with tracer.gpu_span("render_grad", block_id=submodel_id):
                 render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
