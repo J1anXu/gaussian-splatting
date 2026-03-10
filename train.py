@@ -572,8 +572,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         with open(os.path.join(run_output_dir, f"bench_{SCENE_NAME}.txt"), "w") as f:
             f.write(bench_text + "\n")
 
-    # 导出 timeline
+    # 导出 timeline（两份：output 目录 + timeline 目录）
     tracer.export(os.path.join(run_output_dir, f"trace_{SCENE_NAME}.json"))
+    tracer.export(f"timeline/trace_{BRANCH}_{SCENE_NAME}.json")
 
     # 保存训练日志
     if LOGGER and hasattr(LOGGER, 'handlers'):
