@@ -94,16 +94,10 @@ class PipelinedGradSync:
                     with tm.span("packed_sparse_adam", tid=TID_OPTIMIZE, block_id=sm_id, n_vis=idx.shape[0]):
                         sm.packed_sparse_adam_step(idx, grad_subset, iteration)
 
-        def _densify():
-            with torch.no_grad():
+                # densify_and_prune / reset_opacity MUST run after adam:
+                # they call pack_to_buffer() which rebuilds _packed, so adam's
+                # idx would be invalid if these ran first.
                 if iteration < opt.densify_until_iter:
-                    with tm.span("densify_stats", tid=TID_OPTIMIZE, block_id=sm_id):
-                        gvf = sm.visible_indices[sub_vf]
-                        sm.max_radii2D[gvf] = torch.max(sm.max_radii2D[gvf], sub_radii[sub_vf])
-                        # vpt_grad[sub_vf] == gvpg[gvf]: skip the [N,3] alloc + scatter + re-gather
-                        sm.xyz_gradient_accum[gvf] += torch.norm(vpt_grad[sub_vf, :2], dim=-1, keepdim=True)
-                        sm.denom[gvf] += 1
-
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                         with tm.span("densify_and_prune", tid=TID_OPTIMIZE, block_id=sm_id):
                             size_threshold = 20 if iteration > opt.opacity_reset_interval else None
@@ -116,7 +110,17 @@ class PipelinedGradSync:
                             sm.reset_opacity()
                             sm._re_view_opacity()
 
-        return _adam, _densify
+        def _densify_stats():
+            """Lightweight stats accumulation — safe to defer and overlap with GPU H2D."""
+            with torch.no_grad():
+                if iteration < opt.densify_until_iter:
+                    with tm.span("densify_stats", tid=TID_OPTIMIZE, block_id=sm_id):
+                        gvf = sm.visible_indices[sub_vf]
+                        sm.max_radii2D[gvf] = torch.max(sm.max_radii2D[gvf], sub_radii[sub_vf])
+                        sm.xyz_gradient_accum[gvf] += torch.norm(vpt_grad[sub_vf, :2], dim=-1, keepdim=True)
+                        sm.denom[gvf] += 1
+
+        return _adam, _densify_stats
 
     def flush_and_prepare(self, submodel: GaussianModel, submodel_id: int, render_pkg: dict, sub_viewspace_point_tensor, iteration: int):
         """Kick async D2H, flush previous pending adam, sync, and prepare new pending.
@@ -174,12 +178,17 @@ class PipelinedGradSync:
             self._pending_densify = None
 
     def flush_last(self):
-        """Flush the last submodel's pending work after the loop ends."""
-        if self._pending_adam is not None:
-            self._d2h_event.synchronize()
-            self.tracer.flush_gpu_events()
-            self._pending_adam()
-            self._pending_adam = None
+        """Flush the last submodel's pending work after the loop ends.
+
+        Order must match normal pipeline: densify_stats → adam → densify_and_prune.
+        densify_stats reads model state (max_radii2D, visible_indices);
+        adam's densify_and_prune may resize them via pack_to_buffer().
+        """
+        self._d2h_event.synchronize()
+        self.tracer.flush_gpu_events()
         if self._pending_densify is not None:
             self._pending_densify()
             self._pending_densify = None
+        if self._pending_adam is not None:
+            self._pending_adam()
+            self._pending_adam = None
