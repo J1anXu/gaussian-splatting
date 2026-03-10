@@ -345,28 +345,23 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                     continue
                 valid_ids.append(sid)
 
-            # gather 线程：逐个 gather，第一个完成后主线程立即开始 h2d+render
-            # gather 远快于 h2d+render，所以主线程轮到某块时 gather 必然已完成
-            import threading
-            gather_ready = [threading.Event() for _ in valid_ids]
-
-            def _bg_gather_all():
-                for i, sid in enumerate(valid_ids):
-                    with tracer.span("gather_nograd", block_id=sid, n_vis=submodel_list[sid].visible_indices.shape[0]):
-                        submodel_list[sid].pre_gather()
-                    gather_ready[i].set()
-
-            gather_thread = threading.Thread(target=_bg_gather_all, daemon=True)
-            gather_thread.start()
+            # 流水线: 提前 gather 下一个 block，与当前 block 的 h2d+render 重叠
+            if valid_ids:
+                with tracer.span("gather_nograd", block_id=valid_ids[0], n_vis=submodel_list[valid_ids[0]].visible_indices.shape[0]):
+                    submodel_list[valid_ids[0]].pre_gather()
 
             for i, submodel_id in enumerate(valid_ids):
                 submodel = submodel_list[submodel_id]
                 visible_pts += submodel.visible_indices.shape[0]
 
-                gather_ready[i].wait()
-
                 with tracer.transfer_span("h2d_nograd", block_id=submodel_id):
                     submodel.kick_h2d_and_activate(requires_grad=False)
+
+                # 趁 h2d (non_blocking) + render 占 GPU 时，CPU 提前 gather 下一个 block
+                if i + 1 < len(valid_ids):
+                    next_id = valid_ids[i + 1]
+                    with tracer.span("gather_nograd", block_id=next_id, n_vis=submodel_list[next_id].visible_indices.shape[0]):
+                        submodel_list[next_id].pre_gather()
 
                 with tracer.gpu_span("render_nograd", block_id=submodel_id):
                     render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
@@ -378,8 +373,6 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 all_depth.append(depth)
                 all_alpha.append(alphaLeft)
                 all_submodel_ids.append(submodel_id)
-
-            gather_thread.join()
 
             # Phase 2: 所有 render 完成后，批量过滤低贡献 block（此时 .item() 不会阻塞 render pipeline）
             for image, depth, alphaLeft, submodel_id in zip(all_rendered, all_depth, all_alpha, all_submodel_ids):
@@ -415,7 +408,13 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             key=lambda i: submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0],
             reverse=True
         )
-        for idx in grad_order:
+        # 提前 gather 第一个 grad block
+        if grad_order:
+            first_sid = visible_submodel_id_list[grad_order[0]]
+            with tracer.span("gather_grad", block_id=first_sid, n_vis=submodel_list[first_sid].visible_indices.shape[0]):
+                submodel_list[first_sid].pre_gather()
+
+        for gi, idx in enumerate(grad_order):
             submodel_id = visible_submodel_id_list[idx]
             rank_map = block_rank[idx]
             submodel: GaussianModel = submodel_list[submodel_id]
@@ -461,6 +460,12 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             tracer.counter("pts", {"visible": visible_pts, "total": sum(s._xyz.shape[0] for s in submodel_list)})
 
             grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
+
+            # 提前 gather 下一个 grad block
+            if gi + 1 < len(grad_order):
+                next_sid = visible_submodel_id_list[grad_order[gi + 1]]
+                with tracer.span("gather_grad", block_id=next_sid, n_vis=submodel_list[next_sid].visible_indices.shape[0]):
+                    submodel_list[next_sid].pre_gather()
 
         # flush the last submodel's pending work
         grad_sync.flush_last()
