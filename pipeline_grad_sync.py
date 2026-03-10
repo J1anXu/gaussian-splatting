@@ -93,11 +93,11 @@ class PipelinedGradSync:
 
                 if iteration < opt.densify_until_iter:
                     with tm.span("densify_stats", tid=TID_OPTIMIZE, block_id=sm_id):
-                        gvpg = torch.zeros(sm.get_xyz.shape[0], 3, device="cpu", requires_grad=False)
-                        gvpg[sm.visible_indices] = vpt_grad
                         gvf = sm.visible_indices[sub_vf]
                         sm.max_radii2D[gvf] = torch.max(sm.max_radii2D[gvf], sub_radii[sub_vf])
-                        sm.add_densification_stats2(gvpg, gvf)
+                        # vpt_grad[sub_vf] == gvpg[gvf]: skip the [N,3] alloc + scatter + re-gather
+                        sm.xyz_gradient_accum[gvf] += torch.norm(vpt_grad[sub_vf, :2], dim=-1, keepdim=True)
+                        sm.denom[gvf] += 1
 
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                         with tm.span("densify_and_prune", tid=TID_OPTIMIZE, block_id=sm_id):
