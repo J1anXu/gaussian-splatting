@@ -416,9 +416,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             rank_map = block_rank[idx]
             submodel: GaussianModel = submodel_list[submodel_id]
 
-            with tracer.span("gather_grad", block_id=submodel_id,
-                             n_vis=submodel.visible_indices.shape[0]):
-                submodel.pre_gather()
+            # pre_gather() 已在 nograd 阶段完成，staging buffer 仍有效，无需重复 gather
             with tracer.transfer_span("h2d_grad", block_id=submodel_id):
                 submodel.kick_h2d_and_activate(requires_grad=True)
 
