@@ -91,30 +91,14 @@ class PipelinedGradSync:
                 # Grads already packed in _packed_staging by GPU-side cat + single D2H
                 if iteration < opt.iterations:
                     grad_subset = sm._packed_staging[:n_vis]
-                    with tm.span("packed_sparse_adam", tid=TID_OPTIMIZE, block_id=sm_id, n_vis=idx.shape[0]):
+                    with tm.span("adam", tid=TID_OPTIMIZE, block_id=sm_id, n_vis=idx.shape[0]):
                         sm.packed_sparse_adam_step(idx, grad_subset, iteration)
-
-                # densify_and_prune / reset_opacity MUST run after adam:
-                # they call pack_to_buffer() which rebuilds _packed, so adam's
-                # idx would be invalid if these ran first.
-                if iteration < opt.densify_until_iter:
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        with tm.span("densify_and_prune", tid=TID_OPTIMIZE, block_id=sm_id):
-                            size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                            sm.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
-                            sm.pack_to_buffer()
-                            self.reallocate_pinned_buffers(sm)
-
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        with tm.span("reset_opacity", tid=TID_OPTIMIZE, block_id=sm_id):
-                            sm.reset_opacity()
-                            sm._re_view_opacity()
 
         def _densify_stats():
             """Lightweight stats accumulation — safe to defer and overlap with GPU H2D."""
             with torch.no_grad():
                 if iteration < opt.densify_until_iter:
-                    with tm.span("densify_stats", tid=TID_OPTIMIZE, block_id=sm_id):
+                    with tm.span("stats", tid=TID_OPTIMIZE, block_id=sm_id):
                         gvf = sm.visible_indices[sub_vf]
                         sm.max_radii2D[gvf] = torch.max(sm.max_radii2D[gvf], sub_radii[sub_vf])
                         sm.xyz_gradient_accum[gvf] += torch.norm(vpt_grad[sub_vf, :2], dim=-1, keepdim=True)
@@ -180,9 +164,9 @@ class PipelinedGradSync:
     def flush_last(self):
         """Flush the last submodel's pending work after the loop ends.
 
-        Order must match normal pipeline: densify_stats → adam → densify_and_prune.
-        densify_stats reads model state (max_radii2D, visible_indices);
-        adam's densify_and_prune may resize them via pack_to_buffer().
+        Order must match normal pipeline: densify_stats → adam.
+        densify_stats reads model state (max_radii2D, visible_indices).
+        densify_and_prune is now handled separately via run_densify_all_blocks().
         """
         self._d2h_event.synchronize()
         self.tracer.flush_gpu_events()
@@ -192,3 +176,27 @@ class PipelinedGradSync:
         if self._pending_adam is not None:
             self._pending_adam()
             self._pending_adam = None
+
+    def run_densify_all_blocks(self, iteration: int):
+        """Run densify_and_prune and reset_opacity on ALL blocks (not just visible ones).
+
+        Must be called AFTER flush_last() so all adam steps and stats are complete.
+        This ensures blocks that were invisible this iteration still get pruned.
+        """
+        opt, dataset, scene = self.opt, self.dataset, self.scene
+        tm = self.tracer
+
+        with torch.no_grad():
+            if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                for sm_id, sm in enumerate(self.submodel_list):
+                    with tm.span("densify_and_prune", tid=TID_OPTIMIZE, block_id=sm_id):
+                        sm.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
+                        sm.pack_to_buffer()
+                        self.reallocate_pinned_buffers(sm)
+
+            if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                for sm_id, sm in enumerate(self.submodel_list):
+                    with tm.span("reset_opacity", tid=TID_OPTIMIZE, block_id=sm_id):
+                        sm.reset_opacity()
+                        sm._re_view_opacity()

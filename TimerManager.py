@@ -163,24 +163,26 @@ class TraceManager:
 
     def flush_gpu_events(self):
         """
-        Resolve pending GPU/transfer events. Call after torch.cuda.synchronize().
+        Resolve pending GPU/transfer events whose CUDA events have completed.
         Uses the per-iteration reference CUDA event to compute absolute GPU
         timestamps: ts = ref_cpu_ts + ref.elapsed_time(e_start).
+
+        Events that haven't completed yet (elapsed_time raises) are kept in
+        _gpu_pending for the next flush call.
         """
         if not self._gpu_pending:
             return
         resolved = []
+        still_pending = []
         for e_start, e_end, meta in self._gpu_pending:
             try:
                 gpu_dur_us = int(e_start.elapsed_time(e_end) * 1000)
                 ref_event = meta.pop("ref_event", None)
                 ref_cpu_ts = meta.pop("ref_cpu_ts", None)
                 if ref_event is not None and ref_cpu_ts is not None:
-                    # offset from iteration reference → absolute GPU start
                     offset_us = int(ref_event.elapsed_time(e_start) * 1000)
                     gpu_ts = ref_cpu_ts + offset_us
                 else:
-                    # fallback: use CPU dispatch time (less accurate)
                     gpu_ts = meta.pop("cpu_ts", time.time_ns() // 1000)
 
                 pid = meta.pop("pid", PID_GPU)
@@ -196,10 +198,10 @@ class TraceManager:
                 }
                 resolved.append(ev)
             except Exception:
-                pass
+                still_pending.append((e_start, e_end, meta))
         with self._lock:
             self.events.extend(resolved)
-            self._gpu_pending.clear()
+            self._gpu_pending = still_pending
 
     # ── export ────────────────────────────────────────────────────────────────
 

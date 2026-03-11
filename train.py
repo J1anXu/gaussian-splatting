@@ -339,10 +339,14 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             max_vis = submodel_list[sorted_submodel_ids[0]].visible_indices.shape[0] if sorted_submodel_ids else 0
 
             # 过滤出有效 block
+            # densify 期间不过滤小块，确保所有可见块都累积梯度统计
+            in_densify_period = iteration < opt.densify_until_iter
             valid_ids = []
             for sid in sorted_submodel_ids:
                 n_vis = submodel_list[sid].visible_indices.shape[0]
-                if n_vis == 0 or (config.SKIP_SMALL_BLOCK_THRESH > 0 and n_vis < max_vis * config.SKIP_SMALL_BLOCK_THRESH):
+                if n_vis == 0:
+                    continue
+                if not in_densify_period and config.SKIP_SMALL_BLOCK_THRESH > 0 and n_vis < max_vis * config.SKIP_SMALL_BLOCK_THRESH:
                     continue
                 valid_ids.append(sid)
 
@@ -350,7 +354,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             # 每个 submodel 有自己的 _packed_staging，天然双缓冲
             if valid_ids:
                 # 预热: gather 第一个 block
-                with tracer.span("gather_nograd", block_id=valid_ids[0], n_vis=submodel_list[valid_ids[0]].visible_indices.shape[0]):
+                with tracer.span("gather", block_id=valid_ids[0], n_vis=submodel_list[valid_ids[0]].visible_indices.shape[0]):
                     submodel_list[valid_ids[0]].pre_gather()
 
             for i, submodel_id in enumerate(valid_ids):
@@ -363,7 +367,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 # 趁 h2d (non_blocking) + render 占 GPU 时，CPU 提前 gather 下一个 block
                 if i + 1 < len(valid_ids):
                     next_id = valid_ids[i + 1]
-                    with tracer.span("gather_nograd", block_id=next_id, n_vis=submodel_list[next_id].visible_indices.shape[0]):
+                    with tracer.span("gather", block_id=next_id, n_vis=submodel_list[next_id].visible_indices.shape[0]):
                         submodel_list[next_id].pre_gather()
 
                 with tracer.gpu_span("render_nograd", block_id=submodel_id):
@@ -378,11 +382,13 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 all_submodel_ids.append(submodel_id)
 
             # Phase 2: 所有 render 完成后，批量过滤低贡献 block（此时 .item() 不会阻塞 render pipeline）
+            # densify 期间不过滤，确保所有可见块进入 grad 阶段累积统计
             for image, depth, alphaLeft, submodel_id in zip(all_rendered, all_depth, all_alpha, all_submodel_ids):
-                valid_pixels = (image > 0).any(dim=0).sum().item()
-                total_pixels = image.shape[1] * image.shape[2]
-                if valid_pixels / total_pixels < 0.05:
-                    continue
+                if not in_densify_period:
+                    valid_pixels = (image > 0).any(dim=0).sum().item()
+                    total_pixels = image.shape[1] * image.shape[2]
+                    if valid_pixels / total_pixels < 0.05:
+                        continue
 
                 rendered_list.append(image)
                 depth_list.append(depth)
@@ -464,6 +470,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
         # flush the last submodel's pending work
         grad_sync.flush_last()
+
+        # densify_and_prune 对所有块统一执行（包括当次不可见的块）
+        if iteration < opt.densify_until_iter:
+            grad_sync.run_densify_all_blocks(iteration)
 
         # reserved 超过 allocated 太多时才清缓存，避免频繁清导致性能下降
         if torch.cuda.memory_reserved() > torch.cuda.memory_allocated() + config.GPU_CACHE_THRESHOLD_GB * 1024**3:
