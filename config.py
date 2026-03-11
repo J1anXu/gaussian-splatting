@@ -33,3 +33,9 @@ TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
 KEEP_TRAINING = False  # 由命令行参数 --keep_training 控制
 
 SKIP_SMALL_BLOCK_THRESH = 0.05  # 跳过可见点数小于最大块该比例的小块，设为0关闭
+
+# Densify 修复模式 (分块训练与原始3DGS densify对齐):
+#   0 = 保持现状（不修复，被过滤的块漏统计，densify只处理当次可见块）
+#   1 = 仅全块densify（过滤照常，但densify_and_prune对所有块执行）
+#   2 = 完全对齐（densify期间不过滤小块 + 全块densify，最接近原始3DGS）
+DENSIFY_FIX_MODE = 2

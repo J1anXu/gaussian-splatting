@@ -2,6 +2,7 @@ import torch
 from typing import List, Optional, Callable
 from scene import GaussianModel
 from TimerManager import TraceManager, TID_PIPELINE, TID_ADAM, PID_CPU, TID_D2H, TID_OPTIMIZE
+import config
 
 
 ATTR_NAMES = ['_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation', '_opacity']
@@ -93,6 +94,20 @@ class PipelinedGradSync:
                     grad_subset = sm._packed_staging[:n_vis]
                     with tm.span("adam", tid=TID_OPTIMIZE, block_id=sm_id, n_vis=idx.shape[0]):
                         sm.packed_sparse_adam_step(idx, grad_subset, iteration)
+
+                # mode 0: 保持原始行为，densify_and_prune 仅对当次可见块执行
+                if config.DENSIFY_FIX_MODE == 0 and iteration < opt.densify_until_iter:
+                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                        with tm.span("densify_and_prune", tid=TID_OPTIMIZE, block_id=sm_id):
+                            size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                            sm.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
+                            sm.pack_to_buffer()
+                            self.reallocate_pinned_buffers(sm)
+
+                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                        with tm.span("reset_opacity", tid=TID_OPTIMIZE, block_id=sm_id):
+                            sm.reset_opacity()
+                            sm._re_view_opacity()
 
         def _densify_stats():
             """Lightweight stats accumulation — safe to defer and overlap with GPU H2D."""
