@@ -1,0 +1,12 @@
+Launching 1 GPU queues...
+Branch: vanilla3DGS
+  GPU 0: bicycle flowers garden stump treehill room counter kitchen bonsai 
+
+========================================
+GPU   : 0
+Scene : bicycle
+Images: -i images_4
+Time  : Fri Mar 13 07:37:06 PM CDT 2026
+Branch: vanilla3DGS
+========================================
+  [1/3] Training bicycle ...
