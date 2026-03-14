@@ -175,10 +175,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if LOGGER is not None:
                     gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
                     pts = gaussians.get_xyz.shape[0]
+                    pts_m = pts / 1e6
                     elapsed = time.time() - global_tic
                     LOGGER.info(
                         f"step={iteration}/{opt.iterations} | loss={ema_loss_for_log:.4f} | "
-                        f"pts={pts} | mem={gpu_mem_gb:.2f}G | elapsed={elapsed:.1f}s"
+                        f"pts={pts_m:.3f}M | mem={gpu_mem_gb:.2f}G | elapsed={elapsed:.1f}s"
                     )
                     if WANDB and not DEBUG_MODE:
                         wandb.log({"iter": iteration, "loss": round(ema_loss_for_log, 7), "pts": pts, "gpu_mem_gb": round(gpu_mem_gb, 2)}, step=iteration)
@@ -226,7 +227,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         hours = int(total_cost // 3600)
         minutes = int((total_cost % 3600) // 60)
         hhmm = f"{hours:02d}:{minutes:02d}"
-        LOGGER.info(f"Training complete. Total time: {hhmm} | num_GS: {gaussians.get_xyz.shape[0]}")
+        final_pts_m = gaussians.get_xyz.shape[0] / 1e6
+        LOGGER.info(f"Training complete. Total time: {hhmm} | num_GS: {final_pts_m:.3f}M")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
