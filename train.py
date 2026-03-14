@@ -10,6 +10,7 @@
 #
 
 import os
+import json
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
@@ -24,6 +25,7 @@ from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from logger import get_logger
+from torchvision.utils import save_image
 import wandb
 
 SCENE_NAME = None
@@ -51,12 +53,20 @@ except:
     SPARSE_ADAM_AVAILABLE = False
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+    global LOGGER
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
+
+    # Setup file logger inside model_path (colocated with outputs)
+    log_dir = os.path.join(dataset.model_path, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    LOGGER = get_logger(SCENE_NAME, log_dir)
+    LOGGER.info(f"Scene: {SCENE_NAME} | source: {dataset.source_path} | iterations: {opt.iterations}")
+
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -78,6 +88,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
+    global_tic = time.time()
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
@@ -164,10 +175,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if LOGGER is not None:
                     gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
                     pts = gaussians.get_xyz.shape[0]
-                    log = {"iter": iteration, "loss": round(ema_loss_for_log, 7), "pts": pts, "gpu_mem_gb": round(gpu_mem_gb, 2)}
-                    LOGGER.info(log)
+                    elapsed = time.time() - global_tic
+                    LOGGER.info(
+                        f"step={iteration}/{opt.iterations} | loss={ema_loss_for_log:.4f} | "
+                        f"pts={pts} | mem={gpu_mem_gb:.2f}G | elapsed={elapsed:.1f}s"
+                    )
                     if WANDB and not DEBUG_MODE:
-                        wandb.log(log, step=iteration)
+                        wandb.log({"iter": iteration, "loss": round(ema_loss_for_log, 7), "pts": pts, "gpu_mem_gb": round(gpu_mem_gb, 2)}, step=iteration)
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -206,6 +220,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
+    # Log training complete with total time
+    if LOGGER is not None:
+        total_cost = time.time() - global_tic
+        hours = int(total_cost // 3600)
+        minutes = int((total_cost % 3600) // 60)
+        hhmm = f"{hours:02d}:{minutes:02d}"
+        LOGGER.info(f"Training complete. Total time: {hhmm} | num_GS: {gaussians.get_xyz.shape[0]}")
+
 def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
@@ -237,13 +259,21 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
     # Report test and samples of training set
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
+        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()},
                               {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
 
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
                 psnr_test = 0.0
+
+                # Create output dirs for rendered images
+                if BRANCH is not None:
+                    renders_dir = os.path.join(scene.model_path, "rendered", BRANCH, config['name'], f"ours_{iteration}", "renders")
+                    gt_dir = os.path.join(scene.model_path, "rendered", BRANCH, config['name'], f"ours_{iteration}", "gt")
+                    os.makedirs(renders_dir, exist_ok=True)
+                    os.makedirs(gt_dir, exist_ok=True)
+
                 for idx, viewpoint in enumerate(config['cameras']):
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
@@ -254,14 +284,36 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
                         if iteration == testing_iterations[0]:
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                    # Save rendered images to disk
+                    if BRANCH is not None:
+                        save_image(image, os.path.join(renders_dir, f"{viewpoint.image_name}.png"))
+                        save_image(gt_image, os.path.join(gt_dir, f"{viewpoint.image_name}.png"))
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
                 psnr_test /= len(config['cameras'])
-                l1_test /= len(config['cameras'])          
+                l1_test /= len(config['cameras'])
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                if LOGGER is not None:
+                    LOGGER.info(f"[Eval {config['name']} iter={iteration}] L1: {l1_test:.4f} PSNR: {psnr_test:.4f}")
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+
+                # Save results.json
+                if BRANCH is not None:
+                    results_dir = os.path.join(scene.model_path, "rendered", BRANCH, config['name'])
+                    results_path = os.path.join(results_dir, "results.json")
+                    if os.path.exists(results_path):
+                        with open(results_path, "r") as f:
+                            results_data = json.load(f)
+                    else:
+                        results_data = {}
+                    results_data[f"ours_{iteration}"] = {
+                        "PSNR": psnr_test.item(),
+                        "L1": l1_test.item(),
+                    }
+                    with open(results_path, "w") as f:
+                        json.dump(results_data, f, indent=2)
 
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
@@ -301,18 +353,21 @@ if __name__ == "__main__":
     else:
         BRANCH = get_git_branch()
 
-    LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
     DEBUG_MODE = sys.gettrace() is not None
 
     if WANDB and not DEBUG_MODE:
-        wandb.login()
-        run = wandb.init(
-            project=DATASET_NAME,
-            name=f"{SCENE_NAME}_{BRANCH}",
-            group=SCENE_NAME,
-            config=vars(op.extract(args))
-        )
-        wandb.define_metric("iteration")
+        try:
+            wandb.login()
+            run = wandb.init(
+                project=DATASET_NAME,
+                name=f"{SCENE_NAME}_{BRANCH}",
+                group=SCENE_NAME,
+                config=vars(op.extract(args))
+            )
+            wandb.define_metric("iteration")
+        except Exception as e:
+            print(f"wandb init failed: {e}, continuing without wandb")
+            WANDB = False
 
     # Start GUI server, configure and run training
     if not args.disable_viewer:
