@@ -170,19 +170,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
 
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
+                pts_m = gaussians.get_xyz.shape[0] / 1e6
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "Pts": f"{pts_m:.3f}M"})
                 progress_bar.update(10)
                 if LOGGER is not None:
                     gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
-                    pts = gaussians.get_xyz.shape[0]
-                    pts_m = pts / 1e6
                     elapsed = time.time() - global_tic
                     LOGGER.info(
                         f"step={iteration}/{opt.iterations} | loss={ema_loss_for_log:.4f} | "
                         f"pts={pts_m:.3f}M | mem={gpu_mem_gb:.2f}G | elapsed={elapsed:.1f}s"
                     )
                     if WANDB and not DEBUG_MODE:
-                        wandb.log({"iter": iteration, "loss": round(ema_loss_for_log, 7), "pts": pts, "gpu_mem_gb": round(gpu_mem_gb, 2)}, step=iteration)
+                        wandb.log({"iter": iteration, "loss": round(ema_loss_for_log, 7), "pts": int(pts_m * 1e6), "gpu_mem_gb": round(gpu_mem_gb, 2)}, step=iteration)
             if iteration == opt.iterations:
                 progress_bar.close()
 
