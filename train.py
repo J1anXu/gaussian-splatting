@@ -389,7 +389,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 alpha_list.append(alphaLeft)
                 visible_submodel_id_list.append(submodel_id)
 
-
+        if len(rendered_list) == 0:
+            print(f"Iteration {iteration}: No visible blocks after filtering, skipping.")
+            continue
         # execute merge
         with torch.no_grad():
             with tracer.gpu_span("merge_opt_kid"):
