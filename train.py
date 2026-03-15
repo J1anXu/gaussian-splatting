@@ -388,7 +388,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 depth_list.append(depth)
                 alpha_list.append(alphaLeft)
                 visible_submodel_id_list.append(submodel_id)
-
+        if len(rendered_list) == 0:
+            print(f"Iter {iteration}: No visible blocks after filtering, skipping iteration.")
+            continue
 
         # execute merge
         with torch.no_grad():

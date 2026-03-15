@@ -32,7 +32,8 @@ class Scene:
         self.loaded_iter = None
         self.gaussians = gaussians
         os.makedirs(self.model_path, exist_ok=True)
-        BRANCH = get_git_branch()
+        global BRANCH
+        BRANCH = os.environ.get('GIT_BRANCH_OVERRIDE') or get_git_branch() or "unknown"
 
         if load_iteration:
             if load_iteration == -1:
