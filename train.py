@@ -201,10 +201,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
                     initial_gaussians.optimizer.step()
                     initial_gaussians.optimizer.zero_grad(set_to_none = True)
 
-    # Phase 1 finished all iterations without partitioning (pts <= SPLIT_SIZE)
-    # Return as single block for phase 2
-    print(f"Phase 1 completed {opt.iterations} iterations without partitioning, continuing as single block...")
-    return scene, opt.iterations, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg
+    print(f"Warning! ⚠️ Finished phase 1 training at iteration {opt.iterations} without partitioning")
 
 
 def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
