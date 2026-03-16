@@ -117,9 +117,10 @@ print_branch() {
             sum_ssim=$(awk "BEGIN{print $sum_ssim + $ssim}")
             sum_lpips=$(awk "BEGIN{print $sum_lpips + $lpips}")
             count=$((count + 1))
+            printf "%-12s %8.4f %8.4f %8.4f %8s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$time_s"
+        else
+            printf "%-12s %8s %8s %8s %8s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$time_s"
         fi
-
-        printf "%-12s %8.4f %8.4f %8.4f %8s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$time_s"
     done
 
     echo "$sep"
