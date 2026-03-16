@@ -980,6 +980,13 @@ class GaussianModel:
             idx = torch.tensor(idx, dtype=torch.long)
         idx = idx.to("cpu")
         n = idx.shape[0]
+        if n > 0 and idx.max() >= self._packed.shape[0]:
+            raise IndexError(
+                f"pre_gather: idx.max()={idx.max().item()} >= _packed.shape[0]={self._packed.shape[0]}, "
+                f"_xyz.shape[0]={self._xyz.shape[0]}, "
+                f"_xyz_contig.shape[0]={self._xyz_contig.shape[0] if hasattr(self, '_xyz_contig') else 'N/A'}, "
+                f"idx.shape={idx.shape}"
+            )
         staging = self._packed_staging[:n]
         torch.index_select(self._packed, 0, idx, out=staging)
         self._db_n = n

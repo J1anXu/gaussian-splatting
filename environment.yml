@@ -5,21 +5,25 @@ channels:
   - conda-forge
   - defaults
 dependencies:
+  - python=3.11
+  - pip
   - plyfile
-  - python=3.8
-  - pip=23.0.1
   - tqdm
   - psutil
-  - pytorch=2.0.1
-  - pytorch-cuda=11.7
-  - torchvision=0.15.2
+  - pytorch::pytorch=2.1.0
+  - pytorch::pytorch-cuda=11.8
+  - pytorch::torchvision=0.16.0
   - setuptools=69.1.1
-  - mkl==2024.0
+  - mkl
+  - numpy<2
   - pandas
   - opencv
   - matplotlib
+  - wandb
+  
 
-# 手动、在 torch 已存在的环境里编译 必须这个顺序
-# pip install -e submodules/simple-knn
-# pip install -e submodules/fused-ssim
-# pip install -e submodules/diff-gaussian-rasterization
+# conda env create -f environment.yml -n partgs_fix
+# conda activate partgs_fix
+# pip install --no-build-isolation -e submodules/simple-knn
+# pip install --no-build-isolation -e submodules/fused-ssim
+# pip install --no-build-isolation -e submodules/diff-gaussian-rasterization

@@ -11,12 +11,13 @@ class PipelinedGradSync:
     """Manages async D2H gradient copies and deferred optimizer steps for submodel pipeline."""
 
     def __init__(self, submodel_list: List[GaussianModel], opt, dataset, scene,
-                 tracer: Optional[TraceManager] = None):
+                 tracer: Optional[TraceManager] = None, frustum_cache: Optional[dict] = None):
         self.submodel_list = submodel_list
         self.opt = opt
         self.dataset = dataset
         self.scene = scene
         self.tracer = tracer or TraceManager(enabled=False)
+        self.frustum_cache = frustum_cache
 
         self._pending_adam: Optional[Callable] = None
         self._pending_densify: Optional[Callable] = None
@@ -104,6 +105,8 @@ class PipelinedGradSync:
                             sm.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
                             sm.pack_to_buffer()
                             self.reallocate_pinned_buffers(sm)
+                            if self.frustum_cache and sm_id in self.frustum_cache:
+                                del self.frustum_cache[sm_id]
 
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         with tm.span("reset_opacity", tid=TID_OPTIMIZE, block_id=sm_id):

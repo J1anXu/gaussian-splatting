@@ -263,7 +263,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     TRACE_START = 681
     TRACE_END = 700
     tracer = TraceManager(enabled=False)
-    grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer)
+    grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer,
+                                   frustum_cache=frustum_cache)
 
     time_start = time.time()
 
@@ -325,7 +326,18 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             else:
                 for model in submodel_list:
                     model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
-        
+            # DEBUG: validate visible_indices vs _packed
+            for sid, m in enumerate(submodel_list):
+                vi = m.visible_indices
+                if vi is not None and len(vi) > 0 and hasattr(m, '_packed'):
+                    mx = vi.max().item()
+                    if mx >= m._packed.shape[0]:
+                        raise RuntimeError(
+                            f"[iter {iteration}] submodel {sid}: visible_indices.max()={mx} >= "
+                            f"_packed.shape[0]={m._packed.shape[0]}, _xyz_contig={m._xyz_contig.shape[0] if hasattr(m,'_xyz_contig') else 'N/A'}, "
+                            f"cached={use_fc_cache and sid in frustum_cache and cam_name in frustum_cache.get(sid,{})}"
+                        )
+
         # 无渲染全部结果 为计算Loss做准备
         all_rendered, all_depth, all_alpha, all_submodel_ids = [], [], [], []
         rendered_list, depth_list, alpha_list = [], [], []
