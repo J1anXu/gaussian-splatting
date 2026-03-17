@@ -38,12 +38,12 @@ done
 GPUS=(1)
 NUM_GPUS=${#GPUS[@]}
 
-DATA_ROOT=/home/jian/data/mip360
+DATA_ROOT=/data/jian/data/mip360
 LOG_ROOT=debug
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
-OUT_ROOT=/home/jian/output/mip360/$GIT_BRANCH
+OUT_ROOT=/data/jian/output/mip360/$GIT_BRANCH
 
 mkdir -p "$LOG_ROOT"
 
@@ -79,7 +79,7 @@ run_pipeline() {
   echo "Branch: $GIT_BRANCH"
   echo "========================================"
 
-  # 1. TRAIN
+  # 1. TRAIN  (tr -d '\r' strips tqdm carriage-returns so log stays readable)
   echo "  [1/3] Training $scene ..."
   python train.py \
     -s "$data_path" \
@@ -87,7 +87,7 @@ run_pipeline() {
     --git_branch "$GIT_BRANCH" \
     --eval \
     $img_flag \
-    > "$log_dir/train.log" 2>&1
+    2>&1 | tr -d '\r' > "$log_dir/train.log"
 
   # 2. RENDER
   echo "  [2/3] Rendering $scene ..."
@@ -95,14 +95,14 @@ run_pipeline() {
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
     --skip_train \
-    > "$log_dir/render.log" 2>&1
+    2>&1 | tr -d '\r' > "$log_dir/render.log"
 
   # 3. METRICS
   echo "  [3/3] Metrics $scene ..."
   python metrics_p.py \
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
-    > "$log_dir/metrics.log" 2>&1
+    2>&1 | tr -d '\r' > "$log_dir/metrics.log"
 
   echo "✅ Finished $scene on GPU $gpu"
   echo ""

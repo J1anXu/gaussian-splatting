@@ -29,7 +29,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
 import time
-from logger import get_logger
+from logger import get_logger, add_output_path
 import config
 import diff_gaussian_rasterization_wenqi_tam
 from TimerManager import  TraceManager, TID_MAIN, PID_CPU
@@ -62,6 +62,8 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
 
     first_iter = 0
     prepare_output_and_logger(dataset)
+    # Mirror log to output folder alongside checkpoints/ply
+    add_output_path(LOGGER, os.path.join(dataset.model_path, "logs"))
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
     initial_gaussians.training_setup(opt)
@@ -479,6 +481,27 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
 
         # flush the last submodel's pending work
         grad_sync.flush_last()
+
+        # Fix: ensure ALL blocks get densify_and_prune / reset_opacity at the
+        # correct intervals, not just blocks that were visible this iteration.
+        # Non-visible blocks still have accumulated stats from prior iterations.
+        if iteration < opt.densify_until_iter:
+            processed_ids = set(visible_submodel_id_list)
+            for sm_id, sm in enumerate(submodel_list):
+                if sm_id in processed_ids:
+                    continue
+                with torch.no_grad():
+                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        sm.densify_and_prune(opt.densify_grad_threshold * grad_sync.DENSIFY_GRAD_SCALE, 0.005, scene.cameras_extent, size_threshold, device="cpu")
+                        sm.pack_to_buffer()
+                        grad_sync.reallocate_pinned_buffers(sm)
+                        if frustum_cache and sm_id in frustum_cache:
+                            del frustum_cache[sm_id]
+                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                        sm.reset_opacity()
+                        if hasattr(sm, '_pack_slices'):
+                            sm._re_view_opacity()
 
         # reserved 超过 allocated 太多时才清缓存，避免频繁清导致性能下降
         if torch.cuda.memory_reserved() > torch.cuda.memory_allocated() + config.GPU_CACHE_THRESHOLD_GB * 1024**3:

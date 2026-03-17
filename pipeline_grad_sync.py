@@ -10,6 +10,11 @@ ATTR_NAMES = ['_xyz', '_features_dc', '_features_rest', '_scaling', '_rotation',
 class PipelinedGradSync:
     """Manages async D2H gradient copies and deferred optimizer steps for submodel pipeline."""
 
+    # Block-partitioned rendering produces slightly lower gradient magnitudes
+    # than vanilla due to block-level transmittance approximation and per-block
+    # loss computation. Scale down the densification threshold to compensate.
+    DENSIFY_GRAD_SCALE = 0.7
+
     def __init__(self, submodel_list: List[GaussianModel], opt, dataset, scene,
                  tracer: Optional[TraceManager] = None, frustum_cache: Optional[dict] = None):
         self.submodel_list = submodel_list
@@ -102,7 +107,7 @@ class PipelinedGradSync:
                     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                         with tm.span("densify_and_prune", tid=TID_OPTIMIZE, block_id=sm_id):
                             size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                            sm.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, device="cpu")
+                            sm.densify_and_prune(opt.densify_grad_threshold * self.DENSIFY_GRAD_SCALE, 0.005, scene.cameras_extent, size_threshold, device="cpu")
                             sm.pack_to_buffer()
                             self.reallocate_pinned_buffers(sm)
                             if self.frustum_cache and sm_id in self.frustum_cache:

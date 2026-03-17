@@ -38,4 +38,24 @@ def get_logger(scene_name, log_path, level=logging.INFO, to_console=False):
             console_handler.setFormatter(formatter)
             logger.addHandler(console_handler)
 
+    # 保存时间戳供 add_output_path 使用
+    logger._log_timestamp = timestamp
     return logger
+
+
+def add_output_path(logger, output_log_dir):
+    """Add a second file handler so the same log is mirrored to the output folder."""
+    os.makedirs(output_log_dir, exist_ok=True)
+    timestamp = getattr(logger, '_log_timestamp', datetime.now().strftime("%m%d_%H%M"))
+    log_file = os.path.join(output_log_dir, f"{timestamp}.log")
+
+    class ShortTimeFormatter(logging.Formatter):
+        def formatTime(self, record, datefmt=None):
+            dt = datetime.fromtimestamp(record.created)
+            return dt.strftime("%m%d,%H:%M")
+
+    formatter = ShortTimeFormatter(fmt="%(asctime)s - %(message)s")
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setLevel(logger.level)
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
