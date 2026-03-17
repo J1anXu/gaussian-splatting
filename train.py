@@ -64,6 +64,7 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
     prepare_output_and_logger(dataset)
     # Mirror log to output folder alongside checkpoints/ply
     add_output_path(LOGGER, os.path.join(dataset.model_path, "logs"))
+    add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="train")
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
     initial_gaussians.training_setup(opt)

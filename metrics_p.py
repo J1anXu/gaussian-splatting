@@ -21,8 +21,10 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser
 from utils.general_utils import safe_state, get_git_branch
+from logger import get_logger, add_output_path
 
 BRANCH = None
+LOGGER = None
 
 def load_json_safe(path):
     if os.path.exists(path):
@@ -60,6 +62,7 @@ def evaluate(model_paths):
         scene_dir = scene_dir + f"/rendered_p/{BRANCH}"
         try:
             print("Scene:", scene_dir)
+            if LOGGER: LOGGER.info(f"Scene: {scene_dir}")
             full_dict[scene_dir] = {}
             per_view_dict[scene_dir] = {}
             full_dict_polytopeonly[scene_dir] = {}
@@ -88,14 +91,19 @@ def evaluate(model_paths):
                     psnrs.append(psnr(renders[idx], gts[idx]))
                     lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))
 
-                print("  SSIM : {:>12.7f}".format(torch.tensor(ssims).mean(), ".5"))
-                print("  PSNR : {:>12.7f}".format(torch.tensor(psnrs).mean(), ".5"))
-                print("  LPIPS: {:>12.7f}".format(torch.tensor(lpipss).mean(), ".5"))
+                ssim_val = torch.tensor(ssims).mean().item()
+                psnr_val = torch.tensor(psnrs).mean().item()
+                lpips_val = torch.tensor(lpipss).mean().item()
+                print("  SSIM : {:>12.7f}".format(ssim_val))
+                print("  PSNR : {:>12.7f}".format(psnr_val))
+                print("  LPIPS: {:>12.7f}".format(lpips_val))
                 print("")
+                if LOGGER:
+                    LOGGER.info(f"{method} - SSIM: {ssim_val:.7f}, PSNR: {psnr_val:.7f}, LPIPS: {lpips_val:.7f}")
 
-                full_dict[scene_dir][method].update({"SSIM": torch.tensor(ssims).mean().item(),
-                                                        "PSNR": torch.tensor(psnrs).mean().item(),
-                                                        "LPIPS": torch.tensor(lpipss).mean().item(),
+                full_dict[scene_dir][method].update({"SSIM": ssim_val,
+                                                        "PSNR": psnr_val,
+                                                        "LPIPS": lpips_val,
                                                         "branch": BRANCH})
                 per_view_dict[scene_dir][method].update({"SSIM": {name: ssim for ssim, name in zip(torch.tensor(ssims).tolist(), image_names)},
                                                             "PSNR": {name: psnr for psnr, name in zip(torch.tensor(psnrs).tolist(), image_names)},
@@ -131,9 +139,17 @@ if __name__ == "__main__":
     parser.add_argument('--git_branch', type=str, default=None)
 
     args = parser.parse_args()
-    
+
     if args.git_branch is not None:
         BRANCH = args.git_branch
     else:
         BRANCH = get_git_branch()
+
+    # metrics 可能评估多个场景，用第一个场景名建 logger
+    scene_name = args.model_paths[0].strip('/').split('/')[-1]
+    LOGGER = get_logger(scene_name, os.path.join("./logs", "metrics", BRANCH, scene_name))
+    add_output_path(LOGGER, os.path.join("debug", BRANCH, scene_name), prefix="metrics")
+    LOGGER.info(f"Metrics evaluation, branch={BRANCH}, model_paths={args.model_paths}")
+
     evaluate(args.model_paths)
+    LOGGER.info("Metrics finished")
