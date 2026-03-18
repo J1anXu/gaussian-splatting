@@ -86,23 +86,20 @@ run_pipeline() {
     --model_path "$model_path" \
     --git_branch "$GIT_BRANCH" \
     --eval \
-    $img_flag \
-    > "$log_dir/train.log" 2>&1
+    $img_flag
 
   # 2. RENDER
   echo "  [2/3] Rendering $scene ..."
   python render_p.py \
     -m "$model_path" \
     --git_branch "$GIT_BRANCH" \
-    --skip_train \
-    > "$log_dir/render.log" 2>&1
+    --skip_train
 
   # 3. METRICS
   echo "  [3/3] Metrics $scene ..."
   python metrics_p.py \
     -m "$model_path" \
-    --git_branch "$GIT_BRANCH" \
-    > "$log_dir/metrics.log" 2>&1
+    --git_branch "$GIT_BRANCH"
 
   echo "✅ Finished $scene on GPU $gpu"
   echo ""
