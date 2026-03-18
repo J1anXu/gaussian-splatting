@@ -7,19 +7,22 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEBUG_DIR="$SCRIPT_DIR/debug"
 
 parse_seconds() {
-    # Convert "DD/MM HH:MM:SS" timestamp to seconds-since-midnight (with day offset)
+    # Convert "MMDD,HH:MM" timestamp to seconds (with day offset)
     local ts="$1"
-    local day="${ts%%/*}"
-    local rest="${ts#*/}"
-    local mon="${rest%% *}"
-    local time="${rest#* }"
-    local h="${time%%:*}"
-    local ms="${time#*:}"
-    local m="${ms%%:*}"
-    local s="${ms#*:}"
+    local daypart="${ts%%,*}"
+    local timepart="${ts#*,}"
+    local day="${daypart:2:2}"
+    local h="${timepart%%:*}"
+    local m="${timepart#*:}"
     # Strip leading zeros
-    day=$((10#$day)); h=$((10#$h)); m=$((10#$m)); s=$((10#$s))
-    echo $(( day * 86400 + h * 3600 + m * 60 + s ))
+    day=$((10#$day)); h=$((10#$h)); m=$((10#$m))
+    echo $(( day * 86400 + h * 3600 + m * 60 ))
+}
+
+find_latest() {
+    # Find the latest file matching prefix_*.log in a directory
+    local dir="$1" prefix="$2"
+    ls -1 "$dir"/${prefix}_*.log 2>/dev/null | sort | tail -1
 }
 
 format_duration() {
@@ -50,13 +53,18 @@ parse_train_tail() {
     local head_block
     head_block=$(head -c 512 "$train_log")
 
-    # Pts: find last occurrence of Pts=X.XXXM
-    _pts=$(echo "$tail_block" | grep -oiP 'pts=\K[\d.]+M' | tail -1)
+    # Pts: find last occurrence of 'pts': '4.42M' or 'pts': 54275
+    _pts=$(echo "$tail_block" | grep -oP "'pts':\s*'\K[\d.]+M" | tail -1)
+    if [ -z "$_pts" ]; then
+        local raw_pts
+        raw_pts=$(echo "$tail_block" | grep -oP "'pts':\s*\K\d+" | tail -1)
+        [ -n "$raw_pts" ] && _pts=$(awk "BEGIN{printf \"%.2fM\", $raw_pts/1000000}")
+    fi
 
-    # Timestamps
+    # Timestamps: format is MMDD,HH:MM
     local first_ts last_ts
-    first_ts=$(echo "$head_block" | grep -oP '\[\K\d+/\d+ \d+:\d+:\d+(?=\])' | head -1)
-    last_ts=$(echo "$tail_block" | grep -oP '\[\K\d+/\d+ \d+:\d+:\d+(?=\])' | tail -1)
+    first_ts=$(echo "$head_block" | grep -oP '\d{4},\d{2}:\d{2}' | head -1)
+    last_ts=$(echo "$tail_block" | grep -oP '\d{4},\d{2}:\d{2}' | tail -1)
     [ -z "$first_ts" ] || [ -z "$last_ts" ] && return
 
     local t0 t1 diff
@@ -92,10 +100,11 @@ print_branch() {
         scene=$(basename "$scene_dir")
 
         local psnr="N/A" ssim="N/A" lpips="N/A" time_s="N/A"
-        local metrics_log="$scene_dir/metrics.log"
-        local train_log="$scene_dir/train.log"
+        local metrics_log train_log
+        metrics_log=$(find_latest "$scene_dir" "metrics")
+        train_log=$(find_latest "$scene_dir" "train")
 
-        if [ -f "$metrics_log" ]; then
+        if [ -n "$metrics_log" ] && [ -f "$metrics_log" ]; then
             psnr=$(grep -oP 'PSNR\s*:\s*\K[\d.]+' "$metrics_log" | head -1)
             ssim=$(grep -oP 'SSIM\s*:\s*\K[\d.]+' "$metrics_log" | head -1)
             lpips=$(grep -oP 'LPIPS\s*:\s*\K[\d.]+' "$metrics_log" | head -1)
@@ -103,8 +112,10 @@ print_branch() {
         fi
 
         local pts="N/A"
-        parse_train_tail "$train_log"
-        [ -n "$_pts" ] && pts="$_pts"
+        if [ -n "$train_log" ]; then
+            parse_train_tail "$train_log"
+            [ -n "$_pts" ] && pts="$_pts"
+        fi
 
         local dur="$_duration"
         if [ -n "$dur" ]; then
