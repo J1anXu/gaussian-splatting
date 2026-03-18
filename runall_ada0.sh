@@ -33,7 +33,7 @@ done
 ########################################
 # Configuration
 ########################################
-GPUS=(0)
+GPUS=(0 1 2 3)
 NUM_GPUS=${#GPUS[@]}
 
 DATA_ROOT=/data2/jian/data/mip360
