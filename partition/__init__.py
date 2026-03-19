@@ -136,9 +136,7 @@ def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05)
     N = xyz.shape[0]
 
     num_blocks = config.NUM_BLOCKS
-    assert num_blocks > 0 and (num_blocks & (num_blocks - 1)) == 0, \
-        f"NUM_BLOCKS must be a power of 2, got {num_blocks}"
-    max_depth = int(math.log2(num_blocks))
+    assert num_blocks >= 1, f”NUM_BLOCKS must be >= 1, got {num_blocks}”
 
     all_idx = torch.arange(N, device=device)
 
@@ -154,11 +152,13 @@ def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05)
     block_bounds  = []
     block_indices = []
 
-    # ---------- 2) KD-tree recursion: max_depth levels => num_blocks leaves ----------
-    def recurse(idx: torch.Tensor, bmin: torch.Tensor, bmax: torch.Tensor, depth: int):
-        if depth == max_depth:
-            # 叶子：bounds 必须是 “由 split 平面传下来的” bmin/bmax，保证不重叠
-            # 为了和你原 octant 一样“不会进 autograd / 可视化安全”，这里用 torch.tensor 重建
+    # ---------- 2) KD-tree recursion: 支持任意 num_blocks ----------
+    # n_target: 当前子树需要切成几个叶子
+    # 左子树分 n_target//2 个，右子树分 n_target - n_target//2 个
+    # 点数按比例分配，保持各叶子点数尽量相等
+    def recurse(idx: torch.Tensor, bmin: torch.Tensor, bmax: torch.Tensor,
+                depth: int, n_target: int):
+        if n_target == 1:
             min_xyz = torch.tensor([bmin[0], bmin[1], bmin[2]], device=device, dtype=dtype)
             max_xyz = torch.tensor([bmax[0], bmax[1], bmax[2]], device=device, dtype=dtype)
             block_bounds.append((min_xyz, max_xyz))
@@ -166,21 +166,20 @@ def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05)
             return
 
         axis = depth % 3
+        n_left = n_target // 2
+        n_right = n_target - n_left
 
-        # 按该轴排序，按点数对半分（严格均分靠这里）
+        # 按该轴排序，按目标块数比例分点（而非固定对半）
         coords = xyz[idx, axis]
         _, order = torch.sort(coords)
         sorted_idx = idx[order]
-        mid = sorted_idx.numel() // 2
+        mid = sorted_idx.numel() * n_left // n_target
 
         left_idx  = sorted_idx[:mid]
         right_idx = sorted_idx[mid:]
 
-        # split plane 取“切分值”
-        # 用排序后的中位坐标作为分割面（左: < split, 右: >= split 的空间意义）
         split_val = xyz[sorted_idx[mid], axis] if sorted_idx.numel() > 0 else (bmin[axis] + bmax[axis]) * 0.5
 
-        # 构造非重叠 bounds（核心：由 split 平面更新父 bounds）
         left_min = bmin
         left_max = bmax.clone()
         left_max[axis] = split_val
@@ -189,14 +188,14 @@ def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05)
         right_min[axis] = split_val
         right_max = bmax
 
-        recurse(left_idx,  left_min,  left_max,  depth + 1)
-        recurse(right_idx, right_min, right_max, depth + 1)
+        recurse(left_idx,  left_min,  left_max,  depth + 1, n_left)
+        recurse(right_idx, right_min, right_max, depth + 1, n_right)
 
-    recurse(all_idx, root_min, root_max, depth=0)
+    recurse(all_idx, root_min, root_max, depth=0, n_target=num_blocks)
 
     # ---------- 3) 打印统计 ----------
     for i, idx in enumerate(block_indices):
-        print(f"Block {i:2d}: {idx.numel():7d} points")
+        print(f”Block {i:2d}: {idx.numel():7d} points”)
 
     return block_bounds, block_indices
 
