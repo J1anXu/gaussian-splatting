@@ -136,7 +136,7 @@ def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05)
     N = xyz.shape[0]
 
     num_blocks = config.NUM_BLOCKS
-    assert num_blocks >= 1, f”NUM_BLOCKS must be >= 1, got {num_blocks}”
+    assert num_blocks >= 1, f"NUM_BLOCKS must be >= 1, got {num_blocks}"
 
     all_idx = torch.arange(N, device=device)
 
@@ -195,7 +195,7 @@ def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05)
 
     # ---------- 3) 打印统计 ----------
     for i, idx in enumerate(block_indices):
-        print(f”Block {i:2d}: {idx.numel():7d} points”)
+        print(f"Block {i:2d}: {idx.numel():7d} points")
 
     return block_bounds, block_indices
 
