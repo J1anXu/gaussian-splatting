@@ -240,8 +240,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     gaussians: GaussianModel = scene.gaussians
     gaussians = gaussians.dump_to_cpu()
     
-    # partition
-    gaussians.build_split_indices()
+    # partition — start with 2 blocks, dynamically split later
+    gaussians.build_split_indices(num_blocks=2)
 
     ## blocks visualization
     # gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
@@ -503,6 +503,21 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                         sm.reset_opacity()
                         if hasattr(sm, '_pack_slices'):
                             sm._re_view_opacity()
+
+        # Dynamic block splitting: any block exceeding SPLIT_SIZE gets binary split
+        if iteration < opt.densify_until_iter:
+            blocks_to_split = [i for i, sm in enumerate(submodel_list) if sm._xyz.shape[0] > config.SPLIT_SIZE]
+            if blocks_to_split:
+                for sm_id in sorted(blocks_to_split, reverse=True):
+                    sm = submodel_list[sm_id]
+                    left, right = sm.split_in_half(opt)
+                    grad_sync.reallocate_pinned_buffers(left)
+                    grad_sync.reallocate_pinned_buffers(right)
+                    submodel_list[sm_id] = left
+                    submodel_list.insert(sm_id + 1, right)
+                frustum_cache.clear()
+                LOGGER.info(f"[iter {iteration}] Split block(s) {blocks_to_split}, now {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
+                print(f"[iter {iteration}] Split block(s) {blocks_to_split}, now {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
 
         # reserved 超过 allocated 太多时才清缓存，避免频繁清导致性能下降
         if torch.cuda.memory_reserved() > torch.cuda.memory_allocated() + config.GPU_CACHE_THRESHOLD_GB * 1024**3:

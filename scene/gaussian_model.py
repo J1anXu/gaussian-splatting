@@ -528,6 +528,53 @@ class GaussianModel:
             subsets.append(subset)
         return subsets
 
+    def split_in_half(self, opt):
+        """Split this packed submodel in half along the longest axis.
+
+        Used for dynamic splitting during Phase 2 training when a block
+        exceeds SPLIT_SIZE. Returns (left, right) GaussianModels with
+        packed buffers set up and Adam state transferred from the parent.
+        """
+        xyz = self._xyz.detach()
+        N = xyz.shape[0]
+
+        # Longest-axis median split
+        mins = xyz.min(dim=0).values
+        maxs = xyz.max(dim=0).values
+        axis = torch.argmax(maxs - mins).item()
+        order = torch.argsort(xyz[:, axis])
+        mid = N // 2
+        left_idx = order[:mid]
+        right_idx = order[mid:]
+
+        has_adam = hasattr(self, '_packed_exp_avg')
+
+        def _make_child(indices):
+            kid = GaussianModel(sh_degree=self.max_sh_degree, optimizer_type=self.optimizer_type)
+            kid._xyz = nn.Parameter(self._xyz[indices].clone().detach())
+            kid._features_dc = nn.Parameter(self._features_dc[indices].clone().detach())
+            kid._features_rest = nn.Parameter(self._features_rest[indices].clone().detach())
+            kid._scaling = nn.Parameter(self._scaling[indices].clone().detach())
+            kid._rotation = nn.Parameter(self._rotation[indices].clone().detach())
+            kid._opacity = nn.Parameter(self._opacity[indices].clone().detach())
+            kid._exposure = nn.Parameter(self._exposure.clone().detach())
+            kid.active_sh_degree = self.active_sh_degree
+            kid.spatial_lr_scale = self.spatial_lr_scale
+            kid.max_radii2D = torch.zeros(kid._xyz.shape[0], device=kid._xyz.device)
+            kid.block_bounds = None
+            kid.block_idx_list = None
+            kid.partitioned = False
+            kid.visible_indices = None
+            kid.training_setup(opt, device="cpu")
+            kid.pack_to_buffer()
+            # Transfer Adam momentum from parent
+            if has_adam:
+                kid._packed_exp_avg[:] = self._packed_exp_avg[indices]
+                kid._packed_exp_avg_sq[:] = self._packed_exp_avg_sq[indices]
+                kid._packed_adam_step = self._packed_adam_step
+            return kid
+
+        return _make_child(left_idx), _make_child(right_idx)
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -1037,8 +1084,8 @@ class GaussianModel:
 
 
         
-    def build_split_indices(self):
-        block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz)
+    def build_split_indices(self, num_blocks=None):
+        block_bounds, block_indices = generate_space_kdtree_blocks(self._xyz, num_blocks=num_blocks)
         self.block_bounds = block_bounds
         self.block_idx_list = block_indices
     
