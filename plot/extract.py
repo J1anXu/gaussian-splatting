@@ -1,180 +1,87 @@
-"""
-统一日志提取，输出标准化 CSV 到 debug/ 目录。
+#!/usr/bin/env python3
+"""Extract training log steps into CSV. Auto-detects log format."""
 
-用法:
-    python3 plot/extract.py --type capgs  logs/train/nurips26/bicycle/0323_1318.log --name bicycle
-    python3 plot/extract.py --type gsscale /data/.../train_20260312_121049.log --name bicycle
-"""
-import argparse
 import ast
 import csv
 import re
 import sys
-from pathlib import Path
+import os
 
-# ── 统一输出列 ──
-# 两种日志都归一化到这些列，缺失的填空
-UNIFIED_COLS = [
-    "step", "loss", "pts_M", "vis_M", "vis_pct", "blk",
-    "alloc_gb", "rsv_gb", "peak_alloc_gb", "peak_rsv_gb",
-    "it_s", "elapsed",
-]
-
-EVENT_COLS = ["step", "event", "detail"]
-
-# ── CapGS 解析 ──
-_CAPGS_METRIC_RE = re.compile(r"^(\d{4},\d{2}:\d{2}) - (\{.+\})$")
-_CAPGS_SPLIT_RE = re.compile(
-    r"^(\d{4},\d{2}:\d{2}) - \[iter (\d+)\] Split block\(s\) \[(.+?)\], now (\d+) blocks, sizes: \[(.+?)\]$"
+# --- Format 1: GS-Scale (pipe-delimited) ---
+# step=1/30000 | loss=0.5655 | pts=0.05M fru=0.01M(25.5%) | peak_alloc=0.21G peak_rsv=0.22G | sh=0 | elapsed=1.0s
+GSSCALE_RE = re.compile(
+    r"step=(\d+)/(\d+)\s*\|\s*loss=([\d.]+)\s*\|"
+    r"\s*pts=([\d.]+)M\s+fru=([\d.]+)M\(([\d.]+)%\)\s*\|"
+    r"\s*peak_alloc=([\d.]+)G\s+peak_rsv=([\d.]+)G\s*\|"
+    r"\s*sh=(\d+)\s*\|"
+    r"\s*elapsed=([\d.]+)s"
 )
-_CAPGS_PARTITION_RE = re.compile(
-    r"^(\d{4},\d{2}:\d{2}) - Partitioned into (\d+) blocks?, sizes: \[(.+?)\]$"
-)
+GSSCALE_HEADER = ["step", "max_steps", "loss", "pts_M", "fru_M", "fru_pct",
+                  "peak_alloc_G", "peak_rsv_G", "sh", "elapsed_s"]
 
-def _parse_capgs(log_path):
-    metrics, events = [], []
-    for line in open(log_path):
-        line = line.strip()
-        if not line:
-            continue
-        m = _CAPGS_METRIC_RE.match(line)
-        if m:
-            d = ast.literal_eval(m.group(2))
-            metrics.append({
-                "step":           d.get("iter", ""),
-                "loss":           d.get("L", ""),
-                "pts_M":          float(str(d.get("pts", "0")).rstrip("M")),
-                "vis_M":          float(str(d.get("vis", "0")).rstrip("M")),
-                "vis_pct":        d.get("vis%", ""),
-                "blk":            d.get("blk", ""),
-                "alloc_gb":       d.get("alloc", ""),
-                "rsv_gb":         d.get("rsv", ""),
-                "peak_alloc_gb":  d.get("peak_alloc", ""),
-                "peak_rsv_gb":    d.get("peak_rsv", ""),
-                "it_s":           d.get("it/s", ""),
-                "elapsed":        float(str(d.get("elapsed", "0")).rstrip("s")) if d.get("elapsed") else "",
-            })
-            continue
-        m = _CAPGS_SPLIT_RE.match(line)
-        if m:
-            events.append({
-                "step": int(m.group(2)),
-                "event": "split",
-                "detail": f"blocks={m.group(4)} sizes=[{m.group(5)}]",
-            })
-            continue
-        m = _CAPGS_PARTITION_RE.match(line)
-        if m:
-            events.append({
-                "step": 0,
-                "event": "partition",
-                "detail": f"blocks={m.group(2)} sizes=[{m.group(3)}]",
-            })
-    return metrics, events
+# --- Format 2: dict-style ---
+# 0323,14:27 - {'iter': 10, 'L': 0.2568, 'vis': '0.02M', 'pts': '0.05M', 'vis%': 35.7, ...}
+DICT_RE = re.compile(r"\{.*'iter'\s*:.*\}")
+DICT_HEADER = ["step", "loss", "pts_M", "vis_M", "vis_pct", "blk",
+               "alloc_G", "rsv_G", "peak_alloc_G", "peak_rsv_G",
+               "it_s", "elapsed_s"]
 
-# ── GS-Scale 解析 ──
-_GS_METRIC_RE = re.compile(
-    r"step=(?P<step>\d+)/\d+ \| "
-    r"loss=(?P<loss>[\d.]+) l1=[\d.]+ ssim=[\d.]+ \| "
-    r"pts=(?P<pts>[\d.]+)M fru=(?P<fru>[\d.]+)M\((?P<fru_pct>[\d.]+)%\) \| "
-    r"mem=[\d.]+G\((?P<alloc>[\d.]+)\+(?P<rsv>[\d.]+)\) peak=(?P<peak>[\d.]+)G \| "
-    r"sh=\d+ \| "
-    r"elapsed=(?P<elapsed>[\d.]+)s"
-)
-_GS_EVAL_RE = re.compile(
-    r"\[Eval (?P<split>\w+) step=(?P<step>\d+)\] "
-    r"PSNR: (?P<psnr>[\d.]+), SSIM: (?P<ssim>[\d.]+), LPIPS: (?P<lpips>[\d.]+)"
-)
-_GS_COMPLETE_RE = re.compile(
-    r"Training complete\. Total time: (?P<time>[\d:]+) \| res: (?P<res>\S+) \| num_GS: (?P<gs>\d+)"
-)
 
-def _parse_gsscale(log_path):
-    metrics, events = [], []
-    for line in open(log_path):
-        line = line.strip()
-        if not line:
-            continue
-        m = _GS_METRIC_RE.search(line)
-        if m:
-            d = m.groupdict()
-            metrics.append({
-                "step":           int(d["step"]),
-                "loss":           float(d["loss"]),
-                "pts_M":          float(d["pts"]),
-                "vis_M":          float(d["fru"]),
-                "vis_pct":        float(d["fru_pct"]),
-                "blk":            1,
-                "alloc_gb":       float(d["alloc"]),
-                "rsv_gb":         float(d["rsv"]),
-                "peak_alloc_gb":  float(d["peak"]),
-                "peak_rsv_gb":    "",
-                "it_s":           "",
-                "elapsed":        float(d["elapsed"]),
-            })
-            continue
-        m = _GS_EVAL_RE.search(line)
-        if m:
-            events.append({
-                "step": int(m.group("step")),
-                "event": f"eval_{m.group('split')}",
-                "detail": f"PSNR={m.group('psnr')} SSIM={m.group('ssim')} LPIPS={m.group('lpips')}",
-            })
-            continue
-        m = _GS_COMPLETE_RE.search(line)
-        if m:
-            events.append({
-                "step": -1,
-                "event": "complete",
-                "detail": f"time={m.group('time')} res={m.group('res')} gs={m.group('gs')}",
-            })
-    return metrics, events
+def parse_dict_line(d):
+    """Convert parsed dict to row."""
+    def strip_unit(v):
+        if isinstance(v, str):
+            return v.rstrip("Ms")
+        return v
+    return [
+        d["iter"], d["L"],
+        strip_unit(d["pts"]), strip_unit(d["vis"]), d["vis%"], d["blk"],
+        d["alloc"], d["rsv"], d["peak_alloc"], d["peak_rsv"],
+        d.get("it/s", ""), strip_unit(d.get("elapsed", "")),
+    ]
 
-# ── 分发 ──
-PARSERS = {
-    "capgs": _parse_capgs,
-    "gsscale": _parse_gsscale,
-}
 
-def write_csv(rows, cols, path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=cols)
-        w.writeheader()
+def detect_and_extract(log_path):
+    """Read first data line to detect format, then extract all."""
+    with open(log_path) as f:
+        for line in f:
+            if GSSCALE_RE.search(line):
+                return "gsscale"
+            if DICT_RE.search(line):
+                return "dict"
+    return None
+
+
+def extract(log_path, out_path):
+    fmt = detect_and_extract(log_path)
+    if fmt is None:
+        print("Error: unrecognized log format", file=sys.stderr)
+        sys.exit(1)
+
+    rows = []
+    with open(log_path) as f:
+        for line in f:
+            if fmt == "gsscale":
+                m = GSSCALE_RE.search(line)
+                if m:
+                    rows.append(list(m.groups()))
+            else:
+                m = DICT_RE.search(line)
+                if m:
+                    d = ast.literal_eval(m.group())
+                    rows.append(parse_dict_line(d))
+
+    header = GSSCALE_HEADER if fmt == "gsscale" else DICT_HEADER
+    with open(out_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
         w.writerows(rows)
-    print(f"  -> {path}  ({len(rows)} rows)")
+    print(f"[{fmt}] Wrote {len(rows)} rows -> {out_path}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Extract training log to unified CSV")
-    parser.add_argument("log", help="Path to .log file")
-    parser.add_argument("--type", required=True, choices=PARSERS.keys(), help="Log format type")
-    parser.add_argument("--name", help="Scene name (default: inferred from log stem)")
-    args = parser.parse_args()
-
-    log_path = Path(args.log)
-    if not log_path.exists():
-        sys.exit(f"File not found: {log_path}")
-
-    name = args.name or log_path.stem
-
-    metrics, events = PARSERS[args.type](log_path)
-
-    debug_dir = Path(__file__).resolve().parent.parent / "debug"
-    metrics_path = debug_dir / f"{name}_metrics.csv"
-    events_path = debug_dir / f"{name}_events.csv"
-
-    write_csv(metrics, UNIFIED_COLS, metrics_path)
-    # write_csv(events, EVENT_COLS, events_path)
-
-    if metrics:
-        first, last = metrics[0], metrics[-1]
-        print(f"\nSummary: step {first['step']}-{last['step']}, "
-              f"loss {first['loss']}->{last['loss']}, "
-              f"pts {first['pts_M']}->{last['pts_M']}M, "
-              f"alloc {first['alloc_gb']}->{last['alloc_gb']}G, "
-              f"rsv {first['rsv_gb']}->{last['rsv_gb']}G")
-
-
-if __name__ == "__main__":
-    main()
+log_path = sys.argv[1]
+log_name = os.path.splitext(os.path.basename(log_path))[0]
+out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output")
+os.makedirs(out_dir, exist_ok=True)
+out_path = os.path.join(out_dir, log_name + ".csv")
+extract(log_path, out_path)
