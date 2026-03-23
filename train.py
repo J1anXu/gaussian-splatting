@@ -132,6 +132,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     bench_loss_list = []
 
     for iteration in range(first_iter, opt.iterations + 1):
+        torch.cuda.reset_peak_memory_stats()
+
         if iteration == TRACE_START:
             tracer.enabled = True
         tracer.step(iteration)
@@ -383,6 +385,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             vis_M = visible_pts / 1e6
             pts_M = pts_total / 1e6
             vis_pct = visible_pts / pts_total * 100 if pts_total > 0 else 0
+            gpu_peak_alloc = torch.cuda.max_memory_allocated() / 1024**3
+            gpu_peak_rsv = torch.cuda.max_memory_reserved() / 1024**3
             alloc = torch.cuda.memory_allocated() / 1024**3
             rsv = torch.cuda.memory_reserved() / 1024**3
             elapsed = time.time() - time_start
@@ -396,13 +400,13 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 bench_loss_list.append(ema_loss_for_log)
 
             # progress bar - every iter
-            progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": len(submodel_list), "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "it/s": f"{its:.1f}"})
+            progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": len(submodel_list), "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "peak": f"{gpu_peak_alloc:.2f}", "it/s": f"{its:.1f}"})
             progress_bar.update(1)
             if iteration == opt.iterations:
                 progress_bar.close()
 
             if iteration % 10 == 0:
-                log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "blk": len(submodel_list), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "it/s": round(its, 1), "elapsed": f"{elapsed:.1f}s"}
+                log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "blk": len(submodel_list), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": f"{elapsed:.1f}s"}
 
                 # logging
                 LOGGER.info(log)
