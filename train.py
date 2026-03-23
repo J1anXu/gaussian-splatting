@@ -55,34 +55,24 @@ except:
 
 
 
-def training(dataset, opt, pipe, saving_iterations, debug_from, checkpoint, res=None):
-    
+def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
-    if isinstance(res, dict):
-        # keep_training: load from ply checkpoint
-        trained_ply_path = res.get("trained_ply_path")
-        first_iter = res.get("first_iter")
-        initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-        scene = Scene(dataset, initial_gaussians, on_cpu=True)
-        initial_gaussians.load_ply(trained_ply_path)
-        initial_gaussians.training_setup(opt)
-    else:
-        # fresh start: create scene and gaussians from scratch
-        first_iter = 1
-        prepare_output_and_logger(dataset)
-        add_output_path(LOGGER, os.path.join(dataset.model_path, "logs"))
-        add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="train")
-        initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-        scene = Scene(dataset, initial_gaussians, on_cpu=True)
-        initial_gaussians.training_setup(opt)
-        if checkpoint:
-            (model_params, first_iter) = torch.load(checkpoint)
-            initial_gaussians.restore(model_params, opt)
-            first_iter += 1
+    first_iter = res.get("first_iter", 1)
+    prepare_output_and_logger(dataset)
+    add_output_path(LOGGER, os.path.join(dataset.model_path, "logs"))
+    add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="train")
 
+    initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
+    scene = Scene(dataset, initial_gaussians, on_cpu=True)
+
+    trained_ply_path = res.get("trained_ply_path")
+    if trained_ply_path:
+        initial_gaussians.load_ply(trained_ply_path)
+
+    initial_gaussians.training_setup(opt)
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
@@ -101,8 +91,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, checkpoint, res=
     gaussians: GaussianModel = scene.gaussians
     gaussians = gaussians.dump_to_cpu()
     
-    # partition — start with 2 blocks, dynamically split later
-    gaussians.build_split_indices(num_blocks=2)
+    # Start with 1 block on CPU, dynamically split when exceeding SPLIT_SIZE
+    gaussians.build_split_indices(num_blocks=1)
 
     ## blocks visualization
     # gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
@@ -543,7 +533,6 @@ if __name__ == "__main__":
     trained_ply_path = args.trained_ply_path
 
     opt = op.extract(args)
-    res = None
     if args.keep_training:
         assert trained_ply_path is not None, "--keep_training requires --trained_ply_path"
         print("KEEP_TRAINING MODEL, LOADING FROM CHECKPOINT: ", trained_ply_path)
@@ -552,7 +541,9 @@ if __name__ == "__main__":
             "trained_ply_path": trained_ply_path,
         }
         opt.iterations = 700
+    else:
+        res = {"first_iter": 1}
 
-    training(lp.extract(args), opt, pp.extract(args), args.save_iterations, args.debug_from, args.start_checkpoint, res)
+    training(lp.extract(args), opt, pp.extract(args), args.save_iterations, args.debug_from, res)
 
 
