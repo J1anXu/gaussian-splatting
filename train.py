@@ -402,7 +402,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 progress_bar.close()
 
             if iteration % 10 == 0:
-                log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "blk": len(submodel_list), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "it/s": round(its, 1)}
+                log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "blk": len(submodel_list), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "it/s": round(its, 1), "elapsed": f"{elapsed:.1f}s"}
 
                 # logging
                 LOGGER.info(log)
