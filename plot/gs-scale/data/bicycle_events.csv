@@ -1,4 +1,0 @@
-timestamp,step,event,psnr,ssim,lpips,num_gs,detail
-2026-03-12 12:16:12,6999,eval_val,24.168,0.6871,0.298,3160598,time=0.017s/img
-2026-03-12 12:51:21,29999,eval_val,25.503,0.773,0.162,4675877,time=0.027s/img
-2026-03-12 12:51:21,-1,complete,,,,4675877,time=00:40 res=1k
