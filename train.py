@@ -55,176 +55,37 @@ except:
 
 
 
-def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
-
-    if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
-        sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
-
-    first_iter = 0
-    prepare_output_and_logger(dataset)
-    # Mirror log to output folder alongside checkpoints/ply
-    add_output_path(LOGGER, os.path.join(dataset.model_path, "logs"))
-    add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="train")
-    initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-    scene = Scene(dataset, initial_gaussians, on_cpu=True)
-    initial_gaussians.training_setup(opt)
-    
-    if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
-        initial_gaussians.restore(model_params, opt)
-
-    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-
-    use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
-    viewpoint_stack = scene.getTrainCameras().copy()
-    viewpoint_indices = list(range(len(viewpoint_stack)))
-    ema_loss_for_log = 0.0
-    ema_Ll1depth_for_log = 0.0
-
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
-    first_iter += 1
-    
-    colors_bg = None
-    
-    for iteration in range(first_iter, opt.iterations + 1):
-        # partition
-        if config.PARTITIONING_ENABLED:
-            if initial_gaussians._xyz.shape[0] > config.SPLIT_SIZE:
-                print(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
-                LOGGER.info(f"Finished phase 1 training at iteration {iteration}, partitioning now...")
-                return scene, iteration, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg
-            
-        initial_gaussians.update_learning_rate(iteration)
-        
-        # Every 1000 its we increase the levels of SH up to a maximum degree
-        if iteration % 1000 == 0:
-            initial_gaussians.oneupSHdegree()
-
-        # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-            viewpoint_indices = list(range(len(viewpoint_stack)))
-        rand_idx = randint(0, len(viewpoint_indices) - 1)
-        viewpoint_cam = viewpoint_stack.pop(rand_idx)
-        vind = viewpoint_indices.pop(rand_idx)
-
-        # Render
-        if (iteration - 1) == debug_from:
-            pipe.debug = True
-
-        bg = torch.rand((3), device="cuda") if opt.random_background else background
-        
-        # frustum culling (cuda)
-        if config.FRUSTUM_CULLING_ENABLED:
-            initial_gaussians.visible_indices = frustum_culling_idx(initial_gaussians._xyz, viewpoint_cam.full_proj_transform)
-        else:
-            initial_gaussians.visible_indices = torch.arange(initial_gaussians._xyz.shape[0], device="cuda")
-        
-
-        visible_pts = 0        
-        pts_total = 0
-
-        pts_total += initial_gaussians._xyz.shape[0]
-        visible_pts += initial_gaussians.visible_indices.shape[0]
-        
-        initial_gaussians.activate_subset()
-        render_pkg = render(viewpoint_cam, initial_gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-        initial_gaussians.deactivate_subset()
-        
-        # pixel level 
-        image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
-        
-        # gaussian points level
-        viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        
-        if viewpoint_cam.alpha_mask is not None:
-            alpha_mask = viewpoint_cam.alpha_mask.cuda()
-            image *= alpha_mask
-        
-
-        # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
-        if colors_bg is None:
-            colors_bg = torch.zeros_like(gt_image)
-        Ll1 = l1_loss(image, gt_image)
-        ssim_value = fast_ssim(image, gt_image)
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
-
-        # Depth regularization
-        Ll1depth = 0
-        diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
-        loss.backward()
-
-        with torch.no_grad():
-            # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
-            
-            progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "pts_in_frustum": visible_pts, "pts": pts_total})
-            progress_bar.update(1)
-
-            if iteration % 10 == 0:
-                gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
-                log = {"iter": iteration, "loss": ema_loss_for_log, "pts_in_frustum": visible_pts, "pts": pts_total, "gpu_mem_gb": gpu_mem_gb}
-                LOGGER.info(log)
-                if WANDB and not DEBUG_MODE:
-                    wandb.log(log, step=iteration)
-
-            if iteration == opt.iterations:
-                progress_bar.close()
-
-
-            # Densification
-            if iteration < opt.densify_until_iter:
-                global_viewspace_points_grad = torch.zeros(initial_gaussians.get_xyz.shape[0], 3, device="cuda", requires_grad=False )
-                global_viewspace_points_grad[initial_gaussians.visible_indices] = viewspace_point_tensor.grad
-                global_visibility_filter = initial_gaussians.visible_indices[visibility_filter]
-                
-                initial_gaussians.max_radii2D[global_visibility_filter] = torch.max(initial_gaussians.max_radii2D[global_visibility_filter], radii[visibility_filter])
-                initial_gaussians.add_densification_stats2(global_viewspace_points_grad, global_visibility_filter)
-                
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    initial_gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-                
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    initial_gaussians.reset_opacity()
-
-
-            # Optimizer step
-            if iteration < opt.iterations:
-                initial_gaussians.exposure_optimizer.step()
-                initial_gaussians.exposure_optimizer.zero_grad(set_to_none = True)
-                if use_sparse_adam:
-                    visible = radii > 0
-                    initial_gaussians.optimizer.step(visible, radii.shape[0])
-                    initial_gaussians.optimizer.zero_grad(set_to_none = True)
-                else:
-                    initial_gaussians.optimizer.step()
-                    initial_gaussians.optimizer.zero_grad(set_to_none = True)
-
-    print(f"Warning! ⚠️ Finished phase 1 training at iteration {opt.iterations} without partitioning")
-
-
-def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
+def training(dataset, opt, pipe, saving_iterations, debug_from, checkpoint, res=None):
     
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
     if isinstance(res, dict):
+        # keep_training: load from ply checkpoint
         trained_ply_path = res.get("trained_ply_path")
         first_iter = res.get("first_iter")
         initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
         scene = Scene(dataset, initial_gaussians, on_cpu=True)
         initial_gaussians.load_ply(trained_ply_path)
         initial_gaussians.training_setup(opt)
-        ema_loss_for_log = 0.0
-        ema_Ll1depth_for_log = 0.0
-        progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     else:
-        scene, first_iter, ema_loss_for_log, ema_Ll1depth_for_log, progress_bar, colors_bg = res
+        # fresh start: create scene and gaussians from scratch
+        first_iter = 1
+        prepare_output_and_logger(dataset)
+        add_output_path(LOGGER, os.path.join(dataset.model_path, "logs"))
+        add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="train")
+        initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
+        scene = Scene(dataset, initial_gaussians, on_cpu=True)
+        initial_gaussians.training_setup(opt)
+        if checkpoint:
+            (model_params, first_iter) = torch.load(checkpoint)
+            initial_gaussians.restore(model_params, opt)
+            first_iter += 1
+
+    ema_loss_for_log = 0.0
+    ema_Ll1depth_for_log = 0.0
+    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
 
     if DEBUG_MODE:
         opt.iterations = 1050
@@ -574,7 +435,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
              
     time_end = time.time()
     cost = time_end - time_start
-    print(f"Phase 2 training time cost: [{cost:.2f}] seconds.")
+    print(f"Training time cost: [{cost:.2f}] seconds.")
 
     # 打印 benchmark 统计（用 sys.__stdout__ 避免时间戳）
     if bench_its_list:
@@ -682,6 +543,7 @@ if __name__ == "__main__":
     trained_ply_path = args.trained_ply_path
 
     opt = op.extract(args)
+    res = None
     if args.keep_training:
         assert trained_ply_path is not None, "--keep_training requires --trained_ply_path"
         print("KEEP_TRAINING MODEL, LOADING FROM CHECKPOINT: ", trained_ply_path)
@@ -690,9 +552,7 @@ if __name__ == "__main__":
             "trained_ply_path": trained_ply_path,
         }
         opt.iterations = 700
-    else:
-        res = training_phase_1(lp.extract(args), opt, pp.extract(args), args.start_checkpoint, args.debug_from)
 
-    training_phase_2(lp.extract(args), opt, pp.extract(args), args.save_iterations, args.debug_from, res)
+    training(lp.extract(args), opt, pp.extract(args), args.save_iterations, args.debug_from, args.start_checkpoint, res)
 
 

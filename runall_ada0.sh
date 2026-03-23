@@ -20,17 +20,26 @@ set -e
 set -o pipefail
 
 ########################################
-# 场景分组
+# 数据集 & 场景定义
 ########################################
-OUTDOOR_SCENES=(bicycle flowers garden stump treehill)
-INDOOR_SCENES=(room counter kitchen bonsai)
-ALL_SCENES=("${OUTDOOR_SCENES[@]}" "${INDOOR_SCENES[@]}")
+DATA_BASE=/data2/jian/data
+OUT_BASE=/data2/jian/output
 
-# 室内判断表
-declare -A IS_INDOOR
-for s in "${INDOOR_SCENES[@]}"; do
-  IS_INDOOR[$s]=1
+# mip360: 室内 images_2，室外 images_4
+MIP360_OUTDOOR=(bicycle flowers garden stump treehill)
+MIP360_INDOOR=(room counter kitchen bonsai)
+MIP360_ALL=("${MIP360_OUTDOOR[@]}" "${MIP360_INDOOR[@]}")
+
+declare -A MIP360_IS_INDOOR
+for s in "${MIP360_INDOOR[@]}"; do
+  MIP360_IS_INDOOR[$s]=1
 done
+
+# deepblending: 全部用 images（默认）
+DB_ALL=(drjohnson playroom)
+
+# tandt: 全部用 images（默认）
+TANDT_ALL=(train truck)
 
 ########################################
 # 配置区
@@ -38,12 +47,10 @@ done
 GPUS=(0)
 NUM_GPUS=${#GPUS[@]}
 
-DATA_ROOT=/data2/jian/data/mip360
 LOG_ROOT=debug
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
-OUT_ROOT=/data2/jian/output/mip360/$GIT_BRANCH
 
 mkdir -p "$LOG_ROOT"
 
@@ -53,30 +60,25 @@ mkdir -p "$LOG_ROOT"
 ########################################
 run_pipeline() {
   local gpu=$1
-  local scene=$2
+  local dataset=$2
+  local scene=$3
+  local img_flag=$4   # 可选，如 "-i images_2"
 
   export CUDA_VISIBLE_DEVICES=$gpu
 
-  local data_path="$DATA_ROOT/$scene"
-  local model_path="$OUT_ROOT/$scene"
+  local data_path="$DATA_BASE/$dataset/$scene"
+  local model_path="$OUT_BASE/$dataset/$GIT_BRANCH/$scene"
 
-  # 室内 images_2，室外 images_4
-  local img_flag=""
-  if [[ -n "${IS_INDOOR[$scene]}" ]]; then
-    img_flag="-i images_2"
-  else
-    img_flag="-i images_4"
-  fi
-
-  local log_dir="$LOG_ROOT/$GIT_BRANCH/$scene"
+  local log_dir="$LOG_ROOT/$GIT_BRANCH/$dataset/$scene"
   mkdir -p "$log_dir"
 
   echo "========================================"
-  echo "GPU   : $gpu"
-  echo "Scene : $scene"
-  echo "Images: $img_flag"
-  echo "Time  : $(date)"
-  echo "Branch: $GIT_BRANCH"
+  echo "GPU    : $gpu"
+  echo "Dataset: $dataset"
+  echo "Scene  : $scene"
+  echo "Images : ${img_flag:-default}"
+  echo "Time   : $(date)"
+  echo "Branch : $GIT_BRANCH"
   echo "========================================"
 
   # 1. TRAIN
@@ -109,33 +111,58 @@ run_pipeline() {
 }
 
 ########################################
-# 轮询分配 9 个场景到 4 个 GPU 队列
-# GPU 0: bicycle treehill bonsai
-# GPU 1: flowers room
-# GPU 2: garden counter
-# GPU 3: stump kitchen
+# 构建全局场景队列（dataset scene img_flag）
 ########################################
-declare -A GPU_QUEUES
-for i in "${!ALL_SCENES[@]}"; do
-  scene="${ALL_SCENES[$i]}"
-  gpu="${GPUS[$((i % NUM_GPUS))]}"
-  GPU_QUEUES[$gpu]+="$scene "
+ALL_TASKS=()
+
+for scene in "${MIP360_ALL[@]}"; do
+  if [[ -n "${MIP360_IS_INDOOR[$scene]}" ]]; then
+    ALL_TASKS+=("mip360|$scene|-i images_2")
+  else
+    ALL_TASKS+=("mip360|$scene|-i images_4")
+  fi
+done
+
+for scene in "${DB_ALL[@]}"; do
+  ALL_TASKS+=("deepblending|$scene|")
+done
+
+for scene in "${TANDT_ALL[@]}"; do
+  ALL_TASKS+=("tandt|$scene|")
 done
 
 ########################################
-# 启动 4 个并发队列
+# 轮询分配到 GPU 队列
+########################################
+declare -A GPU_QUEUES
+for i in "${!ALL_TASKS[@]}"; do
+  gpu="${GPUS[$((i % NUM_GPUS))]}"
+  GPU_QUEUES[$gpu]+="${ALL_TASKS[$i]};"
+done
+
+########################################
+# 启动并发队列
 ########################################
 echo "🚀 Launching $NUM_GPUS GPU queues..."
 echo "Branch: $GIT_BRANCH"
 for gpu in "${GPUS[@]}"; do
-  echo "  GPU $gpu: ${GPU_QUEUES[$gpu]}"
+  echo "  GPU $gpu:"
+  IFS=';' read -ra tasks <<< "${GPU_QUEUES[$gpu]}"
+  for task in "${tasks[@]}"; do
+    [[ -z "$task" ]] && continue
+    IFS='|' read -r ds sc _ <<< "$task"
+    echo "    $ds/$sc"
+  done
 done
 echo ""
 
 for gpu in "${GPUS[@]}"; do
   (
-    for scene in ${GPU_QUEUES[$gpu]}; do
-      run_pipeline "$gpu" "$scene"
+    IFS=';' read -ra tasks <<< "${GPU_QUEUES[$gpu]}"
+    for task in "${tasks[@]}"; do
+      [[ -z "$task" ]] && continue
+      IFS='|' read -r dataset scene img_flag <<< "$task"
+      run_pipeline "$gpu" "$dataset" "$scene" "$img_flag"
     done
   ) &
 done
