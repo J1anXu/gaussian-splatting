@@ -53,15 +53,15 @@ def render_set(model_path, name, iteration, views, model_list: List[GaussianMode
     
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         # frustum_culling_available_mask = frustum_culling(gaussians._xyz, view.full_proj_transform)
-        
+        print(f"Rendering view {idx+1}/{len(views)}: {view.image_name}")
         rendered_list, depth_list, alpha_list = [], [], []
         viewspace_points_list, radii_list = [], []
         visible_block_idxs = []
-        
         N_total = 0
+        
         for block_idx in range(len(model_list)):
             model = model_list[block_idx]
-            
+            print(f"Processing block {block_idx+1}/{len(model_list)} with {model._xyz.shape[0]} gaussians")
             visible_mask = frustum_culling(model._xyz, view.full_proj_transform)
             subset_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
             model.visible_indices = subset_indices
@@ -77,9 +77,10 @@ def render_set(model_path, name, iteration, views, model_list: List[GaussianMode
             viewspace_points_list.append(viewspace_point_tensor)
             radii_list.append(radii)
             N_total += model._xyz.shape[0]
+            visible_block_idxs.append(block_idx)
             
         merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)   
-        
+        print(f"Length of rendered_list: {len(rendered_list)}, depth_list: {len(depth_list)}, alpha_list: {len(alpha_list)}")
         image = merge_res["final_rgb"]
         front_rgbs = merge_res["front_rgbs"]
         prefix_T = merge_res["prefix_T"]
@@ -98,16 +99,18 @@ def render_set(model_path, name, iteration, views, model_list: List[GaussianMode
 
         img_path_in_debug = os.path.join(debug_path, img_name)
         
-        # if config.SAVE_RGB_LAYERS:
-        #     save_rgb_layers(img_path_in_debug, front_rgbs)
+        if config.SAVE_RGB_LAYERS:
+            save_rgb_layers(img_path_in_debug, front_rgbs)
             
-        # if config.SAVE_LAYERS_CONTRIBUTION:
-        #     save_layer_contribution(img_path_in_debug, block_rank, front_rgbs, prefix_T, visible_block_idxs)
+        if config.SAVE_LAYERS_CONTRIBUTION:
+            save_layer_contribution(img_path_in_debug, block_rank, front_rgbs, prefix_T, visible_block_idxs)
                     
-        # if config.SAVE_DEPTH_LIST:
-        #     save_depth_list(img_path_in_debug, depth_list, visible_block_idxs)
+        if config.SAVE_DEPTH_LIST:
+            save_depth_list(img_path_in_debug, depth_list, visible_block_idxs)
                 
-
+        if config.SAVE_BLOCK_IMG:
+            save_block_img(img_path_in_debug, rendered_list, visible_block_idxs, model_list, view, image, config)
+            
         torchvision.utils.save_image(image, os.path.join(render_path, img_name + ".png"))            
         torchvision.utils.save_image(gt, os.path.join(gts_path, img_name + ".png"))
 

@@ -1,6 +1,6 @@
 # config.py
 # 控制加载数据集大小,减少启动时间,用于调试
-LIMITED_DATASIZE = True
+LIMITED_DATASIZE = False
 DATASIZE_LIMIT = 5
 
 
@@ -10,9 +10,9 @@ SAVE_BLOCK_IMG = True  # 是否保存 block 渲染结果
 DRAW_BOX = False # 是否在 block 渲染结果上绘制点云和block的边界框
 
 
-SAVE_RGB_LAYERS = False  # 是否保存合并前的各个RGB图层
-SAVE_LAYERS_CONTRIBUTION = False  # 是否保存每个block对各个图层的贡献
-SAVE_DEPTH_LIST = False  # 是否保存各个block的深度图
+SAVE_RGB_LAYERS = True  # 是否保存合并前的各个RGB图层
+SAVE_LAYERS_CONTRIBUTION = True  # 是否保存每个block对各个图层的贡献
+SAVE_DEPTH_LIST = True  # 是否保存各个block的深度图
 
 
 PARTITIONING_ENABLED = True  # 是否启用分块处理

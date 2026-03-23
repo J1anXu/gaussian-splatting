@@ -38,3 +38,6 @@ bash run_mip360_serial.sh --type indoor --gpu 2
 bash run_mip360_serial.sh --type outdoor
 
 bash run_deepblending_serial.sh --type outdoor
+
+
+python3 plot_gpu_mem.py <log_file> [output.png]

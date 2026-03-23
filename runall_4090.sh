@@ -22,8 +22,8 @@ set -o pipefail
 ########################################
 # 场景分组
 ########################################
-OUTDOOR_SCENES=(bicycle flowers garden stump treehill)
-INDOOR_SCENES=(room counter kitchen bonsai)
+OUTDOOR_SCENES=(bicycle)
+INDOOR_SCENES=()
 ALL_SCENES=("${OUTDOOR_SCENES[@]}" "${INDOOR_SCENES[@]}")
 
 # 室内判断表
@@ -80,14 +80,14 @@ run_pipeline() {
   echo "========================================"
 
   # 1. TRAIN  (tr -d '\r' strips tqdm carriage-returns so log stays readable)
-  echo "  [1/3] Training $scene ..."
-  python train.py \
-    -s "$data_path" \
-    --model_path "$model_path" \
-    --git_branch "$GIT_BRANCH" \
-    --eval \
-    $img_flag \
-    2>&1 | tr -d '\r' > "$log_dir/train.log"
+  # echo "  [1/3] Training $scene ..."
+  # python train.py \
+  #   -s "$data_path" \
+  #   --model_path "$model_path" \
+  #   --git_branch "$GIT_BRANCH" \
+  #   --eval \
+  #   $img_flag \
+  #   2>&1 | tr -d '\r' > "$log_dir/train.log"
 
   # 2. RENDER
   echo "  [2/3] Rendering $scene ..."
@@ -97,15 +97,15 @@ run_pipeline() {
     --skip_train \
     2>&1 | tr -d '\r' > "$log_dir/render.log"
 
-  # 3. METRICS
-  echo "  [3/3] Metrics $scene ..."
-  python metrics_p.py \
-    -m "$model_path" \
-    --git_branch "$GIT_BRANCH" \
-    2>&1 | tr -d '\r' > "$log_dir/metrics.log"
+  # # 3. METRICS
+  # echo "  [3/3] Metrics $scene ..."
+  # python metrics_p.py \
+  #   -m "$model_path" \
+  #   --git_branch "$GIT_BRANCH" \
+  #   2>&1 | tr -d '\r' > "$log_dir/metrics.log"
 
-  echo "✅ Finished $scene on GPU $gpu"
-  echo ""
+  # echo "✅ Finished $scene on GPU $gpu"
+  # echo ""
 }
 
 ########################################

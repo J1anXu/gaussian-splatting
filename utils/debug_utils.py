@@ -232,11 +232,10 @@ def save_block_img(img_path_in_debug, rendered_list, visible_block_idxs, gaussia
         
         # bmin = (xmin, ymin, zmin); bmax = (xmax, ymax, zmax)
         # 因为一个轴对齐包围盒（AABB）在 3D 空间里， 只需要两个点：最小角 bmin 和最大角 bmax， 这两个点就唯一确定了一个长方体，而这个长方体天然有 8 个角点。
-        bmin, bmax = gaussians.block_bounds[block_id]
-        W, H = block_img.shape[2], block_img.shape[1]
-        proj_matrix = view.full_proj_transform
-        
         if config.DRAW_BOX:
+            bmin, bmax = gaussians.block_bounds[block_id]
+            W, H = block_img.shape[2], block_img.shape[1]
+            proj_matrix = view.full_proj_transform
             x_min, y_min, x_max, y_max = rebuild_block_bound_aabb_2d(block_img, view, bmin, bmax, W, H)
             block_img = draw_box(block_img, x_min, y_min, x_max, y_max, colors="red", width=4)
             x_min, y_min, x_max, y_max = rebuild_pointcloud_aabb_2d(gaussians._xyz[gaussians.block_indices[block_id]], proj_matrix, W, H)
