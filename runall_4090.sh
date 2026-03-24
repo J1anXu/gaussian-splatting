@@ -36,12 +36,12 @@ done
 GPUS=(0)
 NUM_GPUS=${#GPUS[@]}
 
-DATA_ROOT=/home/jian/data/mip360
+DATA_ROOT=/data/jian/data/mip360
 LOG_ROOT=debug
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
-OUT_ROOT=/home/jian/output/mip360/$GIT_BRANCH
+OUT_ROOT=/data/jian/output/mip360/$GIT_BRANCH
 
 mkdir -p "$LOG_ROOT"
 

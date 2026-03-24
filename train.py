@@ -24,7 +24,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
-from logger import get_logger
+from logger import get_logger, add_output_path
 from torchvision.utils import save_image
 import wandb
 
@@ -53,18 +53,14 @@ except:
     SPARSE_ADAM_AVAILABLE = False
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
-    global LOGGER
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-
-    # Setup file logger inside model_path (colocated with outputs)
-    log_dir = os.path.join(dataset.model_path, "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    LOGGER = get_logger(SCENE_NAME, log_dir)
+    add_output_path(LOGGER, os.path.join(dataset.model_path, "logs"))
+    add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="train")
     LOGGER.info(f"Scene: {SCENE_NAME} | source: {dataset.source_path} | iterations: {opt.iterations}")
 
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
@@ -88,10 +84,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
 
-    global_tic = time.time()
+    time_start = time.time()
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+
+    # benchmark stats collection
+    BENCH_START, BENCH_END = 301, 700
+    bench_its_list = []
+    bench_alloc_list = []
+    bench_rsv_list = []
+    bench_loss_list = []
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
+        torch.cuda.reset_peak_memory_stats()
+
         if network_gui.conn == None:
             network_gui.try_connect()
         while network_gui.conn != None:
@@ -169,21 +174,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
 
-            if iteration % 10 == 0:
-                pts_m = gaussians.get_xyz.shape[0] / 1e6
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "Pts": f"{pts_m:.3f}M"})
-                progress_bar.update(10)
-                if LOGGER is not None:
-                    gpu_mem_gb = torch.cuda.memory_reserved() / 1024**3
-                    elapsed = time.time() - global_tic
-                    LOGGER.info(
-                        f"step={iteration}/{opt.iterations} | loss={ema_loss_for_log:.4f} | "
-                        f"pts={pts_m:.3f}M | mem={gpu_mem_gb:.2f}G | elapsed={elapsed:.1f}s"
-                    )
-                    if WANDB and not DEBUG_MODE:
-                        wandb.log({"iter": iteration, "loss": round(ema_loss_for_log, 7), "pts": int(pts_m * 1e6), "gpu_mem_gb": round(gpu_mem_gb, 2)}, step=iteration)
+            pts_M = gaussians.get_xyz.shape[0] / 1e6
+            gpu_peak_alloc = torch.cuda.max_memory_allocated() / 1024**3
+            gpu_peak_rsv = torch.cuda.max_memory_reserved() / 1024**3
+            alloc = torch.cuda.memory_allocated() / 1024**3
+            rsv = torch.cuda.memory_reserved() / 1024**3
+            elapsed = time.time() - time_start
+            its = (iteration - first_iter) / elapsed if elapsed > 0 else 0
+
+            # benchmark collection
+            if BENCH_START <= iteration <= BENCH_END:
+                bench_its_list.append(its)
+                bench_alloc_list.append(alloc)
+                bench_rsv_list.append(rsv)
+                bench_loss_list.append(ema_loss_for_log)
+
+            # progress bar - every iter
+            progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "pts": f"{pts_M:.2f}M", "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "peak": f"{gpu_peak_alloc:.2f}", "it/s": f"{its:.1f}"})
+            progress_bar.update(1)
             if iteration == opt.iterations:
                 progress_bar.close()
+
+            log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "pts": f"{pts_M:.2f}M", "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": f"{elapsed:.1f}s"}
+            LOGGER.info(log)
+
+            if WANDB and not DEBUG_MODE:
+                wandb.log(log, step=iteration)
 
             # Log and save
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
@@ -220,14 +236,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
-    # Log training complete with total time
-    if LOGGER is not None:
-        total_cost = time.time() - global_tic
-        hours = int(total_cost // 3600)
-        minutes = int((total_cost % 3600) // 60)
-        hhmm = f"{hours:02d}:{minutes:02d}"
-        final_pts_m = gaussians.get_xyz.shape[0] / 1e6
-        LOGGER.info(f"Training complete. Total time: {hhmm} | num_GS: {final_pts_m:.3f}M")
+    time_end = time.time()
+    cost = time_end - time_start
+    print(f"Training time cost: [{cost:.2f}] seconds.")
+
+    # benchmark stats
+    if bench_its_list:
+        n = len(bench_its_list)
+        p = sys.__stdout__.write
+        import socket, subprocess
+        hostname = socket.gethostname()
+        commit_id = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+        p(f"\n{'='*50}\n")
+        p(f"  [{hostname}] Benchmark (iter {BENCH_START}-{BENCH_END}, {n} samples)\n")
+        p(f"  Branch: {BRANCH}  Commit: {commit_id}\n")
+        p(f"{'='*50}\n")
+        p(f"  平均 it/s:           {sum(bench_its_list)/n:.2f}\n")
+        p(f"  平均 loss:           {sum(bench_loss_list)/n:.6f}\n")
+        p(f"  平均占用 mem (alloc): {sum(bench_alloc_list)/n:.2f} GB\n")
+        p(f"  平均分配 mem (rsv):   {sum(bench_rsv_list)/n:.2f} GB\n")
+        p(f"  总平均 mem:           {(sum(bench_alloc_list)+sum(bench_rsv_list))/(2*n):.2f} GB\n")
+        p(f"{'='*50}\n")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -354,6 +383,7 @@ if __name__ == "__main__":
     else:
         BRANCH = get_git_branch()
 
+    LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
     DEBUG_MODE = sys.gettrace() is not None
 
     if WANDB and not DEBUG_MODE:
@@ -374,6 +404,7 @@ if __name__ == "__main__":
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
+    os.makedirs("debug", exist_ok=True)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done
