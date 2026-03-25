@@ -21,7 +21,7 @@ set -o pipefail
 ########################################
 # 配置区
 ########################################
-GPUS=(0)
+GPUS=(1 2 3)
 NUM_GPUS=${#GPUS[@]}
 DATA_BASE=/data2/jian/data
 OUT_BASE=/data2/jian/output/ours

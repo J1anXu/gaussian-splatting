@@ -31,7 +31,7 @@ import wandb
 SCENE_NAME = None
 BRANCH = None
 DEBUG_MODE = False
-WANDB = False
+WANDB = True
 LOGGER = None
 
 try:
@@ -195,7 +195,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "pts": f"{pts_M:.2f}M", "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": f"{elapsed:.1f}s"}
+            log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "pts": round(pts_M, 4), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": round(elapsed, 1)}
             LOGGER.info(log)
 
             if WANDB and not DEBUG_MODE:

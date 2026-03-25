@@ -1,0 +1,14 @@
+Output folder: /data2/jian/output/ours/mip360/vanilla3DGS_wandb/flowers [24/03 21:36:39]
+Tensorboard not available: not logging progress [24/03 21:36:39]
+------------LLFF HOLD------------- [24/03 21:36:40]
+Reading camera 173/173 [24/03 21:36:40]
+Loading Training Cameras [24/03 21:36:40]
+Loading Test Cameras [24/03 21:36:44]
+Number of points at initialisation :  38347 [24/03 21:36:44]
+Training progress:  89%|████████▉ | 26827/30000 [10:55<01:42, 31.05it/s, L=0.1047, pts=2.91M, alloc=2.78, rsv=5.54, peak=3.79, it/s=41.0]  
+
+[ITER 7000] Evaluating test: L1 0.06449127772992308 PSNR 20.47121472792192 [24/03 21:38:29]
+
+[ITER 7000] Evaluating train: L1 0.051138512790203094 PSNR 21.74403991699219 [24/03 21:38:31]
+
+[ITER 7000] Saving Gaussians [24/03 21:38:31]
