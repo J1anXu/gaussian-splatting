@@ -38,7 +38,7 @@ SCENE_NAME = None
 BRANCH = None
 DEBUG_MODE = False
 
-WANDB = False
+WANDB = True
 LOGGER = None
 
 try:
@@ -64,6 +64,22 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     prepare_output_and_logger(dataset)
     add_output_path(LOGGER, os.path.join(dataset.model_path, "logs"))
     add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="train")
+
+    # ---- densify debug log ----
+    _densify_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(_densify_log_dir, exist_ok=True)
+    _densify_log_path = os.path.join(_densify_log_dir, "densify_debug.log")
+    _densify_log_file = open(_densify_log_path, "w")
+    _orig_print = __builtins__["print"] if isinstance(__builtins__, dict) else __builtins__.print
+    def _tee_print(*args, **kwargs):
+        _orig_print(*args, **kwargs)
+        s = " ".join(str(a) for a in args)
+        if "DENSIFY" in s or "ACCUM" in s:
+            _densify_log_file.write(s + "\n")
+            _densify_log_file.flush()
+    import builtins
+    builtins.print = _tee_print
+    print(f"[INFO] densify debug log: {_densify_log_path}")
 
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
@@ -532,7 +548,7 @@ if __name__ == "__main__":
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
-            project = DATASET_NAME, 
+            project = DATASET_NAME+"_densify_test", 
             name = f"{SCENE_NAME}_{BRANCH}", 
             group = SCENE_NAME,
             config = vars(op.extract(args)) 
