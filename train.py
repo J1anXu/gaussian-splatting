@@ -407,13 +407,14 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             if iteration % 1 == 0:
                 log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "blk": len(submodel_list), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": f"{elapsed:.1f}s"}
+                wandb_log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": visible_pts, "pts": pts_total, "vis%": round(vis_pct, 1), "blk": len(submodel_list), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1)}
 
                 # logging
                 LOGGER.info(log)
 
                 # wandb logging
                 if WANDB and not DEBUG_MODE:
-                    wandb.log(log, step=iteration)
+                    wandb.log(wandb_log, step=iteration)
                     wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(submodel_list)}, step=iteration)
             
         # saving Gaussians ply    
