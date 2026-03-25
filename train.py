@@ -16,7 +16,8 @@ from random import randint
 
 import torchvision
 from utils.debug_utils import save_block_img, save_depth_list, save_rgb_layers, save_layer_contribution
-from utils.loss_utils import l1_loss, ssim, fast_ssim
+from utils.loss_utils import l1_loss, ssim
+from fused_ssim import fused_ssim
 from gaussian_renderer import render, merge_opt, merge_opt_kid
 import sys
 from scene import Scene, GaussianModel
@@ -74,7 +75,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     def _tee_print(*args, **kwargs):
         _orig_print(*args, **kwargs)
         s = " ".join(str(a) for a in args)
-        if "DENSIFY" in s or "ACCUM" in s or "OPA-DIAG" in s:
+        if "DENSIFY" in s or "ACCUM" in s or "OPA-DIAG" in s or "GRAD-DIAG" in s:
             _densify_log_file.write(s + "\n")
             _densify_log_file.flush()
     import builtins
@@ -336,7 +337,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             # Loss
             Ll1 = l1_loss(composed_img, gt_image)
-            ssim_value = fast_ssim(composed_img, gt_image)
+            ssim_value = fused_ssim(composed_img.unsqueeze(0), gt_image.unsqueeze(0))
             loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
             # Depth regularization
@@ -344,6 +345,16 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             with tracer.gpu_span("backward", block_id=submodel_id):
                 loss.backward()
+
+            if iteration % 100 == 0:
+                vpt_grad = sub_viewspace_point_tensor.grad
+                grad_norms = torch.norm(vpt_grad[:, :2], dim=-1)
+                pT_mean = prefix_T_k.mean().item()
+                pT_min = prefix_T_k.min().item()
+                print(f"[GRAD-DIAG-OURS] iter={iteration} blk={submodel_id} cam={viewpoint_cam.image_name} "
+                      f"loss={loss.item():.6f} Ll1={Ll1.item():.6f} ssim={ssim_value.item():.6f} "
+                      f"n_pts={vpt_grad.shape[0]} grad2d_mean={grad_norms.mean().item():.8f} grad2d_max={grad_norms.max().item():.8f} "
+                      f"prefix_T_mean={pT_mean:.4f} prefix_T_min={pT_min:.4f}")
 
             tracer.counter("pts", {"visible": visible_pts, "total": sum(s._xyz.shape[0] for s in submodel_list)})
 
