@@ -19,7 +19,14 @@ PARTITIONING_ENABLED = True  # 是否启用分块处理
 FRUSTUM_CULLING_ENABLED = True  # 是否启用视锥剔除
 FRUSTUM_CULLING_CACHE_ENABLED = True  # 是否缓存视锥剔除结果（densify_until_iter后位置不再增长，可复用）
 
-SPLIT_SIZE = 800000
+INDOOR_SCENES = {"room", "counter", "kitchen", "bonsai", "drjohnson", "playroom"}
+OUTDOOR_SCENES = {"bicycle", "flowers", "garden", "stump", "treehill", "train", "truck"}
+
+SPLIT_SIZE_INDOOR = 200000
+SPLIT_SIZE_OUTDOOR = 800000
+
+SPLIT_SIZE = SPLIT_SIZE_OUTDOOR  # default, overridden at runtime by scene type
+
 NUM_BLOCKS = 8  # 分块数量，支持任意正整数（如 3, 5, 6, 8, 12）
 
 GPU_CACHE_THRESHOLD_GB = 1.0  # reserved 超过 allocated 多少 GB 时清理 CUDA 缓存
