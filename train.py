@@ -39,7 +39,7 @@ SCENE_NAME = None
 BRANCH = None
 DEBUG_MODE = False
 
-WANDB = True
+WANDB = False
 LOGGER = None
 
 try:
@@ -533,7 +533,7 @@ if __name__ == "__main__":
     if WANDB and not DEBUG_MODE:
         wandb.login()
         run = wandb.init(
-            project = DATASET_NAME+"_densify_test", 
+            project = DATASET_NAME, 
             name = f"{SCENE_NAME}_{BRANCH}", 
             group = SCENE_NAME,
             config = vars(op.extract(args)) 
