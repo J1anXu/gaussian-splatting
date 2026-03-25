@@ -30,6 +30,7 @@ LOG_ROOT=debug
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
 
+FILTER_SCENE="${1:-}"   # 传入场景名则只跑该场景，否则跑全部
 DATASETS=(mip360 deepblending tandt)
 
 ########################################
@@ -112,6 +113,7 @@ run_pipeline() {
 ALL_TASKS=()
 for dataset in "${DATASETS[@]}"; do
   for scene in $(get_scenes "$dataset"); do
+    [[ -n "$FILTER_SCENE" && "$scene" != "$FILTER_SCENE" ]] && continue
     ALL_TASKS+=("$dataset/$scene")
   done
 done
