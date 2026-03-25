@@ -13,7 +13,7 @@ class PipelinedGradSync:
     # Block-partitioned rendering produces slightly lower gradient magnitudes
     # than vanilla due to block-level transmittance approximation and per-block
     # loss computation. Scale down the densification threshold to compensate.
-    DENSIFY_GRAD_SCALE = 1.0
+    DENSIFY_GRAD_SCALE = 0.7
 
     def __init__(self, submodel_list: List[GaussianModel], opt, dataset, scene,
                  tracer: Optional[TraceManager] = None, frustum_cache: Optional[dict] = None):
@@ -124,14 +124,9 @@ class PipelinedGradSync:
                 if iteration < opt.densify_until_iter:
                     with tm.span("densify_stats", tid=TID_OPTIMIZE, block_id=sm_id):
                         gvf = sm.visible_indices[sub_vf]
-                        n_vis = sub_vf.sum().item() if sub_vf.dtype == torch.bool else sub_vf.shape[0]
-                        grad_norms = torch.norm(vpt_grad[sub_vf, :2], dim=-1)
                         sm.max_radii2D[gvf] = torch.max(sm.max_radii2D[gvf], sub_radii[sub_vf])
-                        sm.xyz_gradient_accum[gvf] += grad_norms.unsqueeze(-1)
+                        sm.xyz_gradient_accum[gvf] += torch.norm(vpt_grad[sub_vf, :2], dim=-1, keepdim=True)
                         sm.denom[gvf] += 1
-                        if iteration % 100 == 0:
-                            print(f"[ACCUM-OURS] iter={iteration} blk={sm_id} n_total={sm._xyz.shape[0]} "
-                                  f"n_vis={n_vis} grad_mean={grad_norms.mean().item():.8f} grad_max={grad_norms.max().item():.8f}")
 
         return _adam, _densify_stats
 

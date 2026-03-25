@@ -66,22 +66,6 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     add_output_path(LOGGER, os.path.join(dataset.model_path, "logs"))
     add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="train")
 
-    # ---- densify debug log ----
-    _densify_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-    os.makedirs(_densify_log_dir, exist_ok=True)
-    _densify_log_path = os.path.join(_densify_log_dir, "densify_debug.log")
-    _densify_log_file = open(_densify_log_path, "w")
-    _orig_print = __builtins__["print"] if isinstance(__builtins__, dict) else __builtins__.print
-    def _tee_print(*args, **kwargs):
-        _orig_print(*args, **kwargs)
-        s = " ".join(str(a) for a in args)
-        if "DENSIFY" in s or "ACCUM" in s or "OPA-DIAG" in s or "GRAD-DIAG" in s:
-            _densify_log_file.write(s + "\n")
-            _densify_log_file.flush()
-    import builtins
-    builtins.print = _tee_print
-    print(f"[INFO] densify debug log: {_densify_log_path}")
-
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
 
@@ -345,16 +329,6 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
             with tracer.gpu_span("backward", block_id=submodel_id):
                 loss.backward()
-
-            if iteration % 100 == 0:
-                vpt_grad = sub_viewspace_point_tensor.grad
-                grad_norms = torch.norm(vpt_grad[:, :2], dim=-1)
-                pT_mean = prefix_T_k.mean().item()
-                pT_min = prefix_T_k.min().item()
-                print(f"[GRAD-DIAG-OURS] iter={iteration} blk={submodel_id} cam={viewpoint_cam.image_name} "
-                      f"loss={loss.item():.6f} Ll1={Ll1.item():.6f} ssim={ssim_value.item():.6f} "
-                      f"n_pts={vpt_grad.shape[0]} grad2d_mean={grad_norms.mean().item():.8f} grad2d_max={grad_norms.max().item():.8f} "
-                      f"prefix_T_mean={pT_mean:.4f} prefix_T_min={pT_min:.4f}")
 
             tracer.counter("pts", {"visible": visible_pts, "total": sum(s._xyz.shape[0] for s in submodel_list)})
 

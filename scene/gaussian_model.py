@@ -714,56 +714,8 @@ class GaussianModel:
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, device=device)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, device="cuda"):
-        # ---- P0: opacity 分布诊断 ----
-        opa = self.get_opacity.squeeze()
-        opa_q = torch.quantile(opa, torch.tensor([0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9], device=opa.device))
-        n_below_thresh = (opa < min_opacity).sum().item()
-        n_below_01 = (opa < 0.01).sum().item()
-        n_below_05 = (opa < 0.05).sum().item()
-        # optimizer state for opacity (read from packed adam state if available)
-        opa_lr_actual = None
-        opa_exp_avg_norm = None
-        opa_exp_avg_sq_norm = None
-        for pg in self.optimizer.param_groups:
-            if pg["name"] == "opacity":
-                opa_lr_actual = pg["lr"]
-                if hasattr(self, '_packed_exp_avg') and hasattr(self, '_pack_slices'):
-                    s, e, _ = self._pack_slices['_opacity']
-                    opa_exp_avg_norm = self._packed_exp_avg[:, s:e].norm().item()
-                    opa_exp_avg_sq_norm = self._packed_exp_avg_sq[:, s:e].norm().item()
-                elif len(self.optimizer.state) > 0:
-                    p = pg["params"][0]
-                    if p in self.optimizer.state:
-                        st = self.optimizer.state[p]
-                        if "exp_avg" in st:
-                            opa_exp_avg_norm = st["exp_avg"].norm().item()
-                        if "exp_avg_sq" in st:
-                            opa_exp_avg_sq_norm = st["exp_avg_sq"].norm().item()
-                break
-        block_tag = f"blk={getattr(self, 'block_id', '?')}" if hasattr(self, 'block_id') else ""
-        print(f"[OPA-DIAG-OURS] {block_tag} n={opa.shape[0]} "
-              f"q01={opa_q[0]:.4f} q05={opa_q[1]:.4f} q10={opa_q[2]:.4f} q25={opa_q[3]:.4f} "
-              f"q50={opa_q[4]:.4f} q75={opa_q[5]:.4f} q90={opa_q[6]:.4f} "
-              f"mean={opa.mean().item():.4f} min={opa.min().item():.6f} max={opa.max().item():.4f} "
-              f"n_below_{min_opacity}={n_below_thresh} n_below_0.01={n_below_01} n_below_0.05={n_below_05} "
-              f"lr={opa_lr_actual} exp_avg_norm={opa_exp_avg_norm} exp_avg_sq_norm={opa_exp_avg_sq_norm}")
-        # ---- end P0 ----
-
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
-
-        n_before = self.get_xyz.shape[0]
-        grad_norm = torch.norm(grads, dim=-1)
-        scales_max = self.get_scaling.max(dim=1).values
-        clone_mask = (grad_norm >= max_grad) & (scales_max <= self.percent_dense * extent)
-        split_mask = (grad_norm >= max_grad) & (scales_max > self.percent_dense * extent)
-        n_clone = clone_mask.sum().item()
-        n_split = split_mask.sum().item()
-        denom_nz = self.denom[self.denom > 0]
-        denom_mean = denom_nz.mean().item() if denom_nz.numel() > 0 else 0.0
-        denom_min = self.denom.min().item()
-        denom_max = self.denom.max().item()
-        n_observed = (self.denom > 0).sum().item()
 
         # Sync packed Adam state → optimizer.state before densify, so that
         # cat_tensors_to_optimizer / _prune_optimizer can preserve momentum.
@@ -773,28 +725,11 @@ class GaussianModel:
         self.densify_and_clone(grads, max_grad, extent, device=device)
         self.densify_and_split(grads, max_grad, extent, device=device)
 
-        prune_opacity = (self.get_opacity < min_opacity).squeeze()
-        n_prune_opacity = prune_opacity.sum().item()
-        prune_mask = prune_opacity
-        n_prune_vs = 0
-        n_prune_ws = 0
+        prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-            n_prune_vs = (big_points_vs & ~prune_mask).sum().item()
-            n_prune_ws = (big_points_ws & ~prune_mask & ~big_points_vs).sum().item()
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-        n_prune = prune_mask.sum().item()
-
-        block_tag = f"blk={getattr(self, 'block_id', '?')}" if hasattr(self, 'block_id') else ""
-        print(f"[DENSIFY-OURS] {block_tag} before={n_before} clone={n_clone} split={n_split} "
-              f"prune={n_prune}(opa={n_prune_opacity} vs={n_prune_vs} ws={n_prune_ws}) "
-              f"after={n_before + n_clone + n_split - n_prune} "
-              f"grad_thr={max_grad:.6f} grad_mean={grad_norm.mean().item():.6f} grad_max={grad_norm.max().item():.6f} "
-              f"pct50={torch.quantile(grad_norm, 0.5).item():.6f} pct90={torch.quantile(grad_norm, 0.9).item():.6f} pct99={torch.quantile(grad_norm, 0.99).item():.6f} "
-              f"denom_mean={denom_mean:.1f} denom_min={denom_min:.0f} denom_max={denom_max:.0f} "
-              f"n_observed={n_observed}/{n_before} extent={extent:.4f}")
-
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
