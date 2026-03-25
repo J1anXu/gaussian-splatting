@@ -74,7 +74,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     def _tee_print(*args, **kwargs):
         _orig_print(*args, **kwargs)
         s = " ".join(str(a) for a in args)
-        if "DENSIFY" in s or "ACCUM" in s:
+        if "DENSIFY" in s or "ACCUM" in s or "OPA-DIAG" in s:
             _densify_log_file.write(s + "\n")
             _densify_log_file.flush()
     import builtins

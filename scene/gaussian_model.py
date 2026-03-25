@@ -714,6 +714,41 @@ class GaussianModel:
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, device=device)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, device="cuda"):
+        # ---- P0: opacity 分布诊断 ----
+        opa = self.get_opacity.squeeze()
+        opa_q = torch.quantile(opa, torch.tensor([0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9], device=opa.device))
+        n_below_thresh = (opa < min_opacity).sum().item()
+        n_below_01 = (opa < 0.01).sum().item()
+        n_below_05 = (opa < 0.05).sum().item()
+        # optimizer state for opacity (read from packed adam state if available)
+        opa_lr_actual = None
+        opa_exp_avg_norm = None
+        opa_exp_avg_sq_norm = None
+        for pg in self.optimizer.param_groups:
+            if pg["name"] == "opacity":
+                opa_lr_actual = pg["lr"]
+                if hasattr(self, '_packed_exp_avg') and hasattr(self, '_pack_slices'):
+                    s, e, _ = self._pack_slices['_opacity']
+                    opa_exp_avg_norm = self._packed_exp_avg[:, s:e].norm().item()
+                    opa_exp_avg_sq_norm = self._packed_exp_avg_sq[:, s:e].norm().item()
+                elif len(self.optimizer.state) > 0:
+                    p = pg["params"][0]
+                    if p in self.optimizer.state:
+                        st = self.optimizer.state[p]
+                        if "exp_avg" in st:
+                            opa_exp_avg_norm = st["exp_avg"].norm().item()
+                        if "exp_avg_sq" in st:
+                            opa_exp_avg_sq_norm = st["exp_avg_sq"].norm().item()
+                break
+        block_tag = f"blk={getattr(self, 'block_id', '?')}" if hasattr(self, 'block_id') else ""
+        print(f"[OPA-DIAG-OURS] {block_tag} n={opa.shape[0]} "
+              f"q01={opa_q[0]:.4f} q05={opa_q[1]:.4f} q10={opa_q[2]:.4f} q25={opa_q[3]:.4f} "
+              f"q50={opa_q[4]:.4f} q75={opa_q[5]:.4f} q90={opa_q[6]:.4f} "
+              f"mean={opa.mean().item():.4f} min={opa.min().item():.6f} max={opa.max().item():.4f} "
+              f"n_below_{min_opacity}={n_below_thresh} n_below_0.01={n_below_01} n_below_0.05={n_below_05} "
+              f"lr={opa_lr_actual} exp_avg_norm={opa_exp_avg_norm} exp_avg_sq_norm={opa_exp_avg_sq_norm}")
+        # ---- end P0 ----
+
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
@@ -729,6 +764,11 @@ class GaussianModel:
         denom_min = self.denom.min().item()
         denom_max = self.denom.max().item()
         n_observed = (self.denom > 0).sum().item()
+
+        # Sync packed Adam state → optimizer.state before densify, so that
+        # cat_tensors_to_optimizer / _prune_optimizer can preserve momentum.
+        if hasattr(self, '_packed_exp_avg'):
+            self._sync_packed_adam_to_optimizer_state()
 
         self.densify_and_clone(grads, max_grad, extent, device=device)
         self.densify_and_split(grads, max_grad, extent, device=device)
@@ -880,20 +920,58 @@ class GaussianModel:
             self._packed_exp_avg[:, s:e] = 0
             self._packed_exp_avg_sq[:, s:e] = 0
 
+    def _sync_packed_adam_to_optimizer_state(self):
+        """Write _packed_exp_avg/sq back into optimizer.state so that
+        cat_tensors_to_optimizer / _prune_optimizer can maintain momentum
+        across densify/prune cycles."""
+        if not hasattr(self, '_packed_exp_avg') or not hasattr(self, '_pack_slices'):
+            return
+        for group in self.optimizer.param_groups:
+            attr = self._GROUP_TO_ATTR.get(group["name"])
+            if attr is None:
+                continue
+            p = group["params"][0]
+            s, e, reshape = self._pack_slices[attr]
+            ea = self._packed_exp_avg[:, s:e].clone()
+            easq = self._packed_exp_avg_sq[:, s:e].clone()
+            if reshape is not None:
+                ea = ea.view(p.shape)
+                easq = easq.view(p.shape)
+            self.optimizer.state[p] = {
+                "exp_avg": ea,
+                "exp_avg_sq": easq,
+            }
+
     def _init_packed_adam_state(self):
         """Initialize or resize [N, D] exp_avg / exp_avg_sq for packed_sparse_adam.
 
         On first call: allocate zero tensors and set step=0.
-        On subsequent calls (after densify/prune): resize to new N, preserving
-        step counter. Momentum is reset to zero (new points need zero init anyway,
-        and densify only happens in early training).
+        On subsequent calls (after densify/prune): populate from optimizer.state
+        (which was maintained by cat_tensors_to_optimizer / _prune_optimizer),
+        preserving momentum for existing points.
         """
         N, D = self._packed.shape
         if not hasattr(self, '_packed_adam_step'):
             self._packed_adam_step = 0
-        # Always reallocate to match current N (densify/prune changes N)
-        self._packed_exp_avg = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
-        self._packed_exp_avg_sq = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
+        # Allocate new packed adam buffers
+        new_exp_avg = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
+        new_exp_avg_sq = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
+        # Populate from optimizer.state if available (preserves momentum after densify/prune)
+        for group in self.optimizer.param_groups:
+            attr = self._GROUP_TO_ATTR.get(group["name"])
+            if attr is None:
+                continue
+            p = group["params"][0]
+            stored = self.optimizer.state.get(p, None)
+            if stored is not None and "exp_avg" in stored:
+                s, e, _ = self._pack_slices[attr]
+                ea = stored["exp_avg"].reshape(-1, e - s)
+                easq = stored["exp_avg_sq"].reshape(-1, e - s)
+                n = min(ea.shape[0], N)
+                new_exp_avg[:n, s:e] = ea[:n]
+                new_exp_avg_sq[:n, s:e] = easq[:n]
+        self._packed_exp_avg = new_exp_avg
+        self._packed_exp_avg_sq = new_exp_avg_sq
 
     def _build_lr_per_col(self, iteration):
         """Build [D] tensor with per-column learning rate from optimizer param_groups."""
