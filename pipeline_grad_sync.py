@@ -1,3 +1,4 @@
+import config
 import torch
 from typing import List, Optional, Callable
 from scene import GaussianModel
@@ -13,7 +14,7 @@ class PipelinedGradSync:
     # Block-partitioned rendering produces slightly lower gradient magnitudes
     # than vanilla due to block-level transmittance approximation and per-block
     # loss computation. Scale down the densification threshold to compensate.
-    DENSIFY_GRAD_SCALE = 0.7
+    DENSIFY_GRAD_SCALE = config.DENSIFY_GRAD_SCALE
 
     def __init__(self, submodel_list: List[GaussianModel], opt, dataset, scene,
                  tracer: Optional[TraceManager] = None, frustum_cache: Optional[dict] = None):

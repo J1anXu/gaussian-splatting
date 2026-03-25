@@ -40,3 +40,5 @@ TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
 KEEP_TRAINING = False  # 由命令行参数 --keep_training 控制
 
 SKIP_SMALL_BLOCK_THRESH = 0.05  # 跳过可见点数小于最大块该比例的小块，设为0关闭
+
+DENSIFY_GRAD_SCALE = 0.95  # 降低 densify 梯度阈值，补偿 block 分割后 prefix_T 对梯度的缩放 (1.0=不补偿, 越小越激进)
