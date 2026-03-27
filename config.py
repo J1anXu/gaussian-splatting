@@ -29,7 +29,7 @@ SPLIT_SIZE = SPLIT_SIZE_OUTDOOR  # default, overridden at runtime by scene type
 
 NUM_BLOCKS = 8  # 分块数量，支持任意正整数（如 3, 5, 6, 8, 12）
 
-GPU_CACHE_THRESHOLD_GB = 1.0  # reserved 超过 allocated 多少 GB 时清理 CUDA 缓存
+GPU_CACHE_THRESHOLD_GB = 0.5  # reserved 超过 allocated 多少 GB 时清理 CUDA 缓存
 
 MERGE_FAST = True  # True: 全图merge(快,多用~90MB), False: 分块merge(省显存,慢)
 
