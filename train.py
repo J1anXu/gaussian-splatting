@@ -337,6 +337,10 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         # flush the last submodel's pending work
         grad_sync.flush_last()
 
+        del C_sorted, prefix_T, block_rank, colors_bg, merge_res
+        del rendered_list, depth_list, alpha_list
+        del gt_image
+
         # Fix: ensure ALL blocks get densify_and_prune / reset_opacity at the
         # correct intervals, not just blocks that were visible this iteration.
         # Non-visible blocks still have accumulated stats from prior iterations.

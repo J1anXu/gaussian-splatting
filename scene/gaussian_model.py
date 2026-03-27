@@ -1101,6 +1101,7 @@ class GaussianModel:
             self._rotation_gpu = gpu_packed[:, s:e].clone()
             s, e, _ = slices['_opacity']
             self._opacity_gpu = gpu_packed[:, s:e].clone()
+            del gpu_packed
         else:
             s, e, _ = slices['_xyz']
             self._xyz_gpu = gpu_packed[:, s:e]
