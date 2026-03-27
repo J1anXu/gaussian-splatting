@@ -11,8 +11,8 @@
 
 import torch
 import math
-from diff_gaussian_rasterization_wenqi_tam import GaussianRasterizationSettings, GaussianRasterizer
-import diff_gaussian_rasterization_wenqi_tam._C as _merge_C
+from diff_gaussian_rasterization_jian import GaussianRasterizationSettings, GaussianRasterizer
+import diff_gaussian_rasterization_jian._C as _merge_C
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 

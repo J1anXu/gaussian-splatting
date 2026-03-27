@@ -20,10 +20,10 @@ from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
 
 # C+OMP frustum culling (5x faster than PyTorch on CPU).
-# Provided by diff_gaussian_rasterization_wenqi_tam._C (pip install -e submodules/diff-gaussian-rasterization)
+# Provided by diff_gaussian_rasterization_jian._C (pip install -e submodules/diff-gaussian-rasterization)
 _FC_EXT = None
 try:
-    import diff_gaussian_rasterization_wenqi_tam._C as _FC_EXT
+    import diff_gaussian_rasterization_jian._C as _FC_EXT
 except Exception:
     pass
 

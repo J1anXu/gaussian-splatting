@@ -32,7 +32,7 @@ import wandb
 import time
 from logger import get_logger, add_output_path
 import config
-import diff_gaussian_rasterization_wenqi_tam
+import diff_gaussian_rasterization_jian
 from TimerManager import  TraceManager, TID_MAIN, PID_CPU
 from pipeline_grad_sync import PipelinedGradSync
 SCENE_NAME = None
@@ -49,7 +49,7 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 try:
-    from diff_gaussian_rasterization_wenqi_tam import SparseGaussianAdam
+    from diff_gaussian_rasterization_jian import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
@@ -272,7 +272,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         block_rank = merge_res["block_rank"]  # [K,H,W]，每个像素告诉你每个 block 的排序位置
         K, C, H, W = C_sorted.shape   
         colors_bg = merge_res["bg_rgb"]
-        diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
+        diff_gaussian_rasterization_jian.set_colors_bg(colors_bg)
 
         with torch.no_grad():
             gt_image = viewpoint_cam.original_image.cuda()

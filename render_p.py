@@ -30,7 +30,7 @@ from typing import List
 import config
 from logger import get_logger, add_output_path
 try:
-    from diff_gaussian_rasterization_wenqi_tam import SparseGaussianAdam
+    from diff_gaussian_rasterization_jian import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False

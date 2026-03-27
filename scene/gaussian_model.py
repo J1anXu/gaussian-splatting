@@ -29,7 +29,7 @@ import copy
 
 
 try:
-    from diff_gaussian_rasterization_wenqi_tam import SparseGaussianAdam
+    from diff_gaussian_rasterization_jian import SparseGaussianAdam
 except:
     pass
 
@@ -39,7 +39,7 @@ except ImportError:
     DeepSpeedCPUAdam = None
 
 try:
-    from diff_gaussian_rasterization_wenqi_tam import _C as cpu_adam
+    from diff_gaussian_rasterization_jian import _C as cpu_adam
 except ImportError:
     cpu_adam = None
 
