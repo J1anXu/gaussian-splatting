@@ -1081,11 +1081,17 @@ class GaussianModel:
         torch.index_select(self._packed, 0, idx, out=staging)
         self._db_n = n
 
+    ALLOC_STEP = 4096  # round up 步长，让 CUDA allocator 更容易复用空闲块
+
     def kick_h2d_and_activate(self, requires_grad=True):
         """H2D transfer + GPU unpack. Assumes pre_gather() was already called."""
         n = self._db_n
         staging = self._packed_staging[:n]
-        gpu_packed = staging.cuda(non_blocking=True)
+        alloc_n = ((n + self.ALLOC_STEP - 1) // self.ALLOC_STEP) * self.ALLOC_STEP
+        D = staging.shape[1]
+        gpu_packed = torch.empty(alloc_n, D, device='cuda')
+        gpu_packed[:n].copy_(staging, non_blocking=True)
+        gpu_packed = gpu_packed[:n]
 
         slices = self._pack_slices
         if requires_grad:
