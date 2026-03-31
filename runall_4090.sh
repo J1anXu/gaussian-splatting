@@ -24,7 +24,7 @@ set -o pipefail
 GPUS=(0)
 NUM_GPUS=${#GPUS[@]}
 DATA_BASE=/data/jian/data
-OUT_BASE=/data/jian/output/ours
+OUT_BASE=/data/jian/output/vanilla3DGS
 LOG_ROOT=debug
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

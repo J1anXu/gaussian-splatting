@@ -52,7 +52,7 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, save_pts_thresholds=None):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -83,6 +83,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
+
+    # Track which point-count thresholds have been triggered
+    save_pts_triggered = set()
+    if save_pts_thresholds is None:
+        save_pts_thresholds = []
 
     time_start = time.time()
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
@@ -219,6 +224,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
+
+            # Save by point count thresholds (unit: 万)
+            if save_pts_thresholds:
+                num_pts = gaussians.get_xyz.shape[0]
+                num_pts_wan = num_pts / 1e4
+                for threshold in save_pts_thresholds:
+                    if threshold not in save_pts_triggered and num_pts_wan >= threshold:
+                        save_pts_triggered.add(threshold)
+                        tag = f"pts_{threshold}w"
+                        print(f"\n[ITER {iteration}] Points reached {threshold}万 ({num_pts}), saving as {tag}")
+                        point_cloud_path = os.path.join(scene.model_path, f"point_cloud/{tag}")
+                        os.makedirs(point_cloud_path, exist_ok=True)
+                        gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+                        torch.save((gaussians.capture(), iteration), os.path.join(scene.model_path, f"chkpnt_{tag}.pth"))
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -364,6 +383,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
+    parser.add_argument("--save_pts", nargs="+", type=int, default=[300,400,500,600,700,800,900,1000], help="Save when point count reaches these thresholds (unit: 10k)")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument('--git_branch', type=str, default=None)
@@ -405,7 +425,7 @@ if __name__ == "__main__":
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     os.makedirs("debug", exist_ok=True)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.save_pts)
 
     # All done
     print("\nTraining complete.")
