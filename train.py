@@ -31,7 +31,7 @@ import wandb
 SCENE_NAME = None
 BRANCH = None
 DEBUG_MODE = False
-WANDB = False
+WANDB = True
 LOGGER = None
 
 try:
@@ -61,6 +61,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     add_output_path(LOGGER, os.path.join(dataset.model_path, "logs"))
     add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="train")
+
+    # ---- densify debug log ----
+    _densify_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(_densify_log_dir, exist_ok=True)
+    _densify_log_path = os.path.join(_densify_log_dir, "densify_debug.log")
+    _densify_log_file = open(_densify_log_path, "w")
+    _orig_print = __builtins__["print"] if isinstance(__builtins__, dict) else __builtins__.print
+    def _tee_print(*args, **kwargs):
+        _orig_print(*args, **kwargs)
+        s = " ".join(str(a) for a in args)
+        if "DENSIFY" in s or "ACCUM" in s:
+            _densify_log_file.write(s + "\n")
+            _densify_log_file.flush()
+    import builtins
+    builtins.print = _tee_print
+    print(f"[INFO] densify debug log: {_densify_log_path}")
     LOGGER.info(f"Scene: {SCENE_NAME} | source: {dataset.source_path} | iterations: {opt.iterations}")
 
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
@@ -200,7 +216,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "pts": f"{pts_M:.2f}M", "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": f"{elapsed:.1f}s"}
+            log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "pts": gaussians.get_xyz.shape[0], "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": round(elapsed, 1)}
             LOGGER.info(log)
 
             if WANDB and not DEBUG_MODE:
@@ -216,6 +232,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                if iteration % 100 == 0:
+                    grad_norms = torch.norm(viewspace_point_tensor.grad[visibility_filter, :2], dim=-1)
+                    n_vis = visibility_filter.sum().item() if visibility_filter.dtype == torch.bool else visibility_filter.shape[0]
+                    print(f"[ACCUM-VANILLA] iter={iteration} n_total={gaussians._xyz.shape[0]} "
+                          f"n_vis={n_vis} grad_mean={grad_norms.mean().item():.8f} grad_max={grad_norms.max().item():.8f}")
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
@@ -410,7 +431,7 @@ if __name__ == "__main__":
         try:
             wandb.login()
             run = wandb.init(
-                project=DATASET_NAME,
+                project=DATASET_NAME+"_densify_test",
                 name=f"{SCENE_NAME}_{BRANCH}",
                 group=SCENE_NAME,
                 config=vars(op.extract(args))
