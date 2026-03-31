@@ -406,7 +406,7 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, no_prune=False):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -429,27 +429,28 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
 
-        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
-        self.prune_points(prune_filter)
+        if not no_prune:
+            prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+            self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, clone_times=1):
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
         
-        new_xyz = self._xyz[selected_pts_mask]
-        new_features_dc = self._features_dc[selected_pts_mask]
-        new_features_rest = self._features_rest[selected_pts_mask]
-        new_opacities = self._opacity[selected_pts_mask]
-        new_scaling = self._scaling[selected_pts_mask]
-        new_rotation = self._rotation[selected_pts_mask]
+        new_xyz = self._xyz[selected_pts_mask].repeat(clone_times, 1)
+        new_features_dc = self._features_dc[selected_pts_mask].repeat(clone_times, 1, 1)
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(clone_times, 1, 1)
+        new_opacities = self._opacity[selected_pts_mask].repeat(clone_times, 1)
+        new_scaling = self._scaling[selected_pts_mask].repeat(clone_times, 1)
+        new_rotation = self._rotation[selected_pts_mask].repeat(clone_times, 1)
 
-        new_tmp_radii = self.tmp_radii[selected_pts_mask]
+        new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(clone_times)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii, no_prune=False, clone_times=1, split_n=2):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
@@ -468,31 +469,38 @@ class GaussianModel:
         n_observed = (self.denom > 0).sum().item()
 
         self.tmp_radii = radii
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        self.densify_and_clone(grads, max_grad, extent, clone_times=clone_times)
+        self.densify_and_split(grads, max_grad, extent, N=split_n, no_prune=no_prune)
 
-        prune_opacity = (self.get_opacity < min_opacity).squeeze()
-        n_prune_opacity = prune_opacity.sum().item()
-        prune_mask = prune_opacity
-        n_prune_vs = 0
-        n_prune_ws = 0
-        if max_screen_size:
-            big_points_vs = self.max_radii2D > max_screen_size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-            n_prune_vs = (big_points_vs & ~prune_mask).sum().item()
-            n_prune_ws = (big_points_ws & ~prune_mask & ~big_points_vs).sum().item()
-            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-        n_prune = prune_mask.sum().item()
+        if no_prune:
+            n_prune = 0
+            n_prune_opacity = 0
+            n_prune_vs = 0
+            n_prune_ws = 0
+        else:
+            prune_opacity = (self.get_opacity < min_opacity).squeeze()
+            n_prune_opacity = prune_opacity.sum().item()
+            prune_mask = prune_opacity
+            n_prune_vs = 0
+            n_prune_ws = 0
+            if max_screen_size:
+                big_points_vs = self.max_radii2D > max_screen_size
+                big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+                n_prune_vs = (big_points_vs & ~prune_mask).sum().item()
+                n_prune_ws = (big_points_ws & ~prune_mask & ~big_points_vs).sum().item()
+                prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+            n_prune = prune_mask.sum().item()
 
-        print(f"[DENSIFY-VANILLA] before={n_before} clone={n_clone} split={n_split} "
+        print(f"[DENSIFY-VANILLA] before={n_before} clone={n_clone}x{clone_times} split={n_split}xN{split_n} "
               f"prune={n_prune}(opa={n_prune_opacity} vs={n_prune_vs} ws={n_prune_ws}) "
-              f"after={n_before + n_clone + n_split - n_prune} "
+              f"after={self.get_xyz.shape[0]} no_prune={no_prune} "
               f"grad_thr={max_grad:.6f} grad_mean={grad_norm.mean().item():.6f} grad_max={grad_norm.max().item():.6f} "
               f"pct50={torch.quantile(grad_norm, 0.5).item():.6f} pct90={torch.quantile(grad_norm, 0.9).item():.6f} pct99={torch.quantile(grad_norm, 0.99).item():.6f} "
               f"denom_mean={denom_mean:.1f} denom_min={denom_min:.0f} denom_max={denom_max:.0f} "
               f"n_observed={n_observed}/{n_before} extent={extent:.4f}")
 
-        self.prune_points(prune_mask)
+        if not no_prune:
+            self.prune_points(prune_mask)
         tmp_radii = self.tmp_radii
         self.tmp_radii = None
 
