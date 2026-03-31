@@ -230,7 +230,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 scene.save(iteration)
 
             # Densification
+            dens = False
+            
             if iteration < opt.densify_until_iter:
+                dens = True
+                
+            if grow_mode:
+                dens = True
+                
+            if dens:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 if iteration % 100 == 0:
