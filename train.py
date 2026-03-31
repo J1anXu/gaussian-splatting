@@ -274,6 +274,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
                         torch.save((gaussians.capture(), iteration), os.path.join(scene.model_path, f"chkpnt_{tag}.pth"))
 
+                        # 如果最后一个阈值已完成保存，立即结束训练
+                        if threshold == max(save_pts_thresholds):
+                            print(f"\n[ITER {iteration}] Last save_pts threshold ({threshold}万) reached and saved. Stopping training.")
+                            return
+
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.exposure_optimizer.step()

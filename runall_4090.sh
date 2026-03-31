@@ -89,22 +89,22 @@ run_pipeline() {
     $img_flag \
     2>&1 | tr -d '\r' > "$log_dir/train.log"
 
-#   # 2. RENDER
-#   echo "  [2/3] Rendering $scene ..."
-#   python render.py \
-#     -m "$model_path" \
-#     --skip_train \
-#     2>&1 | tr -d '\r' > "$log_dir/render.log"
+  # # 2. RENDER
+  # echo "  [2/3] Rendering $scene ..."
+  # python render.py \
+  #   -m "$model_path" \
+  #   --skip_train \
+  #   2>&1 | tr -d '\r' > "$log_dir/render.log"
 
-#   # 3. METRICS
-#   echo "  [3/3] Metrics $scene ..."
-#   python metrics.py \
-#     -m "$model_path" \
-#     --git_branch "$GIT_BRANCH" \
-#     2>&1 | tr -d '\r' > "$log_dir/metrics.log"
+  # # 3. METRICS
+  # echo "  [3/3] Metrics $scene ..."
+  # python metrics.py \
+  #   -m "$model_path" \
+  #   --git_branch "$GIT_BRANCH" \
+  #   2>&1 | tr -d '\r' > "$log_dir/metrics.log"
 
-#   echo "Finished $scene on GPU $gpu"
-# }
+  # echo "Finished $scene on GPU $gpu"
+}
 
 ########################################
 # 收集所有 (dataset, scene) 任务，轮询分配到 GPU
