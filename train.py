@@ -22,6 +22,7 @@ from utils.general_utils import safe_state, get_expon_lr_func, get_git_branch
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
+import argparse
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from logger import get_logger, add_output_path
@@ -53,7 +54,7 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, save_pts_thresholds=None, grow_mode=False):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, save_pts_thresholds=None, grow_mode=False, override_start_iter=-1):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -86,6 +87,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+        if override_start_iter >= 0:
+            print(f"[INFO] Overriding start iter from {first_iter} to {override_start_iter}")
+            first_iter = override_start_iter
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -105,6 +109,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     save_pts_triggered = set()
     if save_pts_thresholds is None:
         save_pts_thresholds = []
+    # 从 checkpoint 恢复时，把已达到的阈值标记为已触发，避免重复保存
+    if checkpoint and save_pts_thresholds:
+        num_pts_wan = gaussians.get_xyz.shape[0] / 1e4
+        for t in save_pts_thresholds:
+            if num_pts_wan >= t:
+                save_pts_triggered.add(t)
+        if save_pts_triggered:
+            print(f"[INFO] Resumed from checkpoint, skipping already-reached thresholds: {sorted(save_pts_triggered)}万")
 
     time_start = time.time()
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
@@ -423,10 +435,12 @@ if __name__ == "__main__":
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
-    parser.add_argument("--save_pts", nargs="+", type=int, default=config.SAVE_PTS, help="Save when point count reaches these thresholds (unit: 万/10k)")
+    parser.add_argument("--save_pts", nargs="*", type=int, default=config.SAVE_PTS, help="Save when point count reaches these thresholds (unit: 万/10k). Pass without values to disable.")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument("--grow_mode", action="store_true", default=config.GROW_MODE, help="Aggressive densify: no prune, lower threshold, 3x more points")
+    parser.add_argument("--extra_iterations", type=int, default=0, help="从 checkpoint 继续训练的额外迭代数（会覆盖 --iterations）")
+    parser.add_argument("--override_start_iter", type=int, default=-1, help="覆盖 checkpoint 里的起始 iter（-1 表示不覆盖）")
+    parser.add_argument("--grow_mode", action=argparse.BooleanOptionalAction, default=config.GROW_MODE, help="Aggressive densify: no prune, lower threshold, 3x more points")
     parser.add_argument('--git_branch', type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -461,12 +475,23 @@ if __name__ == "__main__":
             print(f"wandb init failed: {e}, continuing without wandb")
             WANDB = False
 
+    # 从 checkpoint 恢复时，如果指定了 --extra_iterations，自动计算 iterations
+    if args.start_checkpoint and args.extra_iterations > 0:
+        (_, ckpt_iter) = torch.load(args.start_checkpoint, map_location="cpu")
+        new_iters = ckpt_iter + args.extra_iterations
+        print(f"[INFO] Checkpoint at iter {ckpt_iter}, extra_iterations={args.extra_iterations} → iterations={new_iters}")
+        args.iterations = new_iters
+        # 重新 extract op，让 opt.iterations 生效
+        op_extracted = op.extract(args)
+    else:
+        op_extracted = op.extract(args)
+
     # Start GUI server, configure and run training
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     os.makedirs("debug", exist_ok=True)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.save_pts, args.grow_mode)
+    training(lp.extract(args), op_extracted, pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.save_pts, args.grow_mode, args.override_start_iter)
 
     # All done
     print("\nTraining complete.")
