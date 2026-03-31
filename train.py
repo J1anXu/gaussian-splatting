@@ -27,6 +27,7 @@ from arguments import ModelParams, PipelineParams, OptimizationParams
 from logger import get_logger, add_output_path
 from torchvision.utils import save_image
 import wandb
+import config
 
 SCENE_NAME = None
 BRANCH = None
@@ -242,8 +243,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     if grow_mode:
-                        gaussians.densify_and_prune(opt.densify_grad_threshold * 0.25, 0.005, scene.cameras_extent, size_threshold, radii,
-                                                    no_prune=True, clone_times=3, split_n=6)
+                        gaussians.densify_and_prune(opt.densify_grad_threshold * config.GROW_GRAD_SCALE, 0.005, scene.cameras_extent, size_threshold, radii,
+                                                    no_prune=True, clone_times=config.GROW_CLONE_TIMES, split_n=config.GROW_SPLIT_N)
                     else:
                         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
 
@@ -409,10 +410,10 @@ if __name__ == "__main__":
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
-    parser.add_argument("--save_pts", nargs="+", type=int, default=[300,400,500,600,700,800,900,1000], help="Save when point count reaches these thresholds (unit: 10k)")
+    parser.add_argument("--save_pts", nargs="+", type=int, default=config.SAVE_PTS, help="Save when point count reaches these thresholds (unit: 万/10k)")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument("--grow_mode", action="store_true", default=False, help="Aggressive densify: no prune, lower threshold, 3x more points")
+    parser.add_argument("--grow_mode", action="store_true", default=config.GROW_MODE, help="Aggressive densify: no prune, lower threshold, 3x more points")
     parser.add_argument('--git_branch', type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
