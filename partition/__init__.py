@@ -135,9 +135,7 @@ def generate_space_kdtree_blocks(xyz: torch.Tensor, inflate_ratio: float = 0.05,
     dtype  = xyz.dtype
     N = xyz.shape[0]
 
-    if num_blocks is None:
-        num_blocks = config.NUM_BLOCKS
-    assert num_blocks >= 1, f"NUM_BLOCKS must be >= 1, got {num_blocks}"
+    assert num_blocks is not None and num_blocks >= 1, f"num_blocks must be >= 1, got {num_blocks}"
 
     all_idx = torch.arange(N, device=device)
 
