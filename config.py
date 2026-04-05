@@ -23,7 +23,7 @@ INDOOR_SCENES = {"room", "counter", "kitchen", "bonsai", "drjohnson", "playroom"
 OUTDOOR_SCENES = {"bicycle", "flowers", "garden", "stump", "treehill", "train", "truck"}
 
 SPLIT_SIZE_INDOOR = 400000
-SPLIT_SIZE_OUTDOOR = 800000
+SPLIT_SIZE_OUTDOOR = 1200000
 
 SPLIT_SIZE = SPLIT_SIZE_OUTDOOR  # default, overridden at runtime by scene type
 
