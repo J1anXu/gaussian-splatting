@@ -22,8 +22,8 @@ FRUSTUM_CULLING_CACHE_ENABLED = True  # 是否缓存视锥剔除结果（densify
 INDOOR_SCENES = {"room", "counter", "kitchen", "bonsai", "drjohnson", "playroom"}
 OUTDOOR_SCENES = {"bicycle", "flowers", "garden", "stump", "treehill", "train", "truck"}
 
-SPLIT_SIZE_INDOOR = 400000
-SPLIT_SIZE_OUTDOOR = 800000
+SPLIT_SIZE_INDOOR = 500000
+SPLIT_SIZE_OUTDOOR = 500000
 
 SPLIT_SIZE = SPLIT_SIZE_OUTDOOR  # default, overridden at runtime by scene type
 
