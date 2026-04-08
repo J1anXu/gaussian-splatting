@@ -25,7 +25,7 @@ GPU 利用率仅 17–26%。主要瓶颈是 Adam 和重复 H2D 阻塞了 GPU 流
 **现象：** 时间线中 `h2d_grad block=6` 在 `packed_sparse_adam block=4` 结束后 131μs 才开始。
 CPU Adam（~50ms）完全串行占用主线程，GPU 在此期间空转等待下一块 H2D。
 
-**已修复：** 用 `ThreadPoolExecutor(max_workers=1)` 将 Adam 提交到后台线程。
+**可能的方案：** 用 `ThreadPoolExecutor(max_workers=1)` 将 Adam 提交到后台线程。
 新版 `flush_and_prepare` 为每个块创建新的 `torch.cuda.Event()`，worker 线程持有前一块的 event 引用并独立 synchronize。
 
 ---
