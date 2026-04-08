@@ -43,7 +43,7 @@ DENSIFY_GRAD_SCALE = 0.95  # densify 梯度阈值缩放，补偿 block 分割后
 
 # Keep the largest visible block on GPU across Phase1->Phase2 to avoid one
 # duplicate H2D per iter, while preserving the overall offloading pipeline.
-PHASE12_REUSE_TOPK = 1
+PHASE12_REUSE_TOPK = 2
 PHASE12_REUSE_MAX_ALLOC_RATIO = 0.80
 
 # Debug-only validation. This check may force GPU->CPU sync when visible_indices
