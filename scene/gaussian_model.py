@@ -951,6 +951,20 @@ class GaussianModel:
             lr_vec[s:e] = group["lr"]
         return lr_vec
 
+    def sync_xyz_contig_rows(self, idx: torch.Tensor):
+        """Keep the cached CPU frustum-culling xyz copy in sync with sparse Adam.
+
+        _xyz is a strided view into _packed, while _xyz_contig is the compact
+        [N,3] CPU cache used by frustum culling. After a sparse CPU Adam update
+        touches only a subset of rows, we refresh just those rows here.
+        """
+        if not hasattr(self, '_xyz_contig') or idx.numel() == 0:
+            return
+        if idx.device.type != "cpu":
+            idx = idx.to("cpu")
+        src_xyz = self._xyz.detach()
+        self._xyz_contig.index_copy_(0, idx, src_xyz.index_select(0, idx).contiguous())
+
     def _assemble_grad_subset(self, gpu_grads):
         """Concatenate 6 per-attr grad pinned bufs [n_vis, cols_i] into [n_vis, D]."""
         n_vis = gpu_grads[0].shape[0]

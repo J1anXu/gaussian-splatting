@@ -125,6 +125,7 @@ class PipelinedGradSync:
                             sm._packed_adam_step,
                             0.9, 0.999, 1e-15
                         )
+                        sm.sync_xyz_contig_rows(idx)
 
         return _adam
 

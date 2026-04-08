@@ -337,6 +337,15 @@ def frustum_culling_idx(xyz: torch.Tensor, full_proj_transform: torch.Tensor, in
         M    = full_proj_transform.detach() if full_proj_transform.requires_grad else full_proj_transform
 
         if _FC_EXT is not None and not xyz_.is_cuda:
-            return _FC_EXT.frustum_culling_idx(xyz_.contiguous(), M.contiguous(), inflate_ratio)
+            out = _FC_EXT.frustum_culling_idx(xyz_.contiguous(), M.contiguous(), inflate_ratio)
+            # Harden against rare invalid outputs from the CPU extension. The
+            # extra check stays on CPU, so it does not introduce a GPU sync.
+            if out.numel() > 0:
+                out_min = int(out.min().item())
+                out_max = int(out.max().item())
+                if out_min < 0 or out_max >= xyz_.shape[0]:
+                    mask = _frustum_culling_pytorch(xyz_, M, inflate_ratio)
+                    return torch.nonzero(mask, as_tuple=True)[0]
+            return out.clone()
         mask = _frustum_culling_pytorch(xyz_, M, inflate_ratio)
         return torch.nonzero(mask, as_tuple=True)[0]
