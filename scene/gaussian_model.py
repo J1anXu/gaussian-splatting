@@ -598,8 +598,11 @@ class GaussianModel:
         for group in self.optimizer.param_groups:
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
-                stored_state["exp_avg"] = stored_state["exp_avg"][mask]
-                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+                # When using packed adam, exp_avg/sq are maintained directly in
+                # _packed_exp_avg/sq — skip the expensive per-attr indexed copy here.
+                if not hasattr(self, '_packed_exp_avg'):
+                    stored_state["exp_avg"] = stored_state["exp_avg"][mask]
+                    stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
 
                 del self.optimizer.state[group['params'][0]]
                 group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
@@ -614,6 +617,12 @@ class GaussianModel:
     def prune_points(self, mask):
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
+
+        # Keep _packed_exp_avg/sq in sync when using packed adam.
+        # This replaces the per-attr prune in _prune_optimizer (which is skipped above).
+        if hasattr(self, '_packed_exp_avg') and self._packed_exp_avg.shape[0] == valid_points_mask.shape[0]:
+            self._packed_exp_avg = self._packed_exp_avg[valid_points_mask]
+            self._packed_exp_avg_sq = self._packed_exp_avg_sq[valid_points_mask]
 
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
@@ -635,9 +644,12 @@ class GaussianModel:
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
-
-                stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
-                stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
+                # When using packed adam, exp_avg/sq are extended directly in
+                # densification_postfix (_packed_exp_avg/sq) — skip the expensive
+                # per-attr torch.cat here (saves 6×N×cols alloc+copy per densify call).
+                if not hasattr(self, '_packed_exp_avg'):
+                    stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
+                    stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
 
                 del self.optimizer.state[group['params'][0]]
                 group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
@@ -665,6 +677,14 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+
+        # Extend _packed_exp_avg/sq with zeros for new points — one contiguous cat on
+        # the full [N, D] packed buffer, bypassing the per-attr optimizer.state round-trip.
+        if hasattr(self, '_packed_exp_avg'):
+            n_new = new_xyz.shape[0]
+            zeros = torch.zeros(n_new, self._pack_D, dtype=torch.float32)
+            self._packed_exp_avg = torch.cat([self._packed_exp_avg, zeros], dim=0)
+            self._packed_exp_avg_sq = torch.cat([self._packed_exp_avg_sq, zeros], dim=0)
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=device)
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=device)
@@ -717,10 +737,10 @@ class GaussianModel:
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        # Sync packed Adam state → optimizer.state before densify, so that
-        # cat_tensors_to_optimizer / _prune_optimizer can preserve momentum.
-        if hasattr(self, '_packed_exp_avg'):
-            self._sync_packed_adam_to_optimizer_state()
+        # No optimizer.state sync needed: densification_postfix extends _packed_exp_avg/sq
+        # directly (one torch.cat on the full [N,D] buffer), and prune_points prunes them
+        # directly (one boolean index). This eliminates the 6×clone + 6×cat + 6×index
+        # round-trip through optimizer.state that cost ~300ms per densify call.
 
         self.densify_and_clone(grads, max_grad, extent, device=device)
         self.densify_and_split(grads, max_grad, extent, device=device)
@@ -884,20 +904,25 @@ class GaussianModel:
         """Initialize or resize [N, D] exp_avg / exp_avg_sq for packed_sparse_adam.
 
         On first call: allocate zero tensors and set step=0.
-        On subsequent calls (after densify/prune): populate from optimizer.state
-        (which was maintained by cat_tensors_to_optimizer / _prune_optimizer),
-        preserving momentum for existing points.
+        On subsequent calls after densify/prune: _packed_exp_avg/sq were maintained
+        directly by densification_postfix (extend) and prune_points (prune), so they
+        already have the correct shape — just return immediately.
+        Fallback scatter-write from optimizer.state is kept for safety (first call or
+        when called from outside the packed densify path).
         """
         N, D = self._packed.shape
         if not hasattr(self, '_packed_adam_step'):
             self._packed_adam_step = 0
-        # Allocate new packed adam buffers — NOT pinned: exp_avg/sq are pure CPU state,
-        # never DMA'd to GPU. pin_memory here causes uncached CPU reads (bypasses L3)
-        # making _sync_packed_adam_to_optimizer_state and packed_sparse_adam_step very slow.
-        # Only _packed_staging (used for h2d) needs pin_memory.
+
+        # Fast path: _packed_exp_avg/sq already have the right shape.
+        # densification_postfix + prune_points maintained them in sync.
+        if hasattr(self, '_packed_exp_avg') and self._packed_exp_avg.shape == (N, D):
+            return
+
+        # First-time init or fallback: allocate and populate from optimizer.state.
+        # NOT pinned: exp_avg/sq are pure CPU state, never DMA'd to GPU.
         new_exp_avg = torch.zeros(N, D, dtype=torch.float32)
         new_exp_avg_sq = torch.zeros(N, D, dtype=torch.float32)
-        # Populate from optimizer.state if available (preserves momentum after densify/prune)
         for group in self.optimizer.param_groups:
             attr = self._GROUP_TO_ATTR.get(group["name"])
             if attr is None:
