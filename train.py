@@ -32,6 +32,11 @@ import wandb
 import time
 from logger import get_logger, add_output_path
 import config
+
+# Let the packed CPU Adam kernel pick its OpenMP thread count from a stable
+# environment variable so we can A/B 16/24/32 threads across runs.
+os.environ.setdefault("GS_PACKED_ADAM_THREADS", str(config.CPU_ADAM_OMP_THREADS))
+
 import diff_gaussian_rasterization_wenqi_tam
 from TimerManager import  TraceManager, TID_MAIN, PID_CPU, TID_OPTIMIZE
 from pipeline_grad_sync import PipelinedGradSync

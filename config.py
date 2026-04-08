@@ -34,6 +34,11 @@ MERGE_FAST = True  # True: 全图merge(快,多用~90MB), False: 分块merge(省�
 HALF = False        # 半精度梯度拷贝加速
 TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
 
+# OpenMP thread count used by CPU-side packed Adam. Keep this conservative by
+# default so the main thread / runtime still have headroom. Override per run via
+# env GS_PACKED_ADAM_THREADS if you want to A/B 16/24/32 without editing code.
+CPU_ADAM_OMP_THREADS = 24
+
 
 KEEP_TRAINING = False  # 由命令行参数 --keep_training 控制
 
