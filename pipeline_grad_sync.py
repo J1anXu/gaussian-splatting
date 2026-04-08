@@ -108,7 +108,7 @@ class PipelinedGradSync:
     def _make_adam_fn(self, sm, sm_id, idx, n_vis, lr_per_col, iteration):
         """Build adam closure. lr_per_col is pre-computed on main thread to avoid
         GIL contention in the worker."""
-        opt, dataset, scene = self.opt, self.dataset, self.scene
+        opt = self.opt
         tm = self.tracer
 
         def _adam():
@@ -125,21 +125,6 @@ class PipelinedGradSync:
                             sm._packed_adam_step,
                             0.9, 0.999, 1e-15
                         )
-
-                if iteration < opt.densify_until_iter:
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        with tm.span("densify_and_prune", tid=TID_OPTIMIZE, block_id=sm_id):
-                            size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                            sm.densify_and_prune(opt.densify_grad_threshold * self.DENSIFY_GRAD_SCALE, 0.005, scene.cameras_extent, size_threshold, device="cpu")
-                            sm.pack_to_buffer()
-                            self.reallocate_pinned_buffers(sm)
-                            if self.frustum_cache and sm_id in self.frustum_cache:
-                                del self.frustum_cache[sm_id]
-
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        with tm.span("reset_opacity", tid=TID_OPTIMIZE, block_id=sm_id):
-                            sm.reset_opacity()
-                            sm._re_view_opacity()
 
         return _adam
 
@@ -186,8 +171,8 @@ class PipelinedGradSync:
         densify_fn = self._make_densify_stats_fn(submodel, submodel_id, pin_sub_vf, pin_sub_radii, pin_vpt_grad, iteration)
 
         # 6. submit to worker thread: wait D2H event → densify_stats → adam
-        #    densify_stats must run before adam (adam's densify_and_prune may
-        #    call pack_to_buffer which invalidates visible_indices)
+        #    densify_stats must run before adam so the accumulated stats are
+        #    recorded before any later densify/prune wave repacks the block.
         #    gpu_grad_ref is captured to keep the GPU tensor alive until D2H completes
         def _worker(gpu_ref=gpu_grad_ref):
             event.synchronize()  # wait for this block's D2H to complete

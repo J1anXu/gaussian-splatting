@@ -33,7 +33,7 @@ import time
 from logger import get_logger, add_output_path
 import config
 import diff_gaussian_rasterization_wenqi_tam
-from TimerManager import  TraceManager, TID_MAIN, PID_CPU
+from TimerManager import  TraceManager, TID_MAIN, PID_CPU, TID_OPTIMIZE
 from pipeline_grad_sync import PipelinedGradSync
 SCENE_NAME = None
 BRANCH = None
@@ -116,16 +116,19 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
     # Pipeline: async D2H grad copies + deferred opt steps
     # Timeline tracing: only sample last 5 iters to avoid CUDA event overhead
-    TRACE_START = 681
-    TRACE_END = 700
+    TRACE_START = 781
+    TRACE_END = 800
     tracer = TraceManager(enabled=False)
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer,
                                    frustum_cache=frustum_cache)
+    validate_visible_indices = DEBUG_MODE or config.VALIDATE_VISIBLE_INDICES
+    densify_backlog = 0
+    densify_cursor = 0
 
     time_start = time.time()
 
-    # benchmark 统计收集 (iter 301-700, 共 400 个)
-    BENCH_START, BENCH_END = 301, 700
+    # benchmark 统计收集 (iter 401-800, 共 400 个)
+    BENCH_START, BENCH_END = 401, 800
     bench_its_list = []
     bench_alloc_list = []
     bench_rsv_list = []
@@ -184,17 +187,19 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             else:
                 for model in submodel_list:
                     model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
-            # DEBUG: validate visible_indices vs _packed
-            for sid, m in enumerate(submodel_list):
-                vi = m.visible_indices
-                if vi is not None and len(vi) > 0 and hasattr(m, '_packed'):
-                    mx = vi.max().item()
-                    if mx >= m._packed.shape[0]:
-                        raise RuntimeError(
-                            f"[iter {iteration}] submodel {sid}: visible_indices.max()={mx} >= "
-                            f"_packed.shape[0]={m._packed.shape[0]}, _xyz_contig={m._xyz_contig.shape[0] if hasattr(m,'_xyz_contig') else 'N/A'}, "
-                            f"cached={use_fc_cache and sid in frustum_cache and cam_name in frustum_cache.get(sid,{})}"
-                        )
+            if validate_visible_indices:
+                # Debug-only consistency check. Leave this off in normal training
+                # because vi.max().item() can introduce a GPU->CPU sync.
+                for sid, m in enumerate(submodel_list):
+                    vi = m.visible_indices
+                    if vi is not None and len(vi) > 0 and hasattr(m, '_packed'):
+                        mx = vi.max().item()
+                        if mx >= m._packed.shape[0]:
+                            raise RuntimeError(
+                                f"[iter {iteration}] submodel {sid}: visible_indices.max()={mx} >= "
+                                f"_packed.shape[0]={m._packed.shape[0]}, _xyz_contig={m._xyz_contig.shape[0] if hasattr(m,'_xyz_contig') else 'N/A'}, "
+                                f"cached={use_fc_cache and sid in frustum_cache and cam_name in frustum_cache.get(sid,{})}"
+                            )
 
         # 无渲染全部结果 为计算Loss做准备
         all_rendered, all_depth, all_alpha, all_submodel_ids = [], [], [], []
@@ -341,23 +346,34 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         del rendered_list, depth_list, alpha_list
         del gt_image
 
-        # Fix: ensure ALL blocks get densify_and_prune / reset_opacity at the
-        # correct intervals, not just blocks that were visible this iteration.
-        # Non-visible blocks still have accumulated stats from prior iterations.
+        if (
+            iteration < opt.densify_until_iter
+            and iteration > opt.densify_from_iter
+            and iteration % opt.densification_interval == 0
+            and submodel_list
+        ):
+            # Spread one global densify wave across multiple iters instead of
+            # running every block in the same iteration.
+            densify_backlog = max(densify_backlog, len(submodel_list))
+
         if iteration < opt.densify_until_iter:
-            processed_ids = set(visible_submodel_id_list)
-            for sm_id, sm in enumerate(submodel_list):
-                if sm_id in processed_ids:
-                    continue
+            if densify_backlog > 0 and submodel_list:
+                sm_id = densify_cursor % len(submodel_list)
+                sm = submodel_list[sm_id]
                 with torch.no_grad():
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    with tracer.span("densify_and_prune", tid=TID_OPTIMIZE, block_id=sm_id):
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         sm.densify_and_prune(opt.densify_grad_threshold * grad_sync.DENSIFY_GRAD_SCALE, 0.005, scene.cameras_extent, size_threshold, device="cpu")
                         sm.pack_to_buffer()
                         grad_sync.reallocate_pinned_buffers(sm)
                         if frustum_cache and sm_id in frustum_cache:
                             del frustum_cache[sm_id]
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                densify_backlog -= 1
+                densify_cursor = (sm_id + 1) % len(submodel_list)
+
+            if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                for sm in submodel_list:
+                    with torch.no_grad():
                         sm.reset_opacity()
                         if hasattr(sm, '_pack_slices'):
                             sm._re_view_opacity()
@@ -559,10 +575,8 @@ if __name__ == "__main__":
             "first_iter": 1,
             "trained_ply_path": trained_ply_path,
         }
-        opt.iterations = 700
+        opt.iterations = 800
     else:
         res = {"first_iter": 1}
 
     training(lp.extract(args), opt, pp.extract(args), args.save_iterations, args.debug_from, res)
-
-
