@@ -122,6 +122,10 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer,
                                    frustum_cache=frustum_cache)
     validate_visible_indices = DEBUG_MODE or config.VALIDATE_VISIBLE_INDICES
+    phase12_reuse_topk = max(0, getattr(config, "PHASE12_REUSE_TOPK", 0))
+    phase12_reuse_max_ratio = getattr(config, "PHASE12_REUSE_MAX_ALLOC_RATIO", 0.0)
+    total_gpu_mem = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
+    phase12_reuse_max_alloc = total_gpu_mem * phase12_reuse_max_ratio if phase12_reuse_max_ratio > 0 else None
     densify_backlog = 0
     densify_cursor = 0
 
@@ -212,6 +216,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             # 按点数从多到少排序，让大 block 先上 GPU
             sorted_submodel_ids = sorted( range(len(submodel_list)), key=lambda i: submodel_list[i].visible_indices.shape[0], reverse=True )
             max_vis = submodel_list[sorted_submodel_ids[0]].visible_indices.shape[0] if sorted_submodel_ids else 0
+            phase12_retained_ids = set()
 
             # 过滤出有效 block
             valid_ids = []
@@ -244,7 +249,18 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 with tracer.gpu_span("render_nograd", block_id=submodel_id):
                     render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
 
-                submodel.deactivate_subset()
+                should_retain = (
+                    phase12_reuse_topk > 0
+                    and i < phase12_reuse_topk
+                    and (
+                        phase12_reuse_max_alloc is None
+                        or torch.cuda.memory_allocated() <= phase12_reuse_max_alloc
+                    )
+                )
+                if should_retain:
+                    phase12_retained_ids.add(submodel_id)
+                else:
+                    submodel.deactivate_subset()
 
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
                 all_rendered.append(image)
@@ -264,7 +280,16 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 alpha_list.append(alphaLeft)
                 visible_submodel_id_list.append(submodel_id)
 
+            # If a retained block gets filtered out, release it immediately so
+            # it does not sit on GPU for the rest of the iteration.
+            dropped_retained_ids = phase12_retained_ids.difference(visible_submodel_id_list)
+            for sid in dropped_retained_ids:
+                submodel_list[sid].deactivate_subset()
+            phase12_retained_ids.difference_update(dropped_retained_ids)
+
         if len(rendered_list) == 0:
+            for sid in phase12_retained_ids:
+                submodel_list[sid].deactivate_subset()
             print(f"Iteration {iteration}: No visible blocks after filtering, skipping.")
             continue
         # execute merge
@@ -285,17 +310,23 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         # 遍历所有可见block 轮流当active block，按点数从多到少排序
         grad_order = sorted(
             range(len(visible_submodel_id_list)),
-            key=lambda i: submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0],
-            reverse=True
+            key=lambda i: (
+                visible_submodel_id_list[i] not in phase12_retained_ids,
+                -submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0]
+            )
         )
         for idx in grad_order:
             submodel_id = visible_submodel_id_list[idx]
             rank_map = block_rank[idx]
             submodel: GaussianModel = submodel_list[submodel_id]
 
-            # pre_gather() 已在 nograd 阶段完成，staging buffer 仍有效，无需重复 gather
-            with tracer.transfer_span("h2d_grad", block_id=submodel_id):
-                submodel.kick_h2d_and_activate(requires_grad=True)
+            if submodel_id in phase12_retained_ids and submodel.has_active_gpu_subset():
+                with tracer.gpu_span("promote_grad", block_id=submodel_id):
+                    submodel.promote_subset_to_grad()
+            else:
+                # pre_gather() 已在 nograd 阶段完成，staging buffer 仍有效，无需重复 gather
+                with tracer.transfer_span("h2d_grad", block_id=submodel_id):
+                    submodel.kick_h2d_and_activate(requires_grad=True)
 
             # GPU 正在做 H2D，CPU 趁机跑上一个 block 的 densify_stats
             grad_sync.run_deferred_densify()

@@ -1002,6 +1002,26 @@ class GaussianModel:
         self._rotation_gpu = None
         self._opacity_gpu = None
 
+    def has_active_gpu_subset(self):
+        return self.subset_mode_2 and self._xyz_gpu is not None
+
+    def promote_subset_to_grad(self):
+        """Convert a retained no-grad GPU subset into grad-enabled tensors.
+
+        This avoids a second H2D transfer for the same block. We still clone on
+        GPU so each attribute owns independent storage for backward.
+        """
+        if not self.has_active_gpu_subset():
+            raise RuntimeError("promote_subset_to_grad() requires an active GPU subset")
+
+        self._xyz_gpu = self._xyz_gpu.detach().clone().requires_grad_(True)
+        self._features_dc_gpu = self._features_dc_gpu.detach().clone().requires_grad_(True)
+        self._features_rest_gpu = self._features_rest_gpu.detach().clone().requires_grad_(True)
+        self._scaling_gpu = self._scaling_gpu.detach().clone().requires_grad_(True)
+        self._rotation_gpu = self._rotation_gpu.detach().clone().requires_grad_(True)
+        self._opacity_gpu = self._opacity_gpu.detach().clone().requires_grad_(True)
+        self.subset_mode_2 = True
+
     def move_and_activate_subset(self, requires_grad=True):
         """
         Gather visible Gaussian attributes from CPU and transfer to GPU.
