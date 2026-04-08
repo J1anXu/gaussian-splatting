@@ -458,7 +458,9 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
     # 导出最后两个 iter 的 timeline
     os.makedirs("timeline", exist_ok=True)
-    tracer.export(f"timeline/trace_{BRANCH}_{SCENE_NAME}.json")
+    from datetime import datetime
+    ts = datetime.now().strftime("%m%d_%H%M")
+    tracer.export(f"timeline/trace_{BRANCH}_{SCENE_NAME}_{ts}.json")
         
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))

@@ -187,3 +187,62 @@ CPU Adam (~30ms) 完全隐藏在 GPU render+backward (~29ms) + H2D (~15ms) 后�
   如果出问题，备选方案：在 C++ 侧用 `std::thread` 而非 OpenMP。
 - **Event 创建开销**: 每 block 每 iter 创建一个 `torch.cuda.Event()`，约 6 events/iter。
   CUDA event 创建很轻（<1us），可忽略。如有担忧可用 event pool。
+
+
+
+## 实际结果（2025-04-08, 4090, bicycle, iter 681-700）
+
+### 额外修复：comm_stream 多流同步 bug
+
+首次运行时遇到 `CUDA error: illegal memory access`，根因是两个多流同步问题：
+1. **comm_stream 没等 default stream**：D2H 在 comm_stream 上发射，但 default stream 的 `torch.cat`（pack grads）可能还未完成 → D2H 读到未就绪的 GPU 数据
+2. **`gpu_grad_packed` 生命周期**：局部变量在 `kick_async_d2h` 返回时被 GC 释放，comm_stream 的异步 D2H 还在读已释放的 GPU 内存
+
+修复：
+- 在切换到 comm_stream 前 `sync_event.record()` + `self._comm_stream.wait_event(sync_event)`
+- `gpu_grad_packed` 作为返回值传给 worker 闭包，`event.synchronize()` 后才 `del`
+
+### 对比数据
+
+对比 trace 文件：
+- Baseline: `trace_nurips26_bicycle.json`（2025-04-06）
+- Fix_2: `trace_nurips26_improve_bicycle_0408_1234.json`
+
+均取 iter 681-700（排除 iter 700 的 densify_and_prune 异常值），19 个正常 iter 的平均。
+
+#### 总体
+
+| 指标 | Baseline | Fix_2 | 变化 |
+|------|----------|-------|------|
+| 平均 iter 时间 | 150.6ms | 127.6ms | **-23.0ms (-15.3%)** |
+| 中位 iter 时间 | 143.6ms | 125.4ms | **-18.2ms (-12.7%)** |
+| 标准差 | 27.1ms | 12.0ms | **-55.9%（稳定性翻倍）** |
+| GPU 利用率 | 19.5% | 41.5% | **+22.0pp** |
+
+#### 关键指标
+
+| 指标 | Baseline | Fix_2 | 变化 |
+|------|----------|-------|------|
+| Grad phase 总时间 | 101.5ms | 81.1ms | **-20.3ms (-20.0%)** |
+| packed_sparse_adam 总耗时 | 50.3ms | 40.3ms | -10.0ms |
+| Adam-GPU 重叠时间 | 0ms | 21.2ms | **从 0% 到 52.6% 重叠** |
+| 跨 block GPU 空闲间隙 | 14.7ms | 4.4ms | **3.4x 缩减** |
+| Adam tail（最后 GPU 事件后） | ~18ms | ~11ms | -7ms |
+
+#### 各 phase 耗时
+
+| Phase | Baseline | Fix_2 | 变化 |
+|-------|----------|-------|------|
+| Nograd phase | 37.5ms | 34.1ms | -3.4ms |
+| Merge phase | 1.1ms | 1.1ms | — |
+| Grad phase | 101.5ms | 81.1ms | **-20.3ms** |
+
+加速几乎全部来自 grad phase。
+
+### 结论
+
+异步 Adam 生效：CPU Adam 与 GPU 渲染成功重叠，GPU 空闲间隙从 14.7ms 降到 4.4ms，GPU 利用率翻倍。
+23ms 加速捕获了理论上限（~28ms）的 **82%**。
+
+**剩余瓶颈**：大 block（420K+ 点）的 CPU adam 耗时仍超过 GPU 处理时间，导致部分 `render_grad` 膨胀到 13ms（GPU 等 CPU 发射下一个 H2D）。
+进一步优化方向：消除重复 H2D（nograd 保留 GPU tensor 给 grad 阶段复用），预计再省 ~15ms。
