@@ -785,7 +785,10 @@ class GaussianModel:
         """
         slices, D = self._compute_pack_layout()
         N = self._xyz.shape[0]
-        packed = torch.empty(N, D, dtype=torch.float32, pin_memory=True)
+        # NOT pinned: _packed is accessed only by CPU (index_select → _packed_staging → DMA).
+        # Only _packed_staging (the DMA source) needs pin_memory. Pinning _packed causes
+        # uncached CPU reads/writes in the Adam update and index_select scatter.
+        packed = torch.empty(N, D, dtype=torch.float32)
         for name, (s, e, _) in slices.items():
             param = getattr(self, name)
             packed[:, s:e] = param.data.detach().reshape(N, e - s)
@@ -888,9 +891,12 @@ class GaussianModel:
         N, D = self._packed.shape
         if not hasattr(self, '_packed_adam_step'):
             self._packed_adam_step = 0
-        # Allocate new packed adam buffers
-        new_exp_avg = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
-        new_exp_avg_sq = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
+        # Allocate new packed adam buffers — NOT pinned: exp_avg/sq are pure CPU state,
+        # never DMA'd to GPU. pin_memory here causes uncached CPU reads (bypasses L3)
+        # making _sync_packed_adam_to_optimizer_state and packed_sparse_adam_step very slow.
+        # Only _packed_staging (used for h2d) needs pin_memory.
+        new_exp_avg = torch.zeros(N, D, dtype=torch.float32)
+        new_exp_avg_sq = torch.zeros(N, D, dtype=torch.float32)
         # Populate from optimizer.state if available (preserves momentum after densify/prune)
         for group in self.optimizer.param_groups:
             attr = self._GROUP_TO_ATTR.get(group["name"])
