@@ -1,6 +1,7 @@
 import config
+import threading
 import torch
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Tuple
 from scene import GaussianModel
 from TimerManager import TraceManager, TID_PIPELINE, TID_ADAM, PID_CPU, TID_D2H, TID_OPTIMIZE
 
@@ -27,6 +28,8 @@ class PipelinedGradSync:
 
         self._pending_adam: Optional[Callable] = None
         self._pending_densify: Optional[Callable] = None
+        self._deferred_densify_prune: List[Tuple[GaussianModel, Callable]] = []
+        self._bg_densify_thread: Optional[threading.Thread] = None
         # CUDA Event 用于精确同步 D2H，替代 cuda.synchronize()
         self._d2h_event = torch.cuda.Event()
 
@@ -101,23 +104,9 @@ class PipelinedGradSync:
                     with tm.span("packed_sparse_adam", tid=TID_OPTIMIZE, block_id=sm_id, n_vis=idx.shape[0]):
                         sm.packed_sparse_adam_step(idx, grad_subset, iteration)
 
-                # densify_and_prune / reset_opacity MUST run after adam:
-                # they call pack_to_buffer() which rebuilds _packed, so adam's
-                # idx would be invalid if these ran first.
-                if iteration < opt.densify_until_iter:
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        with tm.span("densify_and_prune", tid=TID_OPTIMIZE, block_id=sm_id):
-                            size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                            sm.densify_and_prune(opt.densify_grad_threshold * self.DENSIFY_GRAD_SCALE, 0.005, scene.cameras_extent, size_threshold, device="cpu")
-                            sm.pack_to_buffer()
-                            self.reallocate_pinned_buffers(sm)
-                            if self.frustum_cache and sm_id in self.frustum_cache:
-                                del self.frustum_cache[sm_id]
-
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        with tm.span("reset_opacity", tid=TID_OPTIMIZE, block_id=sm_id):
-                            sm.reset_opacity()
-                            sm._re_view_opacity()
+                # densify_and_prune / reset_opacity deferred to parallel batch
+                # (must still run after adam — queued here, executed later)
+                self._queue_densify_prune(sm, sm_id, iteration)
 
         def _densify_stats():
             """Lightweight stats accumulation — safe to defer and overlap with GPU H2D."""
@@ -201,3 +190,123 @@ class PipelinedGradSync:
         if self._pending_adam is not None:
             self._pending_adam()
             self._pending_adam = None
+
+    def _queue_densify_prune(self, sm, sm_id, iteration):
+        """Queue densify_and_prune / reset_opacity for deferred background execution."""
+        opt, dataset, scene = self.opt, self.dataset, self.scene
+        tm = self.tracer
+
+        if iteration >= opt.densify_until_iter:
+            return
+        # Skip blocks still being densified from a previous cycle
+        if getattr(sm, '_is_densifying', False):
+            return
+
+        needs_densify = (iteration > opt.densify_from_iter and
+                         iteration % opt.densification_interval == 0)
+        needs_reset = (iteration % opt.opacity_reset_interval == 0 or
+                       (dataset.white_background and iteration == opt.densify_from_iter))
+
+        if not needs_densify and not needs_reset:
+            return
+
+        def _do():
+            with torch.no_grad():
+                if needs_densify:
+                    with tm.span("densify_and_prune", tid=TID_OPTIMIZE, block_id=sm_id):
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        sm.densify_and_prune(
+                            opt.densify_grad_threshold * self.DENSIFY_GRAD_SCALE,
+                            0.005, scene.cameras_extent, size_threshold, device="cpu")
+                        sm.pack_to_buffer()
+                        self.reallocate_pinned_buffers(sm)
+                        if self.frustum_cache and sm_id in self.frustum_cache:
+                            del self.frustum_cache[sm_id]
+                if needs_reset:
+                    with tm.span("reset_opacity", tid=TID_OPTIMIZE, block_id=sm_id):
+                        sm.reset_opacity()
+                        if hasattr(sm, '_pack_slices'):
+                            sm._re_view_opacity()
+            # Don't unfreeze here — main thread does it at a safe point
+            sm._densify_complete = True
+
+        self._deferred_densify_prune.append((sm, _do))
+
+    def queue_densify_prune(self, sm, sm_id, iteration):
+        """Public API: queue densify for non-visible blocks (called from train.py)."""
+        self._queue_densify_prune(sm, sm_id, iteration)
+
+    # ── Background densify ──────────────────────────────────────────
+
+    @staticmethod
+    def _freeze_for_densify(sm: GaussianModel):
+        """Save references to current state before background thread modifies it."""
+        sm._packed_frozen = sm._packed
+        sm._packed_staging_frozen = sm._packed_staging
+        sm._pack_slices_frozen = sm._pack_slices
+        if hasattr(sm, '_xyz_contig'):
+            sm._xyz_contig_frozen = sm._xyz_contig
+        sm._is_densifying = True
+
+    @staticmethod
+    def _unfreeze_for_densify(sm: GaussianModel):
+        """Clear frozen state after background densify completes for this block."""
+        sm._is_densifying = False
+        for attr in ('_packed_frozen', '_packed_staging_frozen',
+                     '_pack_slices_frozen', '_xyz_contig_frozen'):
+            if hasattr(sm, attr):
+                delattr(sm, attr)
+
+    def flush_all_densify(self):
+        """Non-blocking: pop ONE queued block and start background densify.
+
+        Called every iteration; if the previous background densify is still
+        running, does nothing (no blocking).  Once it finishes, the next call
+        finalizes it and starts the next queued block.
+        """
+        # If a background thread is still running, don't block — just return
+        if self._bg_densify_thread is not None:
+            if self._bg_densify_thread.is_alive():
+                return
+            # Thread finished — collect result
+            self._bg_densify_thread = None
+            if self._bg_densify_error is not None:
+                raise self._bg_densify_error
+
+        ops = self._deferred_densify_prune
+        if not ops:
+            return
+
+        # Pop one block
+        sm, fn = ops.pop(0)
+        self._freeze_for_densify(sm)
+        self._bg_densify_error = None
+
+        def _worker():
+            try:
+                fn()
+            except Exception as e:
+                self._bg_densify_error = e
+
+        self._bg_densify_thread = threading.Thread(target=_worker, daemon=True)
+        self._bg_densify_thread.start()
+
+    def join_background_densify(self):
+        """Block until background densify thread is done. Re-raises any error."""
+        if self._bg_densify_thread is not None:
+            self._bg_densify_thread.join()
+            self._bg_densify_thread = None
+            if self._bg_densify_error is not None:
+                raise self._bg_densify_error
+            self.finalize_completed_densify()
+
+    def finalize_completed_densify(self):
+        """Unfreeze blocks that the background thread has finished.
+
+        Call at the START of each iteration (between iters) so that
+        no frozen→live transition happens mid-iteration.
+        """
+        for sm in self.submodel_list:
+            if getattr(sm, '_densify_complete', False):
+                sm._densify_complete = False
+                self._unfreeze_for_densify(sm)

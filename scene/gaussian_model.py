@@ -402,7 +402,8 @@ class GaussianModel:
             
 
     def reset_opacity(self):
-        opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        full_opacity = self.opacity_activation(self._opacity)
+        opacities_new = self.inverse_opacity_activation(torch.min(full_opacity, torch.ones_like(full_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
@@ -666,26 +667,28 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=device)
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=device)
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=device)
+        self.xyz_gradient_accum = torch.zeros((self._xyz.shape[0], 1), device=device)
+        self.denom = torch.zeros((self._xyz.shape[0], 1), device=device)
+        self.max_radii2D = torch.zeros((self._xyz.shape[0]), device=device)
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, device = "cuda"):
         # 梯度大 + 尺度已经很大的 Gaussian → 不该再 clone，而是必须 split（拆分）: 沿 Gaussian 自身尺度与朝向，在空间上强制生成 N 个彼此分离的子 Gaussian
-        n_init_points = self.get_xyz.shape[0]
+        n_init_points = self._xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device=device)
         padded_grad[:grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_and(selected_pts_mask, torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        # Use raw _scaling to avoid subset_mode race with main thread's nograd render
+        full_scaling = self.scaling_activation(self._scaling)
+        selected_pts_mask = torch.logical_and(selected_pts_mask, torch.max(full_scaling, dim=1).values > self.percent_dense*scene_extent)
 
-        stds = self.get_scaling[selected_pts_mask].repeat(N,1)
+        stds = full_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3), device=device)
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
         rots = rots.to(device) # add by jian
-        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
-        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
+        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self._xyz[selected_pts_mask].repeat(N, 1)
+        new_scaling = self.scaling_inverse_activation(full_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
@@ -701,7 +704,7 @@ class GaussianModel:
         # 只克隆那些"梯度大、但尺度还不算大"的高斯点 → 克隆, 让它们变得更密集 (原地复制)
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+                                              torch.max(self.scaling_activation(self._scaling), dim=1).values <= self.percent_dense*scene_extent)
         
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -725,14 +728,12 @@ class GaussianModel:
         self.densify_and_clone(grads, max_grad, extent, device=device)
         self.densify_and_split(grads, max_grad, extent, device=device)
 
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        prune_mask = (self.opacity_activation(self._opacity) < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+            big_points_ws = self.scaling_activation(self._scaling).max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
-
-        torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, global_visibility_filter, frustum_visibility_filter):
         self.xyz_gradient_accum[global_visibility_filter] += torch.norm(viewspace_point_tensor.grad[frustum_visibility_filter,:2], dim=-1, keepdim=True)
@@ -1064,36 +1065,43 @@ class GaussianModel:
         Call this before kick_h2d_and_activate(). Separates the CPU-bound
         gather from the GPU-bound DMA so they can be independently timed
         or overlapped with other work.
+
+        When _is_densifying is True, reads from frozen snapshots so the
+        background densify thread can safely mutate the live buffers.
         """
         idx = self.visible_indices
         if not torch.is_tensor(idx):
             idx = torch.tensor(idx, dtype=torch.long)
         idx = idx.to("cpu")
         n = idx.shape[0]
-        if n > 0 and idx.max() >= self._packed.shape[0]:
+        # Use frozen state when block is being densified in background
+        packed = getattr(self, '_packed_frozen', self._packed)
+        staging = getattr(self, '_packed_staging_frozen', self._packed_staging)
+        if n > 0 and idx.max() >= packed.shape[0]:
             raise IndexError(
-                f"pre_gather: idx.max()={idx.max().item()} >= _packed.shape[0]={self._packed.shape[0]}, "
+                f"pre_gather: idx.max()={idx.max().item()} >= packed.shape[0]={packed.shape[0]}, "
                 f"_xyz.shape[0]={self._xyz.shape[0]}, "
                 f"_xyz_contig.shape[0]={self._xyz_contig.shape[0] if hasattr(self, '_xyz_contig') else 'N/A'}, "
                 f"idx.shape={idx.shape}"
             )
-        staging = self._packed_staging[:n]
-        torch.index_select(self._packed, 0, idx, out=staging)
+        buf = staging[:n]
+        torch.index_select(packed, 0, idx, out=buf)
         self._db_n = n
+        self._db_staging = buf  # track which staging buffer was used
 
     ALLOC_STEP = 4096  # round up 步长，让 CUDA allocator 更容易复用空闲块
 
     def kick_h2d_and_activate(self, requires_grad=True):
         """H2D transfer + GPU unpack. Assumes pre_gather() was already called."""
         n = self._db_n
-        staging = self._packed_staging[:n]
+        staging = self._db_staging  # use same buffer pre_gather() wrote into
         alloc_n = ((n + self.ALLOC_STEP - 1) // self.ALLOC_STEP) * self.ALLOC_STEP
         D = staging.shape[1]
         gpu_packed = torch.empty(alloc_n, D, device='cuda')
         gpu_packed[:n].copy_(staging, non_blocking=True)
         gpu_packed = gpu_packed[:n]
 
-        slices = self._pack_slices
+        slices = getattr(self, '_pack_slices_frozen', self._pack_slices)
         if requires_grad:
             s, e, _ = slices['_xyz']
             self._xyz_gpu = gpu_packed[:, s:e].clone()

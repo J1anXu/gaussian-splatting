@@ -117,7 +117,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     # Pipeline: async D2H grad copies + deferred opt steps
     # Timeline tracing: only sample last 5 iters to avoid CUDA event overhead
     TRACE_START = 681
-    TRACE_END = 700
+    TRACE_END = 750
     tracer = TraceManager(enabled=False)
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer,
                                    frustum_cache=frustum_cache)
@@ -138,6 +138,9 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         if iteration == TRACE_START:
             tracer.enabled = True
         tracer.step(iteration)
+
+        # Unfreeze blocks that background densify has finished (safe between iters)
+        grad_sync.finalize_completed_densify()
 
         for submodel in submodel_list:
             submodel.update_learning_rate(iteration)
@@ -175,7 +178,13 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                             if model._xyz.is_cuda:
                                 model.visible_indices = frustum_culling_idx(model._xyz, viewpoint_cam.full_proj_transform)
                             else:
-                                xyz_for_cull = model._xyz_contig if hasattr(model, '_xyz_contig') else model._xyz
+                                # Use frozen xyz when block is being densified in background
+                                if hasattr(model, '_xyz_contig_frozen'):
+                                    xyz_for_cull = model._xyz_contig_frozen
+                                elif hasattr(model, '_xyz_contig'):
+                                    xyz_for_cull = model._xyz_contig
+                                else:
+                                    xyz_for_cull = model._xyz
                                 model.visible_indices = frustum_culling_idx(xyz_for_cull, cpu_full_proj_transform_dict[cam_name])
                             if use_fc_cache:
                                 if submodel_id not in frustum_cache:
@@ -187,12 +196,13 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             # DEBUG: validate visible_indices vs _packed
             for sid, m in enumerate(submodel_list):
                 vi = m.visible_indices
-                if vi is not None and len(vi) > 0 and hasattr(m, '_packed'):
+                packed_ref = getattr(m, '_packed_frozen', m._packed) if hasattr(m, '_packed') else None
+                if vi is not None and len(vi) > 0 and packed_ref is not None:
                     mx = vi.max().item()
-                    if mx >= m._packed.shape[0]:
+                    if mx >= packed_ref.shape[0]:
                         raise RuntimeError(
                             f"[iter {iteration}] submodel {sid}: visible_indices.max()={mx} >= "
-                            f"_packed.shape[0]={m._packed.shape[0]}, _xyz_contig={m._xyz_contig.shape[0] if hasattr(m,'_xyz_contig') else 'N/A'}, "
+                            f"packed.shape[0]={packed_ref.shape[0]}, _xyz_contig={m._xyz_contig.shape[0] if hasattr(m,'_xyz_contig') else 'N/A'}, "
                             f"cached={use_fc_cache and sid in frustum_cache and cam_name in frustum_cache.get(sid,{})}"
                         )
 
@@ -288,6 +298,10 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             rank_map = block_rank[idx]
             submodel: GaussianModel = submodel_list[submodel_id]
 
+            # Skip blocks being densified in background — use stale nograd render only
+            if getattr(submodel, '_is_densifying', False):
+                continue
+
             # pre_gather() 已在 nograd 阶段完成，staging buffer 仍有效，无需重复 gather
             with tracer.transfer_span("h2d_grad", block_id=submodel_id):
                 submodel.kick_h2d_and_activate(requires_grad=True)
@@ -341,30 +355,22 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         del rendered_list, depth_list, alpha_list
         del gt_image
 
-        # Fix: ensure ALL blocks get densify_and_prune / reset_opacity at the
-        # correct intervals, not just blocks that were visible this iteration.
-        # Non-visible blocks still have accumulated stats from prior iterations.
+        # Queue non-visible blocks for densify/reset (visible blocks already queued in adam)
         if iteration < opt.densify_until_iter:
             processed_ids = set(visible_submodel_id_list)
             for sm_id, sm in enumerate(submodel_list):
                 if sm_id in processed_ids:
                     continue
-                with torch.no_grad():
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        sm.densify_and_prune(opt.densify_grad_threshold * grad_sync.DENSIFY_GRAD_SCALE, 0.005, scene.cameras_extent, size_threshold, device="cpu")
-                        sm.pack_to_buffer()
-                        grad_sync.reallocate_pinned_buffers(sm)
-                        if frustum_cache and sm_id in frustum_cache:
-                            del frustum_cache[sm_id]
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        sm.reset_opacity()
-                        if hasattr(sm, '_pack_slices'):
-                            sm._re_view_opacity()
+                grad_sync.queue_densify_prune(sm, sm_id, iteration)
+
+        # Run all queued densify ops in parallel threads
+        grad_sync.flush_all_densify()
 
         # Dynamic block splitting: any block exceeding SPLIT_SIZE gets binary split
+        # Skip blocks still being densified in background
         if iteration < opt.densify_until_iter:
-            blocks_to_split = [i for i, sm in enumerate(submodel_list) if sm._xyz.shape[0] > config.SPLIT_SIZE]
+            blocks_to_split = [i for i, sm in enumerate(submodel_list)
+                               if sm._xyz.shape[0] > config.SPLIT_SIZE and not getattr(sm, '_is_densifying', False)]
             if blocks_to_split:
                 for sm_id in sorted(blocks_to_split, reverse=True):
                     sm = submodel_list[sm_id]
@@ -433,6 +439,9 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         if iteration == TRACE_END:
              tracer.enabled = False
              
+    # Ensure all background densify threads are done before reporting/exporting
+    grad_sync.join_background_densify()
+
     time_end = time.time()
     cost = time_end - time_start
     print(f"Training time cost: [{cost:.2f}] seconds.")
@@ -557,7 +566,7 @@ if __name__ == "__main__":
             "first_iter": 1,
             "trained_ply_path": trained_ply_path,
         }
-        opt.iterations = 700
+        opt.iterations = 750
     else:
         res = {"first_iter": 1}
 
