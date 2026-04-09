@@ -10,6 +10,7 @@
 #
 
 import os
+import faulthandler; faulthandler.enable()
 from typing import List
 import torch
 from random import randint

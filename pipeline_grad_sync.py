@@ -218,8 +218,10 @@ class PipelinedGradSync:
                         sm.densify_and_prune(
                             opt.densify_grad_threshold * self.DENSIFY_GRAD_SCALE,
                             0.005, scene.cameras_extent, size_threshold, device="cpu")
-                        sm.pack_to_buffer()
-                        self.reallocate_pinned_buffers(sm)
+                        # pack_to_buffer / reallocate_pinned_buffers deferred to
+                        # main thread (finalize_completed_densify) — pinned memory
+                        # allocation (cudaHostAlloc) is not safe from bg thread.
+                        sm._needs_repack = True
                         if self.frustum_cache and sm_id in self.frustum_cache:
                             del self.frustum_cache[sm_id]
                 if needs_reset:
@@ -227,6 +229,7 @@ class PipelinedGradSync:
                         sm.reset_opacity()
                         if hasattr(sm, '_pack_slices'):
                             sm._re_view_opacity()
+                        sm._needs_repack = True
             # Don't unfreeze here — main thread does it at a safe point
             sm._densify_complete = True
 
@@ -305,8 +308,16 @@ class PipelinedGradSync:
 
         Call at the START of each iteration (between iters) so that
         no frozen→live transition happens mid-iteration.
+
+        Pinned-memory operations (pack_to_buffer, reallocate_pinned_buffers)
+        are done here on the main thread because cudaHostAlloc from a
+        background thread concurrent with GPU work can cause segfaults.
         """
         for sm in self.submodel_list:
             if getattr(sm, '_densify_complete', False):
                 sm._densify_complete = False
+                if getattr(sm, '_needs_repack', False):
+                    sm._needs_repack = False
+                    sm.pack_to_buffer()
+                    self.reallocate_pinned_buffers(sm)
                 self._unfreeze_for_densify(sm)
