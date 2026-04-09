@@ -227,8 +227,10 @@ class PipelinedGradSync:
                 if needs_reset:
                     with tm.span("reset_opacity", tid=TID_OPTIMIZE, block_id=sm_id):
                         sm.reset_opacity()
-                        if hasattr(sm, '_pack_slices'):
-                            sm._re_view_opacity()
+                        # _re_view_opacity() NOT called here — it writes to
+                        # self._packed which is the same object as _packed_frozen,
+                        # causing a data race with the main thread's pre_gather.
+                        # pack_to_buffer() in finalize will repack everything.
                         sm._needs_repack = True
             # Don't unfreeze here — main thread does it at a safe point
             sm._densify_complete = True
