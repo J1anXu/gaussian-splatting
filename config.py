@@ -27,7 +27,8 @@ SPLIT_SIZE_OUTDOOR = 800000
 
 SPLIT_SIZE = SPLIT_SIZE_OUTDOOR  # default, overridden at runtime by scene type
 
-GPU_CACHE_THRESHOLD_GB = 0.5  # reserved 超过 allocated 多少 GB 时清理 CUDA 缓存
+GPU_CACHE_THRESHOLD_GB = 0.5  # reserved 超过 allocated 多少 GB 时清理 CUDA 缓存，默认优先控制峰值显存
+CUDA_EMPTY_CACHE_INTERVAL = 1  # 每 N 轮允许清一次缓存；默认每轮检查，优先保证 peak/reserved 可控
 
 MERGE_FAST = True  # True: 全图merge(快,多用~90MB), False: 分块merge(省显存,慢)
 

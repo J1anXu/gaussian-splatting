@@ -170,6 +170,7 @@ class TraceManager:
         if not self._gpu_pending:
             return
         resolved = []
+        remaining = []
         for e_start, e_end, meta in self._gpu_pending:
             try:
                 gpu_dur_us = int(e_start.elapsed_time(e_end) * 1000)
@@ -196,10 +197,13 @@ class TraceManager:
                 }
                 resolved.append(ev)
             except Exception:
-                pass
+                # The end event may not have completed yet when the pipeline
+                # flushes during an iteration. Keep it for a later flush/export
+                # instead of silently dropping the trace event.
+                remaining.append((e_start, e_end, meta))
         with self._lock:
             self.events.extend(resolved)
-            self._gpu_pending.clear()
+            self._gpu_pending = remaining
 
     # ── export ────────────────────────────────────────────────────────────────
 

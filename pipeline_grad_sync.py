@@ -25,6 +25,7 @@ class PipelinedGradSync:
         self.scene = scene
         self.tracer = tracer or TraceManager(enabled=False)
         self.frustum_cache = frustum_cache
+        self.disable_densify = getattr(opt, "disable_densify", False)
 
         self._pending_adam: Optional[Callable] = None
         self._pending_densify: Optional[Callable] = None
@@ -108,15 +109,18 @@ class PipelinedGradSync:
                 # (must still run after adam — queued here, executed later)
                 self._queue_densify_prune(sm, sm_id, iteration)
 
-        def _densify_stats():
-            """Lightweight stats accumulation — safe to defer and overlap with GPU H2D."""
-            with torch.no_grad():
-                if iteration < opt.densify_until_iter:
+        densify_needed = (not self.disable_densify and iteration < opt.densify_until_iter)
+        if densify_needed:
+            def _densify_stats():
+                """Lightweight stats accumulation — safe to defer and overlap with GPU H2D."""
+                with torch.no_grad():
                     with tm.span("densify_stats", tid=TID_OPTIMIZE, block_id=sm_id):
                         gvf = sm.visible_indices[sub_vf]
                         sm.max_radii2D[gvf] = torch.max(sm.max_radii2D[gvf], sub_radii[sub_vf])
                         sm.xyz_gradient_accum[gvf] += torch.norm(vpt_grad[sub_vf, :2], dim=-1, keepdim=True)
                         sm.denom[gvf] += 1
+        else:
+            _densify_stats = None
 
         return _adam, _densify_stats
 
@@ -170,10 +174,11 @@ class PipelinedGradSync:
         (same stream, H2D was enqueued after D2H), giving us the overlap.
         The subsequent event_sync in flush_and_prepare will be a no-op.
         """
-        if self._pending_densify is not None:
-            self._d2h_event.synchronize()
-            self._pending_densify()
-            self._pending_densify = None
+        if self._pending_densify is None:
+            return
+        self._d2h_event.synchronize()
+        self._pending_densify()
+        self._pending_densify = None
 
     def flush_last(self):
         """Flush the last submodel's pending work after the loop ends.
@@ -196,6 +201,8 @@ class PipelinedGradSync:
         opt, dataset, scene = self.opt, self.dataset, self.scene
         tm = self.tracer
 
+        if self.disable_densify:
+            return
         if iteration >= opt.densify_until_iter:
             return
         # Skip blocks still being densified from a previous cycle

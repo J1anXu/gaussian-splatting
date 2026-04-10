@@ -14,6 +14,8 @@ import faulthandler; faulthandler.enable()
 from typing import List
 import torch
 from random import randint
+from contextlib import contextmanager
+from collections import defaultdict
 
 import torchvision
 from utils.debug_utils import save_block_img, save_depth_list, save_rgb_layers, save_layer_contribution
@@ -31,7 +33,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
 import time
-from logger import get_logger, add_output_path
+from logger import get_logger, add_output_path, log_kv, log_runtime_context, log_section
 import config
 import diff_gaussian_rasterization_wenqi_tam
 from TimerManager import  TraceManager, TID_MAIN, PID_CPU
@@ -56,6 +58,130 @@ except:
     SPARSE_ADAM_AVAILABLE = False
 
 
+class IterationProfiler:
+    """Lightweight per-iteration wall-time logger.
+
+    By default this does not synchronize CUDA around every span, so GPU spans
+    remain low overhead. Pass --profile_sync when you want slower but more
+    accurate stage wall times for a short window.
+    """
+
+    def __init__(self, logger, enabled=False, start=1, end=0, every=1, sync_cuda=False):
+        self.logger = logger
+        self.enabled = enabled
+        self.start = start
+        self.end_iteration = end
+        self.every = max(1, every)
+        self.sync_cuda = sync_cuda
+        self.active = False
+        self.iteration = None
+        self._t0 = None
+        self.spans = {}
+        self.data = {}
+
+    def begin(self, iteration):
+        self.iteration = iteration
+        in_window = iteration >= self.start and (self.end_iteration <= 0 or iteration <= self.end_iteration)
+        on_stride = ((iteration - self.start) % self.every) == 0
+        self.active = self.enabled and in_window and on_stride
+        self._t0 = time.perf_counter()
+        self.spans = {}
+        self.data = {}
+
+    def set(self, key, value):
+        if self.active:
+            self.data[key] = value
+
+    def add(self, key, value):
+        if self.active:
+            self.data[key] = self.data.get(key, 0) + value
+
+    def block(self, kind, block_id, **fields):
+        if not self.active:
+            return
+        key = f"{kind}_blocks"
+        blocks = self.data.setdefault(key, [])
+        block_id = int(block_id)
+        for item in blocks:
+            if item["id"] == block_id:
+                item.update(fields)
+                return
+        blocks.append({"id": block_id, **fields})
+
+    @contextmanager
+    def span(self, name):
+        if not self.active:
+            yield
+            return
+        if self.sync_cuda and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            if self.sync_cuda and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            self.spans[name] = self.spans.get(name, 0.0) + elapsed_ms
+
+    def end(self):
+        if not self.active:
+            return
+        if self.sync_cuda and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        payload = {
+            "iter": self.iteration,
+            "total_ms": round((time.perf_counter() - self._t0) * 1000.0, 3),
+            "spans_ms": {k: round(v, 3) for k, v in sorted(self.spans.items())},
+            **self.data,
+        }
+        log_kv(self.logger, "profile_iter", payload)
+
+
+def log_trace_summary(tracer: TraceManager, logger, top_n=30):
+    """Summarize Chrome trace events into the normal log for quick grep."""
+    events = getattr(tracer, "events", [])
+    grouped = defaultdict(list)
+    for ev in events:
+        if ev.get("ph") == "X" and "dur" in ev:
+            grouped[ev.get("name", "unknown")].append(ev["dur"] / 1000.0)
+    if not grouped:
+        logger.info("[trace_summary] no timed trace events")
+        return
+
+    rows = []
+    for name, vals in grouped.items():
+        total = sum(vals)
+        rows.append({
+            "name": name,
+            "count": len(vals),
+            "total_ms": round(total, 3),
+            "avg_ms": round(total / len(vals), 3),
+            "max_ms": round(max(vals), 3),
+        })
+    rows.sort(key=lambda x: x["total_ms"], reverse=True)
+    for row in rows[:top_n]:
+        log_kv(logger, "trace_summary", row)
+
+
+def attach_runtime_options(opt, args):
+    opt.profile_log = args.profile_log
+    opt.profile_from = args.profile_from
+    opt.profile_until = args.profile_until
+    opt.profile_every = args.profile_every
+    opt.profile_sync = args.profile_sync
+    opt.trace_from = args.trace_from
+    opt.trace_until = args.trace_until
+    opt.bench_from = args.bench_from
+    opt.bench_until = args.bench_until
+    opt.disable_densify = args.disable_densify
+    opt.gpu_cache_threshold_gb = args.gpu_cache_threshold_gb
+    opt.cuda_empty_cache_interval = args.cuda_empty_cache_interval
+    opt.split_size_override = args.split_size_override
+    opt.legacy_per_block_loss = args.legacy_per_block_loss
+    return opt
+
+
 
 def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
@@ -66,6 +192,33 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     prepare_output_and_logger(dataset)
     add_output_path(LOGGER, os.path.join(dataset.model_path, "logs"))
     add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="train")
+    log_section(LOGGER, "Training Setup")
+    log_kv(LOGGER, "training_runtime_options", {
+        "first_iter": first_iter,
+        "iterations": opt.iterations,
+        "profile_log": getattr(opt, "profile_log", False),
+        "profile_from": getattr(opt, "profile_from", None),
+        "profile_until": getattr(opt, "profile_until", None),
+        "profile_every": getattr(opt, "profile_every", None),
+        "profile_sync": getattr(opt, "profile_sync", False),
+        "trace_from": getattr(opt, "trace_from", None),
+        "trace_until": getattr(opt, "trace_until", None),
+        "bench_from": getattr(opt, "bench_from", None),
+        "bench_until": getattr(opt, "bench_until", None),
+        "disable_densify": getattr(opt, "disable_densify", False),
+        "split_size": config.SPLIT_SIZE,
+        "split_size_override": getattr(opt, "split_size_override", 0),
+        "skip_small_block_thresh": config.SKIP_SMALL_BLOCK_THRESH,
+        "merge_fast": config.MERGE_FAST,
+        "frustum_culling": config.FRUSTUM_CULLING_ENABLED,
+        "frustum_cache": config.FRUSTUM_CULLING_CACHE_ENABLED,
+        "gpu_cache_threshold_gb": getattr(opt, "gpu_cache_threshold_gb", config.GPU_CACHE_THRESHOLD_GB),
+        "cuda_empty_cache_interval": getattr(opt, "cuda_empty_cache_interval", config.CUDA_EMPTY_CACHE_INTERVAL),
+        "legacy_per_block_loss": getattr(opt, "legacy_per_block_loss", False),
+        "trained_ply_path": res.get("trained_ply_path"),
+    })
+    if getattr(opt, "disable_densify", False):
+        LOGGER.info("[runtime] densify/prune/opacity reset disabled; dynamic block splitting remains enabled")
 
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
@@ -115,18 +268,28 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
     frustum_cache: dict = {}
 
-    # Pipeline: async D2H grad copies + deferred opt steps
-    # Timeline tracing: only sample last 5 iters to avoid CUDA event overhead
-    TRACE_START = 681
-    TRACE_END = 750
+    # Pipeline: async D2H grad copies + deferred opt steps.
+    # Timeline tracing is windowed to avoid CUDA event overhead across full training.
+    TRACE_START = getattr(opt, "trace_from", 681)
+    TRACE_END = getattr(opt, "trace_until", 750)
+    TRACE_ENABLED = TRACE_START > 0 and TRACE_END >= TRACE_START
     tracer = TraceManager(enabled=False)
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer,
                                    frustum_cache=frustum_cache)
+    profiler = IterationProfiler(
+        LOGGER,
+        enabled=getattr(opt, "profile_log", False),
+        start=getattr(opt, "profile_from", 1),
+        end=getattr(opt, "profile_until", 0),
+        every=getattr(opt, "profile_every", 1),
+        sync_cuda=getattr(opt, "profile_sync", False),
+    )
 
     time_start = time.time()
 
-    # benchmark 统计收集 (iter 301-700, 共 400 个)
-    BENCH_START, BENCH_END = 301, 700
+    # benchmark 统计收集
+    BENCH_START = getattr(opt, "bench_from", 301)
+    BENCH_END = getattr(opt, "bench_until", 700)
     bench_its_list = []
     bench_alloc_list = []
     bench_rsv_list = []
@@ -134,30 +297,38 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     bench_loss_list = []
 
     for iteration in range(first_iter, opt.iterations + 1):
-        torch.cuda.reset_peak_memory_stats()
+        profiler.begin(iteration)
+        with profiler.span("reset_peak_memory_stats"):
+            torch.cuda.reset_peak_memory_stats()
 
-        if iteration == TRACE_START:
+        if TRACE_ENABLED and iteration == TRACE_START:
             tracer.enabled = True
         tracer.step(iteration)
 
         # Unfreeze blocks that background densify has finished (safe between iters)
-        grad_sync.finalize_completed_densify()
+        with profiler.span("finalize_completed_densify"):
+            grad_sync.finalize_completed_densify()
 
-        for submodel in submodel_list:
-            submodel.update_learning_rate(iteration)
+        with profiler.span("learning_rate_update"):
+            for submodel in submodel_list:
+                submodel.update_learning_rate(iteration)
         
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
-            for submodel in submodel_list:
-                submodel.oneupSHdegree()
+            with profiler.span("oneup_sh_degree"):
+                for submodel in submodel_list:
+                    submodel.oneupSHdegree()
 
         # Pick a random Camera
-        if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
-            viewpoint_indices = list(range(len(viewpoint_stack)))
-        rand_idx = randint(0, len(viewpoint_indices) - 1)
-        viewpoint_cam = viewpoint_stack.pop(rand_idx)
-        vind = viewpoint_indices.pop(rand_idx)
+        with profiler.span("pick_camera"):
+            if not viewpoint_stack:
+                viewpoint_stack = scene.getTrainCameras().copy()
+                viewpoint_indices = list(range(len(viewpoint_stack)))
+            rand_idx = randint(0, len(viewpoint_indices) - 1)
+            viewpoint_cam = viewpoint_stack.pop(rand_idx)
+            vind = viewpoint_indices.pop(rand_idx)
+        profiler.set("camera", viewpoint_cam.image_name)
+        profiler.set("camera_index", int(vind))
 
         # Render
         if (iteration - 1) == debug_from:
@@ -166,46 +337,53 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         bg = torch.rand((3), device="cuda") if opt.random_background else background
         
         # frustum culling (with cache after densify_until_iter)
-        use_fc_cache = config.FRUSTUM_CULLING_CACHE_ENABLED and iteration >= opt.densify_until_iter
-        with torch.no_grad():
-            if config.FRUSTUM_CULLING_ENABLED:
-                cam_name = viewpoint_cam.image_name
-                with tracer.span("frustum_culling", tid=TID_MAIN):
-                    for submodel_id, model in enumerate(submodel_list):
-                        cached = use_fc_cache and submodel_id in frustum_cache and cam_name in frustum_cache[submodel_id]
-                        if cached:
-                            model.visible_indices = frustum_cache[submodel_id][cam_name]
-                        else:
-                            if model._xyz.is_cuda:
-                                model.visible_indices = frustum_culling_idx(model._xyz, viewpoint_cam.full_proj_transform)
+        # When densify is disabled, geometry is fixed after dynamic split, so
+        # cached frustum results are safe as soon as splits stop changing blocks.
+        use_fc_cache = config.FRUSTUM_CULLING_CACHE_ENABLED and (
+            iteration >= opt.densify_until_iter or getattr(opt, "disable_densify", False)
+        )
+        with profiler.span("frustum_culling_total"):
+            with torch.no_grad():
+                if config.FRUSTUM_CULLING_ENABLED:
+                    cam_name = viewpoint_cam.image_name
+                    with tracer.span("frustum_culling", tid=TID_MAIN):
+                        for submodel_id, model in enumerate(submodel_list):
+                            cached = use_fc_cache and submodel_id in frustum_cache and cam_name in frustum_cache[submodel_id]
+                            if cached:
+                                model.visible_indices = frustum_cache[submodel_id][cam_name]
+                                profiler.add("frustum_cache_hits", 1)
                             else:
-                                # Use frozen xyz when block is being densified in background
-                                if hasattr(model, '_xyz_contig_frozen'):
-                                    xyz_for_cull = model._xyz_contig_frozen
-                                elif hasattr(model, '_xyz_contig'):
-                                    xyz_for_cull = model._xyz_contig
+                                profiler.add("frustum_cache_misses", 1)
+                                if model._xyz.is_cuda:
+                                    model.visible_indices = frustum_culling_idx(model._xyz, viewpoint_cam.full_proj_transform)
                                 else:
-                                    xyz_for_cull = model._xyz
-                                model.visible_indices = frustum_culling_idx(xyz_for_cull, cpu_full_proj_transform_dict[cam_name])
-                            if use_fc_cache:
-                                if submodel_id not in frustum_cache:
-                                    frustum_cache[submodel_id] = {}
-                                frustum_cache[submodel_id][cam_name] = model.visible_indices
-            else:
-                for model in submodel_list:
-                    model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
-            # DEBUG: validate visible_indices vs _packed
-            for sid, m in enumerate(submodel_list):
-                vi = m.visible_indices
-                packed_ref = getattr(m, '_packed_frozen', m._packed) if hasattr(m, '_packed') else None
-                if vi is not None and len(vi) > 0 and packed_ref is not None:
-                    mx = vi.max().item()
-                    if mx >= packed_ref.shape[0]:
-                        raise RuntimeError(
-                            f"[iter {iteration}] submodel {sid}: visible_indices.max()={mx} >= "
-                            f"packed.shape[0]={packed_ref.shape[0]}, _xyz_contig={m._xyz_contig.shape[0] if hasattr(m,'_xyz_contig') else 'N/A'}, "
-                            f"cached={use_fc_cache and sid in frustum_cache and cam_name in frustum_cache.get(sid,{})}"
-                        )
+                                    # Use frozen xyz when block is being densified in background
+                                    if hasattr(model, '_xyz_contig_frozen'):
+                                        xyz_for_cull = model._xyz_contig_frozen
+                                    elif hasattr(model, '_xyz_contig'):
+                                        xyz_for_cull = model._xyz_contig
+                                    else:
+                                        xyz_for_cull = model._xyz
+                                    model.visible_indices = frustum_culling_idx(xyz_for_cull, cpu_full_proj_transform_dict[cam_name])
+                                if use_fc_cache:
+                                    if submodel_id not in frustum_cache:
+                                        frustum_cache[submodel_id] = {}
+                                    frustum_cache[submodel_id][cam_name] = model.visible_indices
+                else:
+                    for model in submodel_list:
+                        model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
+                # DEBUG: validate visible_indices vs _packed
+                for sid, m in enumerate(submodel_list):
+                    vi = m.visible_indices
+                    packed_ref = getattr(m, '_packed_frozen', m._packed) if hasattr(m, '_packed') else None
+                    if vi is not None and len(vi) > 0 and packed_ref is not None:
+                        mx = vi.max().item()
+                        if mx >= packed_ref.shape[0]:
+                            raise RuntimeError(
+                                f"[iter {iteration}] submodel {sid}: visible_indices.max()={mx} >= "
+                                f"packed.shape[0]={packed_ref.shape[0]}, _xyz_contig={m._xyz_contig.shape[0] if hasattr(m,'_xyz_contig') else 'N/A'}, "
+                                f"cached={use_fc_cache and sid in frustum_cache and cam_name in frustum_cache.get(sid,{})}"
+                            )
 
         # 无渲染全部结果 为计算Loss做准备
         all_rendered, all_depth, all_alpha, all_submodel_ids = [], [], [], []
@@ -213,7 +391,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         visible_submodel_id_list = []
         visible_pts = 0
 
-        with torch.no_grad():
+        with profiler.span("nograd_pass_total"):
+          with torch.no_grad():
             # Phase 1: 连续发射所有 block 的 render，不做任何 CPU 同步
             # 按点数从多到少排序，让大 block 先上 GPU
             sorted_submodel_ids = sorted( range(len(submodel_list)), key=lambda i: submodel_list[i].visible_indices.shape[0], reverse=True )
@@ -226,57 +405,75 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if n_vis == 0 or (config.SKIP_SMALL_BLOCK_THRESH > 0 and n_vis < max_vis * config.SKIP_SMALL_BLOCK_THRESH):
                     continue
                 valid_ids.append(sid)
+            profiler.set("valid_ids", [int(x) for x in valid_ids])
+            profiler.set("valid_n_vis", {str(sid): int(submodel_list[sid].visible_indices.shape[0]) for sid in valid_ids})
 
             # 流水线: 提前 gather 下一个 block，与当前 block 的 h2d+render 重叠
             # 每个 submodel 有自己的 _packed_staging，天然双缓冲
             if valid_ids:
                 # 预热: gather 第一个 block
                 with tracer.span("gather_nograd", block_id=valid_ids[0], n_vis=submodel_list[valid_ids[0]].visible_indices.shape[0]):
-                    submodel_list[valid_ids[0]].pre_gather()
+                    with profiler.span("nograd_pre_gather"):
+                        submodel_list[valid_ids[0]].pre_gather()
+                    profiler.block("nograd", valid_ids[0], n_vis=int(submodel_list[valid_ids[0]].visible_indices.shape[0]))
 
             for i, submodel_id in enumerate(valid_ids):
                 submodel = submodel_list[submodel_id]
                 visible_pts += submodel.visible_indices.shape[0]
 
                 with tracer.transfer_span("h2d_nograd", block_id=submodel_id):
-                    submodel.kick_h2d_and_activate(requires_grad=False)
+                    with profiler.span("nograd_h2d_activate"):
+                        submodel.kick_h2d_and_activate(requires_grad=False)
 
                 # 趁 h2d (non_blocking) + render 占 GPU 时，CPU 提前 gather 下一个 block
                 if i + 1 < len(valid_ids):
                     next_id = valid_ids[i + 1]
                     with tracer.span("gather_nograd", block_id=next_id, n_vis=submodel_list[next_id].visible_indices.shape[0]):
-                        submodel_list[next_id].pre_gather()
+                        with profiler.span("nograd_pre_gather"):
+                            submodel_list[next_id].pre_gather()
+                        profiler.block("nograd", next_id, n_vis=int(submodel_list[next_id].visible_indices.shape[0]))
 
                 with tracer.gpu_span("render_nograd", block_id=submodel_id):
-                    render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                    with profiler.span("nograd_render_dispatch"):
+                        render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
 
-                submodel.deactivate_subset()
+                with profiler.span("nograd_deactivate"):
+                    submodel.deactivate_subset()
 
                 image, alphaLeft, depth = render_pkg["render"], render_pkg["alphaLeft"], render_pkg["depth"]
                 all_rendered.append(image)
                 all_depth.append(depth)
                 all_alpha.append(alphaLeft)
                 all_submodel_ids.append(submodel_id)
+                profiler.block("nograd", submodel_id, rendered=True)
 
             # Phase 2: 所有 render 完成后，批量过滤低贡献 block（此时 .item() 不会阻塞 render pipeline）
-            for image, depth, alphaLeft, submodel_id in zip(all_rendered, all_depth, all_alpha, all_submodel_ids):
-                valid_pixels = (image > 0).any(dim=0).sum().item()
-                total_pixels = image.shape[1] * image.shape[2]
-                if valid_pixels / total_pixels < 0.05:
-                    continue
+            with profiler.span("filter_contribution"):
+                for image, depth, alphaLeft, submodel_id in zip(all_rendered, all_depth, all_alpha, all_submodel_ids):
+                    valid_pixels = (image > 0).any(dim=0).sum().item()
+                    total_pixels = image.shape[1] * image.shape[2]
+                    valid_ratio = valid_pixels / total_pixels
+                    profiler.block("nograd", submodel_id, valid_pixels=int(valid_pixels), valid_ratio=round(valid_ratio, 6))
+                    if valid_ratio < 0.05:
+                        continue
 
-                rendered_list.append(image)
-                depth_list.append(depth)
-                alpha_list.append(alphaLeft)
-                visible_submodel_id_list.append(submodel_id)
+                    rendered_list.append(image)
+                    depth_list.append(depth)
+                    alpha_list.append(alphaLeft)
+                    visible_submodel_id_list.append(submodel_id)
+            profiler.set("visible_submodel_ids", [int(x) for x in visible_submodel_id_list])
+            profiler.set("visible_pts", int(visible_pts))
 
         if len(rendered_list) == 0:
             print(f"Iteration {iteration}: No visible blocks after filtering, skipping.")
+            profiler.set("skip_reason", "no_visible_blocks_after_filter")
+            profiler.end()
             continue
         # execute merge
-        with torch.no_grad():
-            with tracer.gpu_span("merge_opt_kid"):
-                merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
+        with profiler.span("merge_total"):
+            with torch.no_grad():
+                with tracer.gpu_span("merge_opt_kid"):
+                    merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
             
         C_sorted = merge_res["front_rgbs"] # 每个 block 的颜色贡献，已经按照正确的前后顺序排列好
         prefix_T = merge_res["prefix_T"]
@@ -284,9 +481,25 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         K, C, H, W = C_sorted.shape   
         colors_bg = merge_res["bg_rgb"]
         diff_gaussian_rasterization_wenqi_tam.set_colors_bg(colors_bg)
+        profiler.set("merge_k", int(K))
+        profiler.set("image_hw", [int(H), int(W)])
 
-        with torch.no_grad():
-            gt_image = viewpoint_cam.original_image.cuda()
+        with profiler.span("gt_image_to_gpu"):
+            with torch.no_grad():
+                gt_image = viewpoint_cam.original_image.cuda()
+
+        final_rgb_grad = None
+        if not getattr(opt, "legacy_per_block_loss", False):
+            with profiler.span("loss_grad_once"):
+                final_rgb_proxy = merge_res["final_rgb"].detach().requires_grad_(True)
+                Ll1 = l1_loss(final_rgb_proxy, gt_image)
+                ssim_value = fused_ssim(final_rgb_proxy.unsqueeze(0), gt_image.unsqueeze(0))
+                image_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+                image_loss.backward()
+                final_rgb_grad = final_rgb_proxy.grad.detach()
+                loss = image_loss.detach()
+                del final_rgb_proxy, image_loss
+            profiler.set("single_image_loss_grad", True)
 
         # 遍历所有可见block 轮流当active block，按点数从多到少排序
         grad_order = sorted(
@@ -294,99 +507,156 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             key=lambda i: submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0],
             reverse=True
         )
-        for idx in grad_order:
-            submodel_id = visible_submodel_id_list[idx]
-            rank_map = block_rank[idx]
-            submodel: GaussianModel = submodel_list[submodel_id]
+        profiler.set("grad_order_ids", [int(visible_submodel_id_list[idx]) for idx in grad_order])
+        if getattr(opt, "legacy_per_block_loss", False):
+            loss = None
+        processed_grad_blocks = 0
+        Ll1depth = 0
+        with profiler.span("grad_pass_total"):
+            for idx in grad_order:
+                submodel_id = visible_submodel_id_list[idx]
+                rank_map = block_rank[idx]
+                submodel: GaussianModel = submodel_list[submodel_id]
+                n_vis_grad = int(submodel.visible_indices.shape[0])
+                profiler.block("grad", submodel_id, n_vis=n_vis_grad)
 
-            # Skip blocks being densified in background — use stale nograd render only
-            if getattr(submodel, '_is_densifying', False):
-                continue
+                # Skip blocks being densified in background — use stale nograd render only
+                if getattr(submodel, '_is_densifying', False):
+                    profiler.block("grad", submodel_id, skipped="densifying")
+                    continue
 
-            # pre_gather() 已在 nograd 阶段完成，staging buffer 仍有效，无需重复 gather
-            with tracer.transfer_span("h2d_grad", block_id=submodel_id):
-                submodel.kick_h2d_and_activate(requires_grad=True)
+                # pre_gather() 已在 nograd 阶段完成，staging buffer 仍有效，无需重复 gather
+                with tracer.transfer_span("h2d_grad", block_id=submodel_id):
+                    with profiler.span("grad_h2d_activate"):
+                        submodel.kick_h2d_and_activate(requires_grad=True)
 
-            # GPU 正在做 H2D，CPU 趁机跑上一个 block 的 densify_stats
-            grad_sync.run_deferred_densify()
+                # GPU 正在做 H2D，CPU 趁机跑上一个 block 的 densify_stats
+                with profiler.span("run_deferred_densify"):
+                    grad_sync.run_deferred_densify()
 
-            with tracer.gpu_span("render_grad", block_id=submodel_id):
-                render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                with tracer.gpu_span("render_grad", block_id=submodel_id):
+                    with profiler.span("grad_render_dispatch"):
+                        render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
 
-            # pixel level
-            sub_img = render_pkg["render"]
+                # pixel level
+                sub_img = render_pkg["render"]
 
-            # gaussian points level
-            sub_viewspace_point_tensor = render_pkg["viewspace_points"]
+                # gaussian points level
+                sub_viewspace_point_tensor = render_pkg["viewspace_points"]
 
-            with torch.no_grad():
-                # 当前subset的渲染结果在每个像素上的排序位置
-                submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
-                # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
-                prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
-                # 4. 当前块(index = idx)块提供的颜色
-                C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]
-                # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
-                C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k
-                # 6. 带梯度的渲染结果
-                C_active = sub_img      # [3,H,W], has grad
+                if getattr(opt, "legacy_per_block_loss", False):
+                    with profiler.span("compose_loss"):
+                        with torch.no_grad():
+                            # 当前subset的渲染结果在每个像素上的排序位置
+                            submodel_rank_per_pixel = rank_map.unsqueeze(0).unsqueeze(0).expand(1, C, H, W)               # [1,3,H,W]
+                            # 3. 当前块(index = rank_map)在每个像素位置上能拿到的透射率
+                            prefix_T_k = prefix_T[:, 0].gather(dim=0, index = rank_map.unsqueeze(0)).squeeze(0)    # [H,W]
+                            # 4. 当前块(index = idx)块提供的颜色
+                            C_sorted_k = C_sorted.gather(dim=0, index=submodel_rank_per_pixel).squeeze(0)   # [3,H,W]
+                            # 5. 从最终结果中扣除当前块的贡献，得到背景图. 贡献由每个像素位置上提供的颜色乘以透射率得到
+                            C_base = merge_res["final_rgb"] - prefix_T_k * C_sorted_k
+                            # 6. 带梯度的渲染结果
+                            C_active = sub_img      # [3,H,W], has grad
 
-            # 把带梯度的渲染结果拼到背景上 用于计算loss
-            composed_img = C_base + prefix_T_k * C_active
+                        # 把带梯度的渲染结果拼到背景上 用于计算loss
+                        composed_img = C_base + prefix_T_k * C_active
 
-            # Loss
-            Ll1 = l1_loss(composed_img, gt_image)
-            ssim_value = fused_ssim(composed_img.unsqueeze(0), gt_image.unsqueeze(0))
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+                        # Loss
+                        Ll1 = l1_loss(composed_img, gt_image)
+                        ssim_value = fused_ssim(composed_img.unsqueeze(0), gt_image.unsqueeze(0))
+                        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-            # Depth regularization
-            Ll1depth = 0
+                        # Depth regularization
+                        Ll1depth = 0
+                    backward_target = loss
+                    backward_grad = None
+                else:
+                    with profiler.span("compose_loss"):
+                        with torch.no_grad():
+                            prefix_T_k = prefix_T[:, 0].gather(dim=0, index=rank_map.unsqueeze(0)).squeeze(0)
+                            backward_grad = prefix_T_k.unsqueeze(0) * final_rgb_grad
+                    backward_target = sub_img
 
-            with tracer.gpu_span("backward", block_id=submodel_id):
-                loss.backward()
+                with tracer.gpu_span("backward", block_id=submodel_id):
+                    with profiler.span("backward_dispatch"):
+                        torch.autograd.backward(backward_target, grad_tensors=backward_grad)
 
-            tracer.counter("pts", {"visible": visible_pts, "total": sum(s._xyz.shape[0] for s in submodel_list)})
+                tracer.counter("pts", {"visible": visible_pts, "total": sum(s._xyz.shape[0] for s in submodel_list)})
 
-            grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
+                with profiler.span("flush_and_prepare"):
+                    grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
+                profiler.block("grad", submodel_id, backward=True)
+                processed_grad_blocks += 1
 
         # flush the last submodel's pending work
-        grad_sync.flush_last()
+        with profiler.span("flush_last"):
+            grad_sync.flush_last()
+
+        if processed_grad_blocks == 0 or loss is None:
+            LOGGER.warning(f"[iter {iteration}] no gradient block was processed; skipping optimizer/log step")
+            profiler.set("skip_reason", "no_gradient_block_processed")
+            profiler.end()
+            del C_sorted, prefix_T, block_rank, colors_bg, merge_res
+            del rendered_list, depth_list, alpha_list
+            del gt_image
+            continue
 
         del C_sorted, prefix_T, block_rank, colors_bg, merge_res
         del rendered_list, depth_list, alpha_list
         del gt_image
 
         # Queue non-visible blocks for densify/reset (visible blocks already queued in adam)
-        if iteration < opt.densify_until_iter:
-            processed_ids = set(visible_submodel_id_list)
-            for sm_id, sm in enumerate(submodel_list):
-                if sm_id in processed_ids:
-                    continue
-                grad_sync.queue_densify_prune(sm, sm_id, iteration)
+        with profiler.span("queue_densify_nonvisible"):
+            if iteration < opt.densify_until_iter and not getattr(opt, "disable_densify", False):
+                processed_ids = set(visible_submodel_id_list)
+                for sm_id, sm in enumerate(submodel_list):
+                    if sm_id in processed_ids:
+                        continue
+                    grad_sync.queue_densify_prune(sm, sm_id, iteration)
+            profiler.set("densify_queue_len", len(getattr(grad_sync, "_deferred_densify_prune", [])))
 
         # Run all queued densify ops in parallel threads
-        grad_sync.flush_all_densify()
+        with profiler.span("flush_all_densify"):
+            grad_sync.flush_all_densify()
+        profiler.set("bg_densify_alive", bool(getattr(grad_sync, "_bg_densify_thread", None) is not None and grad_sync._bg_densify_thread.is_alive()))
 
         # Dynamic block splitting: any block exceeding SPLIT_SIZE gets binary split
         # Skip blocks still being densified in background
-        if iteration < opt.densify_until_iter:
+        allow_dynamic_split = iteration < opt.densify_until_iter or getattr(opt, "disable_densify", False)
+        if allow_dynamic_split:
             blocks_to_split = [i for i, sm in enumerate(submodel_list)
                                if sm._xyz.shape[0] > config.SPLIT_SIZE and not getattr(sm, '_is_densifying', False)]
             if blocks_to_split:
-                for sm_id in sorted(blocks_to_split, reverse=True):
-                    sm = submodel_list[sm_id]
-                    left, right = sm.split_in_half(opt)
-                    grad_sync.reallocate_pinned_buffers(left)
-                    grad_sync.reallocate_pinned_buffers(right)
-                    submodel_list[sm_id] = left
-                    submodel_list.insert(sm_id + 1, right)
+                with profiler.span("dynamic_split"):
+                    for sm_id in sorted(blocks_to_split, reverse=True):
+                        sm = submodel_list[sm_id]
+                        left, right = sm.split_in_half(opt)
+                        grad_sync.reallocate_pinned_buffers(left)
+                        grad_sync.reallocate_pinned_buffers(right)
+                        submodel_list[sm_id] = left
+                        submodel_list.insert(sm_id + 1, right)
                 frustum_cache.clear()
                 LOGGER.info(f"[iter {iteration}] Split block(s) {blocks_to_split}, now {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
                 print(f"[iter {iteration}] Split block(s) {blocks_to_split}, now {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
+                profiler.set("blocks_split", [int(x) for x in blocks_to_split])
 
         # reserved 超过 allocated 太多时才清缓存，避免频繁清导致性能下降
-        if torch.cuda.memory_reserved() > torch.cuda.memory_allocated() + config.GPU_CACHE_THRESHOLD_GB * 1024**3:
-            torch.cuda.empty_cache()
+        with profiler.span("cuda_cache_check"):
+            alloc_bytes = torch.cuda.memory_allocated()
+            reserved_bytes = torch.cuda.memory_reserved()
+            cache_slack_gb = (reserved_bytes - alloc_bytes) / 1024**3
+            profiler.set("cuda_cache_slack_gb", round(float(cache_slack_gb), 4))
+            profiler.set("cuda_empty_cache", False)
+            cache_threshold_gb = getattr(opt, "gpu_cache_threshold_gb", config.GPU_CACHE_THRESHOLD_GB)
+            cache_interval = max(1, getattr(opt, "cuda_empty_cache_interval", config.CUDA_EMPTY_CACHE_INTERVAL))
+            should_empty_cache = (
+                cache_threshold_gb > 0
+                and cache_slack_gb > cache_threshold_gb
+                and iteration % cache_interval == 0
+            )
+            if should_empty_cache:
+                torch.cuda.empty_cache()
+                profiler.set("cuda_empty_cache", True)
 
         with torch.no_grad():
             # Progress bar
@@ -403,6 +673,17 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             rsv = torch.cuda.memory_reserved() / 1024**3
             elapsed = time.time() - time_start
             its = (iteration - first_iter) / elapsed if elapsed > 0 else 0
+            profiler.set("pts_total", int(pts_total))
+            profiler.set("block_count", int(len(submodel_list)))
+            profiler.set("block_sizes", [int(submodel._xyz.shape[0]) for submodel in submodel_list])
+            profiler.set("mem_gb", {
+                "alloc": round(alloc, 4),
+                "reserved": round(rsv, 4),
+                "peak_alloc": round(gpu_peak_alloc, 4),
+                "peak_reserved": round(gpu_peak_rsv, 4),
+            })
+            profiler.set("loss", round(float(ema_loss_for_log), 6))
+            profiler.set("it_per_s_running", round(float(its), 4))
             # benchmark 收集
             if BENCH_START <= iteration <= BENCH_END:
                 bench_its_list.append(its)
@@ -428,6 +709,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if WANDB and not DEBUG_MODE:
                     wandb.log(wandb_log, step=iteration)
                     wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(submodel_list)}, step=iteration)
+            profiler.end()
             
         # saving Gaussians ply    
         if (iteration in saving_iterations):
@@ -437,7 +719,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 submodel.save_ply(os.path.join(point_cloud_path, f"point_cloud_sub_{submodel_id}.ply"), include_block=False)
                 
 
-        if iteration == TRACE_END:
+        if TRACE_ENABLED and iteration == TRACE_END:
              tracer.enabled = False
              
     # Ensure all background densify threads are done before reporting/exporting
@@ -446,14 +728,34 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     time_end = time.time()
     cost = time_end - time_start
     print(f"Training time cost: [{cost:.2f}] seconds.")
+    log_kv(LOGGER, "training_complete", {
+        "seconds": round(cost, 3),
+        "iterations": opt.iterations,
+        "final_blocks": len(submodel_list),
+        "final_points": int(sum(s._xyz.shape[0] for s in submodel_list)),
+    })
 
     # 打印 benchmark 统计（用 sys.__stdout__ 避免时间戳）
     if bench_its_list:
         n = len(bench_its_list)
-        p = sys.__stdout__.write
         import socket, subprocess
         hostname = socket.gethostname()
         commit_id = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+        bench_summary = {
+            "hostname": hostname,
+            "branch": BRANCH,
+            "commit": commit_id,
+            "samples": n,
+            "iter_from": BENCH_START,
+            "iter_until": BENCH_END,
+            "avg_it_s": sum(bench_its_list) / n,
+            "avg_loss": sum(bench_loss_list) / n,
+            "avg_visible_pts": sum(bench_vis_list) / n,
+            "avg_alloc_gb": sum(bench_alloc_list) / n,
+            "avg_reserved_gb": sum(bench_rsv_list) / n,
+        }
+        log_kv(LOGGER, "benchmark_summary", bench_summary)
+        p = sys.__stdout__.write
         p(f"\n{'='*50}\n")
         p(f"  [{hostname}] Benchmark (iter {BENCH_START}-{BENCH_END}, {n} samples)\n")
         p(f"  Branch: {BRANCH}  Commit: {commit_id}\n")
@@ -468,7 +770,9 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
     # 导出最后两个 iter 的 timeline
     os.makedirs("timeline", exist_ok=True)
-    tracer.export(f"timeline/trace_{BRANCH}_{SCENE_NAME}.json")
+    trace_path = f"timeline/trace_{BRANCH}_{SCENE_NAME}.json"
+    tracer.export(trace_path)
+    log_trace_summary(tracer, LOGGER)
         
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -518,6 +822,28 @@ if __name__ == "__main__":
     parser.add_argument("--trained_ply_path", type=str, default=None)
     parser.add_argument('--git_branch', type=str, default=None)
     parser.add_argument('--keep_training', action='store_true', default=False)
+    parser.add_argument('--disable_densify', action='store_true', default=False,
+                        help='Skip densify/prune/opacity reset while keeping dynamic block splitting.')
+    parser.add_argument('--profile_log', action='store_true', default=False,
+                        help='Log detailed per-iteration timing/profile payloads.')
+    parser.add_argument('--profile_from', type=int, default=1)
+    parser.add_argument('--profile_until', type=int, default=0,
+                        help='Last iteration for profile logs; 0 means no upper bound.')
+    parser.add_argument('--profile_every', type=int, default=1)
+    parser.add_argument('--profile_sync', action='store_true', default=False,
+                        help='Synchronize CUDA around profile spans for more accurate but slower timings.')
+    parser.add_argument('--trace_from', type=int, default=681)
+    parser.add_argument('--trace_until', type=int, default=750)
+    parser.add_argument('--bench_from', type=int, default=301)
+    parser.add_argument('--bench_until', type=int, default=700)
+    parser.add_argument('--gpu_cache_threshold_gb', type=float, default=config.GPU_CACHE_THRESHOLD_GB,
+                        help='Call torch.cuda.empty_cache when reserved-allocated exceeds this many GB; default is mem-first.')
+    parser.add_argument('--cuda_empty_cache_interval', type=int, default=config.CUDA_EMPTY_CACHE_INTERVAL,
+                        help='Only allow empty_cache every N iterations; default 1 keeps peak/reserved tightly controlled.')
+    parser.add_argument('--split_size_override', type=int, default=0,
+                        help='Override config.SPLIT_SIZE after indoor/outdoor scene default is selected; 0 keeps the default.')
+    parser.add_argument('--legacy_per_block_loss', action='store_true', default=False,
+                        help='Use the older per-block composed-image loss/backward path instead of one image-loss gradient per iteration.')
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -534,6 +860,8 @@ if __name__ == "__main__":
         config.SPLIT_SIZE = config.SPLIT_SIZE_INDOOR
     elif SCENE_NAME in config.OUTDOOR_SCENES:
         config.SPLIT_SIZE = config.SPLIT_SIZE_OUTDOOR
+    if args.split_size_override > 0:
+        config.SPLIT_SIZE = args.split_size_override
     print(f"Scene: {SCENE_NAME} ({'indoor' if SCENE_NAME in config.INDOOR_SCENES else 'outdoor'}), SPLIT_SIZE={config.SPLIT_SIZE}")
 
     if args.git_branch is not None:
@@ -542,6 +870,17 @@ if __name__ == "__main__":
         BRANCH = get_git_branch()
     
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
+    log_section(LOGGER, "Run Context")
+    log_runtime_context(LOGGER, repo_dir=os.path.dirname(os.path.abspath(__file__)), extra={
+        "scene": SCENE_NAME,
+        "dataset": DATASET_NAME,
+        "branch": BRANCH,
+    })
+    log_kv(LOGGER, "args", vars(args))
+    log_kv(LOGGER, "config", {
+        k: v for k, v in vars(config).items()
+        if k.isupper() and isinstance(v, (bool, int, float, str, list, tuple, set, dict))
+    })
     DEBUG_MODE = sys.gettrace() is not None
     
     if WANDB and not DEBUG_MODE:
@@ -559,7 +898,7 @@ if __name__ == "__main__":
 
     trained_ply_path = args.trained_ply_path
 
-    opt = op.extract(args)
+    opt = attach_runtime_options(op.extract(args), args)
     if args.keep_training:
         assert trained_ply_path is not None, "--keep_training requires --trained_ply_path"
         print("KEEP_TRAINING MODEL, LOADING FROM CHECKPOINT: ", trained_ply_path)
@@ -570,7 +909,6 @@ if __name__ == "__main__":
         opt.iterations = 750
     else:
         res = {"first_iter": 1}
+    log_kv(LOGGER, "optimization_params", vars(opt))
 
     training(lp.extract(args), opt, pp.extract(args), args.save_iterations, args.debug_from, res)
-
-
