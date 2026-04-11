@@ -29,6 +29,7 @@ MODEL_PATH="${MODEL_PATH:-/data/jian/output}"
 GPU="${GPU:-0}"
 IMG_FLAG="${IMG_FLAG:-images_4}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+LOCAL_RASTERIZER_PATH="${LOCAL_RASTERIZER_PATH:-$SCRIPT_DIR/submodules/diff-gaussian-rasterization}"
 
 BENCH_FROM="${BENCH_FROM:-301}"
 BENCH_UNTIL="${BENCH_UNTIL:-700}"
@@ -54,6 +55,7 @@ mkdir -p "$LOG_ROOT" "$SCRIPT_DIR/timeline"
 
 export CUDA_VISIBLE_DEVICES="$GPU"
 export PYTHONUNBUFFERED=1
+export PYTHONPATH="$LOCAL_RASTERIZER_PATH${PYTHONPATH:+:$PYTHONPATH}"
 
 log() {
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -78,6 +80,8 @@ run_and_log() {
   log "MODEL_PATH=$MODEL_PATH"
   log "IMG_FLAG=$IMG_FLAG"
   log "PYTHON_BIN=$PYTHON_BIN"
+  log "PYTHONPATH=$PYTHONPATH"
+  log "LOCAL_RASTERIZER_PATH=$LOCAL_RASTERIZER_PATH"
   log "BENCH=${BENCH_FROM}-${BENCH_UNTIL} TRACE=${TRACE_FROM}-${TRACE_UNTIL}"
   log "PROFILE=${PROFILE_FROM}-${PROFILE_UNTIL}/every=${PROFILE_EVERY} sync=${PROFILE_SYNC}"
   log "GPU_CACHE_THRESHOLD_GB=$GPU_CACHE_THRESHOLD_GB CUDA_EMPTY_CACHE_INTERVAL=$CUDA_EMPTY_CACHE_INTERVAL"
@@ -99,13 +103,15 @@ run_and_log() {
   log "python/torch:"
   "$PYTHON_BIN" - <<'PY' || true
 import json
+import sys
 import torch
 info = {
-    "python": __import__("sys").version.replace("\n", " "),
+    "python": sys.version.replace("\n", " "),
     "torch": torch.__version__,
     "cuda": torch.version.cuda,
     "cuda_available": torch.cuda.is_available(),
     "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+    "sys_path_head": sys.path[:6],
 }
 if torch.cuda.is_available():
     info["devices"] = [
@@ -116,6 +122,14 @@ if torch.cuda.is_available():
         }
         for i in range(torch.cuda.device_count())
     ]
+try:
+    import diff_gaussian_rasterization_wenqi_tam as raster_pkg
+    import diff_gaussian_rasterization_wenqi_tam._C as raster_c
+    info["raster_pkg"] = raster_pkg.__file__
+    info["raster_ext"] = raster_c.__file__
+    info["packed_sparse_adam_available"] = hasattr(raster_c, "packed_sparse_adam")
+except Exception as exc:
+    info["raster_import_error"] = repr(exc)
 print(json.dumps(info, indent=2))
 PY
   log "============================================================"

@@ -340,6 +340,9 @@ class GaussianModel:
             if param_group["name"] == "xyz":
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
+                if hasattr(self, '_packed_lr_per_col') and hasattr(self, '_pack_slices'):
+                    s, e, _ = self._pack_slices['_xyz']
+                    self._packed_lr_per_col[s:e] = lr
                 return lr
 
     def construct_list_of_attributes(self):
@@ -799,6 +802,7 @@ class GaussianModel:
         self._packed = packed
         self._pack_slices = slices
         self._pack_D = D
+        self._refresh_packed_lr_per_col()
 
         # Create view-params: Adam writes directly into _packed
         for name, (s, e, reshape) in slices.items():
@@ -912,10 +916,14 @@ class GaussianModel:
         self._packed_exp_avg = new_exp_avg
         self._packed_exp_avg_sq = new_exp_avg_sq
 
-    def _build_lr_per_col(self, iteration):
-        """Build [D] tensor with per-column learning rate from optimizer param_groups."""
+    def _refresh_packed_lr_per_col(self):
+        """Refresh cached [D] per-column learning rates from optimizer groups."""
         D = self._pack_D
-        lr_vec = torch.zeros(D, dtype=torch.float32)
+        lr_vec = getattr(self, '_packed_lr_per_col', None)
+        if lr_vec is None or lr_vec.shape[0] != D:
+            lr_vec = torch.empty(D, dtype=torch.float32)
+            self._packed_lr_per_col = lr_vec
+        lr_vec.zero_()
         for group in self.optimizer.param_groups:
             attr = self._GROUP_TO_ATTR.get(group["name"])
             if attr is None:
@@ -923,6 +931,12 @@ class GaussianModel:
             s, e, _ = self._pack_slices[attr]
             lr_vec[s:e] = group["lr"]
         return lr_vec
+
+    def _build_lr_per_col(self, iteration):
+        """Return cached [D] tensor with per-column learning rate."""
+        if not hasattr(self, '_packed_lr_per_col'):
+            return self._refresh_packed_lr_per_col()
+        return self._packed_lr_per_col
 
     def _assemble_grad_subset(self, gpu_grads):
         """Concatenate 6 per-attr grad pinned bufs [n_vis, cols_i] into [n_vis, D]."""
