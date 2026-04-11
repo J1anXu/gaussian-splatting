@@ -34,9 +34,12 @@ class PipelinedGradSync:
         # CUDA Event 用于精确同步 D2H，替代 cuda.synchronize()
         self._d2h_event = torch.cuda.Event()
 
-        # Pre-allocate pinned buffers for each submodel
-        for submodel in submodel_list:
-            self._allocate_pinned_buffers(submodel)
+        # Densify stats are optional. When densify is disabled, grad D2H goes
+        # directly into each model's _packed_staging and these extra buffers are
+        # not needed.
+        if not self.disable_densify:
+            for submodel in submodel_list:
+                self._allocate_pinned_buffers(submodel)
 
     @staticmethod
     def _allocate_pinned_buffers(submodel: GaussianModel):
@@ -48,10 +51,13 @@ class PipelinedGradSync:
         submodel._pinned_vpt_grad_buf = torch.empty(n_vis, 3, dtype=torch.float32, pin_memory=True)
 
     def reallocate_pinned_buffers(self, submodel: GaussianModel):
+        if self.disable_densify:
+            return
         self._allocate_pinned_buffers(submodel)
 
     def kick_async_d2h(self, submodel: GaussianModel, submodel_id: int,
-                        render_pkg: dict, sub_viewspace_point_tensor):
+                        render_pkg: dict, sub_viewspace_point_tensor,
+                        needs_densify_stats: bool):
         """Kick off non-blocking D2H copies of grads into pre-allocated pinned buffers.
 
         Packs grads on GPU with torch.cat, then single D2H into _packed_staging.
@@ -60,7 +66,7 @@ class PipelinedGradSync:
         Returns captured state tuple for deferred work.
         """
         tm = self.tracer
-        with tm.transfer_span("d2h_kick", block_id=submodel_id):
+        with tm.transfer_span("d2h_kick", block_id=submodel_id, densify_stats=needs_densify_stats):
             cur_idx = submodel.visible_indices.to("cpu")
             n_vis = cur_idx.shape[0]
 
@@ -77,15 +83,21 @@ class PipelinedGradSync:
             staging = submodel._packed_staging[:n_vis]
             staging.copy_(gpu_grad_packed, non_blocking=True)
 
-            sub_visibility_filter = render_pkg["visibility_filter"]
-            sub_radii = render_pkg["radii"]
+            pin_sub_vf = None
+            pin_sub_radii = None
+            pin_vpt_grad = None
+            if needs_densify_stats:
+                if not hasattr(submodel, '_pinned_vf_buf'):
+                    self._allocate_pinned_buffers(submodel)
+                sub_visibility_filter = render_pkg["visibility_filter"]
+                sub_radii = render_pkg["radii"]
 
-            pin_sub_vf = submodel._pinned_vf_buf[:sub_visibility_filter.shape[0]]
-            pin_sub_vf.copy_(sub_visibility_filter, non_blocking=True)
-            pin_sub_radii = submodel._pinned_radii_buf[:sub_radii.shape[0]]
-            pin_sub_radii.copy_(sub_radii, non_blocking=True)
-            pin_vpt_grad = submodel._pinned_vpt_grad_buf[:n_vis]
-            pin_vpt_grad.copy_(sub_viewspace_point_tensor.grad, non_blocking=True)
+                pin_sub_vf = submodel._pinned_vf_buf[:sub_visibility_filter.shape[0]]
+                pin_sub_vf.copy_(sub_visibility_filter, non_blocking=True)
+                pin_sub_radii = submodel._pinned_radii_buf[:sub_radii.shape[0]]
+                pin_sub_radii.copy_(sub_radii, non_blocking=True)
+                pin_vpt_grad = submodel._pinned_vpt_grad_buf[:n_vis]
+                pin_vpt_grad.copy_(sub_viewspace_point_tensor.grad, non_blocking=True)
 
         return cur_idx, n_vis, pin_sub_vf, pin_sub_radii, pin_vpt_grad
 
@@ -136,9 +148,10 @@ class PipelinedGradSync:
              after enqueuing next block's H2D, so CPU densify overlaps with GPU H2D.
         """
         tm = self.tracer
+        needs_densify_stats = (not self.disable_densify and iteration < self.opt.densify_until_iter)
 
         # 1. kick off async D2H for current submodel
-        state = self.kick_async_d2h(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor)
+        state = self.kick_async_d2h(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, needs_densify_stats)
         cur_idx, cur_n_vis, pin_sub_vf, pin_sub_radii, pin_vpt_grad = state
 
         # 2. deactivate current submodel's GPU subset
