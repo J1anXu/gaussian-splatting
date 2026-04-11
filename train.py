@@ -179,7 +179,63 @@ def attach_runtime_options(opt, args):
     opt.cuda_empty_cache_interval = args.cuda_empty_cache_interval
     opt.split_size_override = args.split_size_override
     opt.legacy_per_block_loss = args.legacy_per_block_loss
+    opt.gpu_packed_cache_strategy = args.gpu_packed_cache_strategy
     return opt
+
+
+def estimate_gpu_packed_bytes(submodel, n_vis):
+    pack_d = int(getattr(submodel, "_pack_D", 0) or 0)
+    alloc_step = int(getattr(submodel, "ALLOC_STEP", 4096) or 4096)
+    n_vis = int(n_vis)
+    alloc_n = ((n_vis + alloc_step - 1) // alloc_step) * alloc_step if n_vis > 0 else 0
+    return alloc_n * pack_d * 4
+
+
+def plan_gpu_packed_cache(submodel_list, valid_ids, strategy):
+    strategy = strategy or "none"
+    selected_ids = []
+    budget_n_vis = 0
+    budget_bytes = 0
+    total_n_vis = 0
+    total_bytes = 0
+
+    if valid_ids and strategy != "none":
+        largest_id = valid_ids[0]
+        budget_n_vis = int(submodel_list[largest_id].visible_indices.shape[0])
+        budget_bytes = estimate_gpu_packed_bytes(submodel_list[largest_id], budget_n_vis)
+        if strategy == "largest":
+            selected_ids = [largest_id]
+            total_n_vis = budget_n_vis
+            total_bytes = budget_bytes
+        elif strategy == "tail":
+            for sid in reversed(valid_ids[1:]):
+                n_vis = int(submodel_list[sid].visible_indices.shape[0])
+                n_bytes = estimate_gpu_packed_bytes(submodel_list[sid], n_vis)
+                if total_bytes + n_bytes > budget_bytes:
+                    continue
+                selected_ids.append(sid)
+                total_n_vis += n_vis
+                total_bytes += n_bytes
+
+    selected_ids = [int(sid) for sid in selected_ids]
+    return set(selected_ids), {
+        "strategy": strategy,
+        "ids": selected_ids,
+        "budget_n_vis": int(budget_n_vis),
+        "budget_bytes_est": int(budget_bytes),
+        "budget_mb_est": round(budget_bytes / 1024**2, 3),
+        "total_n_vis": int(total_n_vis),
+        "bytes_est": int(total_bytes),
+        "mb_est": round(total_bytes / 1024**2, 3),
+    }
+
+
+def clear_gpu_packed_caches(submodel_list, cache_ids):
+    for sid in list(cache_ids):
+        if 0 <= sid < len(submodel_list):
+            clear_cache = getattr(submodel_list[sid], "clear_gpu_packed_cache", None)
+            if clear_cache is not None:
+                clear_cache()
 
 
 
@@ -215,6 +271,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         "gpu_cache_threshold_gb": getattr(opt, "gpu_cache_threshold_gb", config.GPU_CACHE_THRESHOLD_GB),
         "cuda_empty_cache_interval": getattr(opt, "cuda_empty_cache_interval", config.CUDA_EMPTY_CACHE_INTERVAL),
         "legacy_per_block_loss": getattr(opt, "legacy_per_block_loss", False),
+        "gpu_packed_cache_strategy": getattr(opt, "gpu_packed_cache_strategy", "tail"),
         "trained_ply_path": res.get("trained_ply_path"),
     })
     if getattr(opt, "disable_densify", False):
@@ -407,6 +464,12 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 valid_ids.append(sid)
             profiler.set("valid_ids", [int(x) for x in valid_ids])
             profiler.set("valid_n_vis", {str(sid): int(submodel_list[sid].visible_indices.shape[0]) for sid in valid_ids})
+            gpu_packed_cache_ids, gpu_packed_cache_info = plan_gpu_packed_cache(
+                submodel_list,
+                valid_ids,
+                getattr(opt, "gpu_packed_cache_strategy", "tail"),
+            )
+            profiler.set("gpu_packed_cache", gpu_packed_cache_info)
 
             # 流水线: 提前 gather 下一个 block，与当前 block 的 h2d+render 重叠
             # 每个 submodel 有自己的 _packed_staging，天然双缓冲
@@ -420,10 +483,17 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             for i, submodel_id in enumerate(valid_ids):
                 submodel = submodel_list[submodel_id]
                 visible_pts += submodel.visible_indices.shape[0]
+                cache_gpu_packed = submodel_id in gpu_packed_cache_ids
+                if cache_gpu_packed:
+                    profiler.block("nograd", submodel_id, gpu_packed_cache_planned=True)
 
                 with tracer.transfer_span("h2d_nograd", block_id=submodel_id):
                     with profiler.span("nograd_h2d_activate"):
-                        submodel.kick_h2d_and_activate(requires_grad=False)
+                        submodel.kick_h2d_and_activate(requires_grad=False, cache_gpu_packed=cache_gpu_packed)
+                if cache_gpu_packed:
+                    cache_bytes = submodel.cached_gpu_packed_bytes()
+                    profiler.add("gpu_packed_cache_bytes_actual", cache_bytes)
+                    profiler.block("nograd", submodel_id, gpu_packed_cache_bytes=cache_bytes)
 
                 # 趁 h2d (non_blocking) + render 占 GPU 时，CPU 提前 gather 下一个 block
                 if i + 1 < len(valid_ids):
@@ -445,6 +515,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 all_depth.append(depth)
                 all_alpha.append(alphaLeft)
                 all_submodel_ids.append(submodel_id)
+                render_pkg = None
                 profiler.block("nograd", submodel_id, rendered=True)
 
             # Phase 2: 所有 render 完成后，批量过滤低贡献 block（此时 .item() 不会阻塞 render pipeline）
@@ -461,12 +532,19 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                     depth_list.append(depth)
                     alpha_list.append(alphaLeft)
                     visible_submodel_id_list.append(submodel_id)
+            if gpu_packed_cache_ids:
+                visible_cache_ids = [sid for sid in sorted(gpu_packed_cache_ids) if sid in visible_submodel_id_list]
+                dropped_cache_ids = [sid for sid in sorted(gpu_packed_cache_ids) if sid not in visible_submodel_id_list]
+                clear_gpu_packed_caches(submodel_list, dropped_cache_ids)
+                profiler.set("gpu_packed_cache_visible_ids", [int(sid) for sid in visible_cache_ids])
+                profiler.set("gpu_packed_cache_dropped_ids", [int(sid) for sid in dropped_cache_ids])
             profiler.set("visible_submodel_ids", [int(x) for x in visible_submodel_id_list])
             profiler.set("visible_pts", int(visible_pts))
 
         if len(rendered_list) == 0:
             print(f"Iteration {iteration}: No visible blocks after filtering, skipping.")
             profiler.set("skip_reason", "no_visible_blocks_after_filter")
+            clear_gpu_packed_caches(submodel_list, gpu_packed_cache_ids)
             profiler.end()
             continue
         # execute merge
@@ -507,6 +585,19 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             key=lambda i: submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0],
             reverse=True
         )
+        if getattr(opt, "gpu_packed_cache_strategy", "tail") == "tail" and gpu_packed_cache_ids:
+            grad_order = sorted(
+                range(len(visible_submodel_id_list)),
+                key=lambda i: (
+                    visible_submodel_id_list[i] not in gpu_packed_cache_ids,
+                    int(submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0])
+                    if visible_submodel_id_list[i] in gpu_packed_cache_ids
+                    else -int(submodel_list[visible_submodel_id_list[i]].visible_indices.shape[0]),
+                ),
+            )
+            profiler.set("grad_order_policy", "tail_cache_first")
+        else:
+            profiler.set("grad_order_policy", "largest_visible_first")
         profiler.set("grad_order_ids", [int(visible_submodel_id_list[idx]) for idx in grad_order])
         if getattr(opt, "legacy_per_block_loss", False):
             loss = None
@@ -523,12 +614,25 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 # Skip blocks being densified in background — use stale nograd render only
                 if getattr(submodel, '_is_densifying', False):
                     profiler.block("grad", submodel_id, skipped="densifying")
+                    if submodel_id in gpu_packed_cache_ids:
+                        submodel.clear_gpu_packed_cache()
                     continue
 
                 # pre_gather() 已在 nograd 阶段完成，staging buffer 仍有效，无需重复 gather
-                with tracer.transfer_span("h2d_grad", block_id=submodel_id):
-                    with profiler.span("grad_h2d_activate"):
-                        submodel.kick_h2d_and_activate(requires_grad=True)
+                use_gpu_packed_cache = submodel_id in gpu_packed_cache_ids and submodel.has_cached_gpu_packed()
+                profiler.block("grad", submodel_id, gpu_packed_cache_hit=use_gpu_packed_cache)
+                if use_gpu_packed_cache:
+                    profiler.add("gpu_packed_cache_grad_hits", 1)
+                    profiler.add("gpu_packed_cache_grad_bytes", submodel.cached_gpu_packed_bytes())
+                    with tracer.gpu_span("gpu_packed_cache_grad_activate", block_id=submodel_id, n_vis=n_vis_grad):
+                        with profiler.span("grad_gpu_cache_activate"):
+                            submodel.kick_h2d_and_activate(requires_grad=True, use_cached_gpu_packed=True)
+                else:
+                    if submodel_id in gpu_packed_cache_ids:
+                        profiler.add("gpu_packed_cache_grad_misses", 1)
+                    with tracer.transfer_span("h2d_grad", block_id=submodel_id):
+                        with profiler.span("grad_h2d_activate"):
+                            submodel.kick_h2d_and_activate(requires_grad=True)
 
                 # GPU 正在做 H2D，CPU 趁机跑上一个 block 的 densify_stats
                 with profiler.span("run_deferred_densify"):
@@ -543,6 +647,16 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 # gaussian points level
                 sub_viewspace_point_tensor = render_pkg["viewspace_points"]
+                prefix_T_k = None
+                backward_target = None
+                backward_grad = None
+                composed_img = None
+                C_base = None
+                C_sorted_k = None
+                C_active = None
+                submodel_rank_per_pixel = None
+                Ll1 = None
+                ssim_value = None
 
                 if getattr(opt, "legacy_per_block_loss", False):
                     with profiler.span("compose_loss"):
@@ -585,12 +699,29 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 with profiler.span("flush_and_prepare"):
                     grad_sync.flush_and_prepare(submodel, submodel_id, render_pkg, sub_viewspace_point_tensor, iteration)
+                if submodel_id in gpu_packed_cache_ids:
+                    submodel.clear_gpu_packed_cache()
+                with profiler.span("grad_temp_cleanup"):
+                    render_pkg = None
+                    sub_img = None
+                    sub_viewspace_point_tensor = None
+                    prefix_T_k = None
+                    backward_target = None
+                    backward_grad = None
+                    composed_img = None
+                    C_base = None
+                    C_sorted_k = None
+                    C_active = None
+                    submodel_rank_per_pixel = None
+                    Ll1 = None
+                    ssim_value = None
                 profiler.block("grad", submodel_id, backward=True)
                 processed_grad_blocks += 1
 
         # flush the last submodel's pending work
         with profiler.span("flush_last"):
             grad_sync.flush_last()
+        clear_gpu_packed_caches(submodel_list, gpu_packed_cache_ids)
 
         if processed_grad_blocks == 0 or loss is None:
             LOGGER.warning(f"[iter {iteration}] no gradient block was processed; skipping optimizer/log step")
@@ -599,11 +730,19 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             del C_sorted, prefix_T, block_rank, colors_bg, merge_res
             del rendered_list, depth_list, alpha_list
             del gt_image
+            final_rgb_grad = None
+            image = None
+            alphaLeft = None
+            depth = None
             continue
 
         del C_sorted, prefix_T, block_rank, colors_bg, merge_res
         del rendered_list, depth_list, alpha_list
         del gt_image
+        final_rgb_grad = None
+        image = None
+        alphaLeft = None
+        depth = None
 
         # Queue non-visible blocks for densify/reset (visible blocks already queued in adam)
         with profiler.span("queue_densify_nonvisible"):
@@ -770,8 +909,10 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
     # 导出最后两个 iter 的 timeline
     os.makedirs("timeline", exist_ok=True)
-    trace_path = f"timeline/trace_{BRANCH}_{SCENE_NAME}.json"
+    trace_stamp = time.strftime("%Y%m%d_%H%M%S")
+    trace_path = f"timeline/trace_{BRANCH}_{SCENE_NAME}_{trace_stamp}.json"
     tracer.export(trace_path)
+    log_kv(LOGGER, "timeline_export", {"path": trace_path, "stamp": trace_stamp})
     log_trace_summary(tracer, LOGGER)
         
     # if (iteration in checkpoint_iterations):
@@ -844,6 +985,8 @@ if __name__ == "__main__":
                         help='Override config.SPLIT_SIZE after indoor/outdoor scene default is selected; 0 keeps the default.')
     parser.add_argument('--legacy_per_block_loss', action='store_true', default=False,
                         help='Use the older per-block composed-image loss/backward path instead of one image-loss gradient per iteration.')
+    parser.add_argument('--gpu_packed_cache_strategy', type=str, default="tail", choices=["none", "largest", "tail"],
+                        help='Reuse no-grad GPU packed buffers in grad pass: none, largest block, or tail blocks whose visible-point sum fits the largest block.')
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)

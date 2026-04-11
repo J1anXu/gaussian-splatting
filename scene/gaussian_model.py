@@ -87,6 +87,9 @@ class GaussianModel:
         
         self.subset_mode_1 = False # for render first time
         self.subset_mode_2 = False # for render second time
+        self._cached_gpu_packed = None
+        self._cached_gpu_packed_n = 0
+        self._cached_gpu_packed_bytes = 0
         
         self.setup_functions()
         
@@ -1091,15 +1094,47 @@ class GaussianModel:
 
     ALLOC_STEP = 4096  # round up 步长，让 CUDA allocator 更容易复用空闲块
 
-    def kick_h2d_and_activate(self, requires_grad=True):
+    @staticmethod
+    def _tensor_storage_nbytes(tensor):
+        if tensor is None:
+            return 0
+        try:
+            return int(tensor.untyped_storage().nbytes())
+        except Exception:
+            return int(tensor.numel() * tensor.element_size())
+
+    def has_cached_gpu_packed(self):
+        cached = getattr(self, '_cached_gpu_packed', None)
+        if cached is None:
+            return False
+        return int(getattr(self, '_cached_gpu_packed_n', -1)) == int(getattr(self, '_db_n', -2))
+
+    def cached_gpu_packed_bytes(self):
+        return int(getattr(self, '_cached_gpu_packed_bytes', 0))
+
+    def clear_gpu_packed_cache(self):
+        self._cached_gpu_packed = None
+        self._cached_gpu_packed_n = 0
+        self._cached_gpu_packed_bytes = 0
+
+    def kick_h2d_and_activate(self, requires_grad=True, cache_gpu_packed=False, use_cached_gpu_packed=False):
         """H2D transfer + GPU unpack. Assumes pre_gather() was already called."""
         n = self._db_n
-        staging = self._db_staging  # use same buffer pre_gather() wrote into
-        alloc_n = ((n + self.ALLOC_STEP - 1) // self.ALLOC_STEP) * self.ALLOC_STEP
-        D = staging.shape[1]
-        gpu_packed = torch.empty(alloc_n, D, device='cuda')
-        gpu_packed[:n].copy_(staging, non_blocking=True)
-        gpu_packed = gpu_packed[:n]
+        if use_cached_gpu_packed:
+            if not self.has_cached_gpu_packed():
+                raise RuntimeError("requested cached gpu packed buffer, but no valid cache is available")
+            gpu_packed = self._cached_gpu_packed[:n]
+        else:
+            staging = self._db_staging  # use same buffer pre_gather() wrote into
+            alloc_n = ((n + self.ALLOC_STEP - 1) // self.ALLOC_STEP) * self.ALLOC_STEP
+            D = staging.shape[1]
+            gpu_packed = torch.empty(alloc_n, D, device='cuda')
+            gpu_packed[:n].copy_(staging, non_blocking=True)
+            gpu_packed = gpu_packed[:n]
+            if cache_gpu_packed and not requires_grad:
+                self._cached_gpu_packed = gpu_packed
+                self._cached_gpu_packed_n = int(n)
+                self._cached_gpu_packed_bytes = self._tensor_storage_nbytes(gpu_packed)
 
         slices = getattr(self, '_pack_slices_frozen', self._pack_slices)
         if requires_grad:
@@ -1115,7 +1150,8 @@ class GaussianModel:
             self._rotation_gpu = gpu_packed[:, s:e].clone()
             s, e, _ = slices['_opacity']
             self._opacity_gpu = gpu_packed[:, s:e].clone()
-            del gpu_packed
+            if not use_cached_gpu_packed:
+                del gpu_packed
         else:
             s, e, _ = slices['_xyz']
             self._xyz_gpu = gpu_packed[:, s:e]

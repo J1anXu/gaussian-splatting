@@ -8,6 +8,8 @@
 #   GPU=1 PROFILE_SYNC=1 TRACE_FROM=650 TRACE_UNTIL=720 bash test_4090.sh
 #   DISABLE_DENSIFY=0 bash test_4090.sh   # compare with densify enabled
 #   SPLIT_SIZE_OVERRIDE=1200000 bash test_4090.sh
+#   GPU_PACKED_CACHE_STRATEGY=largest bash test_4090.sh
+#   GPU_PACKED_CACHE_STRATEGY=tail bash test_4090.sh
 #
 
 set -Eeuo pipefail
@@ -40,6 +42,7 @@ GPU_CACHE_THRESHOLD_GB="${GPU_CACHE_THRESHOLD_GB:-0.5}"
 CUDA_EMPTY_CACHE_INTERVAL="${CUDA_EMPTY_CACHE_INTERVAL:-1}"
 SPLIT_SIZE_OVERRIDE="${SPLIT_SIZE_OVERRIDE:-0}"
 LEGACY_PER_BLOCK_LOSS="${LEGACY_PER_BLOCK_LOSS:-0}"
+GPU_PACKED_CACHE_STRATEGY="${GPU_PACKED_CACHE_STRATEGY:-tail}"
 
 # For a fixed-point-cloud Phase 2 benchmark, this should normally stay on.
 DISABLE_DENSIFY="${DISABLE_DENSIFY:-1}"
@@ -80,6 +83,7 @@ run_and_log() {
   log "GPU_CACHE_THRESHOLD_GB=$GPU_CACHE_THRESHOLD_GB CUDA_EMPTY_CACHE_INTERVAL=$CUDA_EMPTY_CACHE_INTERVAL"
   log "SPLIT_SIZE_OVERRIDE=$SPLIT_SIZE_OVERRIDE"
   log "LEGACY_PER_BLOCK_LOSS=$LEGACY_PER_BLOCK_LOSS"
+  log "GPU_PACKED_CACHE_STRATEGY=$GPU_PACKED_CACHE_STRATEGY"
   log "DISABLE_DENSIFY=$DISABLE_DENSIFY"
   log "RUN_LOG=$RUN_LOG"
   log "------------------------------------------------------------"
@@ -137,6 +141,7 @@ TRAIN_CMD=(
   --gpu_cache_threshold_gb "$GPU_CACHE_THRESHOLD_GB"
   --cuda_empty_cache_interval "$CUDA_EMPTY_CACHE_INTERVAL"
   --split_size_override "$SPLIT_SIZE_OVERRIDE"
+  --gpu_packed_cache_strategy "$GPU_PACKED_CACHE_STRATEGY"
 )
 
 if [[ "$PROFILE_SYNC" == "1" ]]; then
