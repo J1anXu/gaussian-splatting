@@ -191,6 +191,36 @@ def estimate_gpu_packed_bytes(submodel, n_vis):
     return alloc_n * pack_d * 4
 
 
+def select_best_fit_gpu_packed_cache(candidates, point_budget):
+    """Pick the fullest tail subset under the configured visible-point budget."""
+    point_budget = int(point_budget)
+    candidates = [item for item in candidates if 0 < int(item["n_vis"]) <= point_budget]
+    if point_budget <= 0 or not candidates:
+        return []
+
+    dp = {0: (0, 0, ())}  # used_points -> (bytes, block_count, selected_ids)
+    for item in candidates:
+        weight = int(item["n_vis"])
+        sid = int(item["id"])
+        n_bytes = int(item["bytes"])
+        for used, state in list(dp.items()):
+            new_used = used + weight
+            if new_used > point_budget:
+                continue
+            new_state = (state[0] + n_bytes, state[1] + 1, state[2] + (sid,))
+            old_state = dp.get(new_used)
+            if old_state is None or new_state[:2] > old_state[:2]:
+                dp[new_used] = new_state
+
+    best_used = 0
+    best_state = dp[0]
+    for used, state in dp.items():
+        if (used, state[0], state[1]) > (best_used, best_state[0], best_state[1]):
+            best_used = used
+            best_state = state
+    return list(best_state[2])
+
+
 def plan_gpu_packed_cache(submodel_list, valid_ids, strategy):
     strategy = strategy or "none"
     selected_ids = []
@@ -198,35 +228,70 @@ def plan_gpu_packed_cache(submodel_list, valid_ids, strategy):
     budget_bytes = 0
     total_n_vis = 0
     total_bytes = 0
+    candidate_count = 0
+    candidate_n_vis = 0
+    candidate_bytes = 0
+    budget_source = "none"
+    selection_policy = "none"
 
     if valid_ids and strategy != "none":
         largest_id = valid_ids[0]
-        budget_n_vis = int(submodel_list[largest_id].visible_indices.shape[0])
-        budget_bytes = estimate_gpu_packed_bytes(submodel_list[largest_id], budget_n_vis)
+        largest_n_vis = int(submodel_list[largest_id].visible_indices.shape[0])
+        largest_bytes = estimate_gpu_packed_bytes(submodel_list[largest_id], largest_n_vis)
         if strategy == "largest":
             selected_ids = [largest_id]
-            total_n_vis = budget_n_vis
-            total_bytes = budget_bytes
+            budget_n_vis = largest_n_vis
+            budget_bytes = largest_bytes
+            total_n_vis = largest_n_vis
+            total_bytes = largest_bytes
+            budget_source = "largest_visible"
+            selection_policy = "largest"
         elif strategy == "tail":
-            for sid in reversed(valid_ids[1:]):
+            budget_n_vis = int(config.SPLIT_SIZE)
+            budget_bytes = estimate_gpu_packed_bytes(submodel_list[largest_id], budget_n_vis)
+            budget_source = "split_size"
+            candidates = []
+            for sid in valid_ids[1:]:
                 n_vis = int(submodel_list[sid].visible_indices.shape[0])
                 n_bytes = estimate_gpu_packed_bytes(submodel_list[sid], n_vis)
-                if total_bytes + n_bytes > budget_bytes:
+                candidates.append({"id": int(sid), "n_vis": n_vis, "bytes": int(n_bytes)})
+                candidate_n_vis += int(n_vis)
+                candidate_bytes += int(n_bytes)
+            candidate_count = len(candidates)
+            selected_ids = select_best_fit_gpu_packed_cache(candidates, budget_n_vis)
+            tail_rank = {int(sid): rank for rank, sid in enumerate(reversed(valid_ids[1:]))}
+            selected_ids.sort(key=lambda sid: tail_rank.get(int(sid), 0))
+            selected_set = set(selected_ids)
+            for item in candidates:
+                if int(item["id"]) not in selected_set:
                     continue
-                selected_ids.append(sid)
-                total_n_vis += n_vis
-                total_bytes += n_bytes
+                total_n_vis += int(item["n_vis"])
+                total_bytes += int(item["bytes"])
+            selection_policy = "tail_best_fit"
 
     selected_ids = [int(sid) for sid in selected_ids]
     return set(selected_ids), {
         "strategy": strategy,
+        "selection_policy": selection_policy,
+        "budget_source": budget_source,
         "ids": selected_ids,
         "budget_n_vis": int(budget_n_vis),
         "budget_bytes_est": int(budget_bytes),
         "budget_mb_est": round(budget_bytes / 1024**2, 3),
+        "candidate_count": int(candidate_count),
+        "candidate_n_vis": int(candidate_n_vis),
+        "candidate_bytes_est": int(candidate_bytes),
+        "candidate_mb_est": round(candidate_bytes / 1024**2, 3),
         "total_n_vis": int(total_n_vis),
         "bytes_est": int(total_bytes),
         "mb_est": round(total_bytes / 1024**2, 3),
+        "fill_basis": "points",
+        "fill_ratio_est": round(total_n_vis / budget_n_vis, 4) if budget_n_vis > 0 else 0.0,
+        "point_fill_ratio_est": round(total_n_vis / budget_n_vis, 4) if budget_n_vis > 0 else 0.0,
+        "byte_fill_ratio_est": round(total_bytes / budget_bytes, 4) if budget_bytes > 0 else 0.0,
+        "unused_n_vis_est": int(max(0, budget_n_vis - total_n_vis)),
+        "unused_bytes_est": int(max(0, budget_bytes - total_bytes)),
+        "unused_mb_est": round(max(0, budget_bytes - total_bytes) / 1024**2, 3),
     }
 
 
@@ -470,6 +535,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 getattr(opt, "gpu_packed_cache_strategy", "tail"),
             )
             profiler.set("gpu_packed_cache", gpu_packed_cache_info)
+            gpu_packed_cache_n_vis_actual = 0
+            gpu_packed_cache_bytes_actual = 0
 
             # 流水线: 提前 gather 下一个 block，与当前 block 的 h2d+render 重叠
             # 每个 submodel 有自己的 _packed_staging，天然双缓冲
@@ -492,6 +559,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                         submodel.kick_h2d_and_activate(requires_grad=False, cache_gpu_packed=cache_gpu_packed)
                 if cache_gpu_packed:
                     cache_bytes = submodel.cached_gpu_packed_bytes()
+                    gpu_packed_cache_n_vis_actual += int(submodel.visible_indices.shape[0])
+                    gpu_packed_cache_bytes_actual += int(cache_bytes)
                     profiler.add("gpu_packed_cache_bytes_actual", cache_bytes)
                     profiler.block("nograd", submodel_id, gpu_packed_cache_bytes=cache_bytes)
 
@@ -546,6 +615,27 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 clear_gpu_packed_caches(submodel_list, dropped_cache_ids)
                 profiler.set("gpu_packed_cache_visible_ids", [int(sid) for sid in visible_cache_ids])
                 profiler.set("gpu_packed_cache_dropped_ids", [int(sid) for sid in dropped_cache_ids])
+                budget_bytes = int(gpu_packed_cache_info.get("budget_bytes_est", 0))
+                budget_n_vis = int(gpu_packed_cache_info.get("budget_n_vis", 0))
+                visible_cache_n_vis = sum(
+                    int(submodel_list[sid].visible_indices.shape[0])
+                    for sid in visible_cache_ids
+                )
+                visible_cache_bytes = sum(
+                    estimate_gpu_packed_bytes(
+                        submodel_list[sid],
+                        int(submodel_list[sid].visible_indices.shape[0]),
+                    )
+                    for sid in visible_cache_ids
+                )
+                profiler.set("gpu_packed_cache_fill_actual", round(gpu_packed_cache_n_vis_actual / budget_n_vis, 4) if budget_n_vis > 0 else 0.0)
+                profiler.set("gpu_packed_cache_point_fill_actual", round(gpu_packed_cache_n_vis_actual / budget_n_vis, 4) if budget_n_vis > 0 else 0.0)
+                profiler.set("gpu_packed_cache_byte_fill_actual", round(gpu_packed_cache_bytes_actual / budget_bytes, 4) if budget_bytes > 0 else 0.0)
+                profiler.set("gpu_packed_cache_visible_n_vis", int(visible_cache_n_vis))
+                profiler.set("gpu_packed_cache_visible_bytes_est", int(visible_cache_bytes))
+                profiler.set("gpu_packed_cache_visible_fill_est", round(visible_cache_n_vis / budget_n_vis, 4) if budget_n_vis > 0 else 0.0)
+                profiler.set("gpu_packed_cache_visible_point_fill_est", round(visible_cache_n_vis / budget_n_vis, 4) if budget_n_vis > 0 else 0.0)
+                profiler.set("gpu_packed_cache_visible_byte_fill_est", round(visible_cache_bytes / budget_bytes, 4) if budget_bytes > 0 else 0.0)
             profiler.set("visible_submodel_ids", [int(x) for x in visible_submodel_id_list])
             profiler.set("visible_pts", int(visible_pts))
 
@@ -1016,7 +1106,7 @@ if __name__ == "__main__":
     parser.add_argument('--legacy_per_block_loss', action='store_true', default=False,
                         help='Use the older per-block composed-image loss/backward path instead of one image-loss gradient per iteration.')
     parser.add_argument('--gpu_packed_cache_strategy', type=str, default="tail", choices=["none", "largest", "tail"],
-                        help='Reuse no-grad GPU packed buffers in grad pass: none, largest block, or tail blocks whose visible-point sum fits the largest block.')
+                        help='Reuse no-grad GPU packed buffers in grad pass: none, largest block, or best-fit tail blocks within the configured split-size visible-point budget.')
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
