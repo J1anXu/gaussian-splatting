@@ -505,7 +505,15 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 with tracer.gpu_span("render_nograd", block_id=submodel_id):
                     with profiler.span("nograd_render_dispatch"):
-                        render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                        render_pkg = render(
+                            viewpoint_cam,
+                            submodel,
+                            pipe,
+                            bg,
+                            use_trained_exp=dataset.train_test_exp,
+                            separate_sh=SPARSE_ADAM_AVAILABLE,
+                            retain_viewspace_grad=False,
+                        )
 
                 with profiler.span("nograd_deactivate"):
                     submodel.deactivate_subset()
@@ -626,13 +634,18 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                     profiler.add("gpu_packed_cache_grad_bytes", submodel.cached_gpu_packed_bytes())
                     with tracer.gpu_span("gpu_packed_cache_grad_activate", block_id=submodel_id, n_vis=n_vis_grad):
                         with profiler.span("grad_gpu_cache_activate"):
-                            submodel.kick_h2d_and_activate(requires_grad=True, use_cached_gpu_packed=True)
+                            submodel.kick_h2d_and_activate(
+                                requires_grad=True,
+                                use_cached_gpu_packed=True,
+                            )
                 else:
                     if submodel_id in gpu_packed_cache_ids:
                         profiler.add("gpu_packed_cache_grad_misses", 1)
                     with tracer.transfer_span("h2d_grad", block_id=submodel_id):
                         with profiler.span("grad_h2d_activate"):
-                            submodel.kick_h2d_and_activate(requires_grad=True)
+                            submodel.kick_h2d_and_activate(
+                                requires_grad=True,
+                            )
 
                 # GPU 正在做 H2D，CPU 趁机跑上一个 block 的 densify_stats
                 with profiler.span("run_deferred_densify"):
@@ -640,7 +653,20 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 with tracer.gpu_span("render_grad", block_id=submodel_id):
                     with profiler.span("grad_render_dispatch"):
-                        render_pkg = render(viewpoint_cam, submodel, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                        retain_viewspace_grad = (
+                            not getattr(opt, "disable_densify", False)
+                            and iteration < opt.densify_until_iter
+                        )
+                        profiler.block("grad", submodel_id, retain_viewspace_grad=retain_viewspace_grad)
+                        render_pkg = render(
+                            viewpoint_cam,
+                            submodel,
+                            pipe,
+                            bg,
+                            use_trained_exp=dataset.train_test_exp,
+                            separate_sh=SPARSE_ADAM_AVAILABLE,
+                            retain_viewspace_grad=retain_viewspace_grad,
+                        )
 
                 # pixel level
                 sub_img = render_pkg["render"]
@@ -991,7 +1017,6 @@ if __name__ == "__main__":
                         help='Use the older per-block composed-image loss/backward path instead of one image-loss gradient per iteration.')
     parser.add_argument('--gpu_packed_cache_strategy', type=str, default="tail", choices=["none", "largest", "tail"],
                         help='Reuse no-grad GPU packed buffers in grad pass: none, largest block, or tail blocks whose visible-point sum fits the largest block.')
-
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     

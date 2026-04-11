@@ -30,6 +30,8 @@ LOG_ROOT=debug
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
+LOCAL_RASTERIZER_PATH="${LOCAL_RASTERIZER_PATH:-$REPO_DIR/submodules/diff-gaussian-rasterization}"
+export PYTHONPATH="$LOCAL_RASTERIZER_PATH${PYTHONPATH:+:$PYTHONPATH}"
 
 DATASETS=(mip360 deepblending tandt)
 
@@ -124,6 +126,7 @@ for i in "${!ALL_TASKS[@]}"; do
 done
 
 echo "Launching $NUM_GPUS GPU queues  (branch: $GIT_BRANCH)"
+echo "Local rasterizer: $LOCAL_RASTERIZER_PATH"
 for gpu in "${GPUS[@]}"; do
   echo "  GPU $gpu: ${GPU_QUEUES[$gpu]}"
 done

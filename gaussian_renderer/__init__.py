@@ -16,19 +16,32 @@ import diff_gaussian_rasterization_wenqi_tam._C as _merge_C
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False):
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor,
+           scaling_modifier = 1.0, separate_sh = False, override_color = None,
+           use_trained_exp=False, retain_viewspace_grad=None):
     """
     Render the scene. 
     
     Background tensor (bg_color) must be on GPU!
     """
  
-    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
-    try:
-        screenspace_points.retain_grad()
-    except:
-        pass
+    means3D = pc.get_xyz
+    if retain_viewspace_grad is None:
+        retain_viewspace_grad = torch.is_grad_enabled()
+
+    # Only densification needs the retained 2D/screen-space gradient.
+    screenspace_points = torch.zeros_like(
+        means3D,
+        dtype=means3D.dtype,
+        requires_grad=retain_viewspace_grad,
+        device="cuda",
+    )
+    if retain_viewspace_grad:
+        screenspace_points = screenspace_points + 0
+        try:
+            screenspace_points.retain_grad()
+        except:
+            pass
 
     # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
@@ -52,7 +65,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-    means3D = pc.get_xyz
     means2D = screenspace_points
     opacity = pc.get_opacity
     

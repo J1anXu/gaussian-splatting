@@ -75,6 +75,19 @@ parse_train_tail() {
     _duration="$diff"
 }
 
+parse_train_peak() {
+    # Find the maximum peak_rsv (GPU reserved memory in GB) across the whole log.
+    # Each iter logs 'peak_rsv': X.XX from torch.cuda.max_memory_reserved().
+    # Sets: _peak_mem
+    local train_log="$1"
+    _peak_mem=""
+    [ ! -f "$train_log" ] && return
+    local m
+    m=$(grep -oP "'peak_rsv':\s*\K[\d.]+" "$train_log" 2>/dev/null \
+        | awk 'BEGIN{m=0} {if($1+0>m) m=$1+0} END{if(m>0) printf "%.2fGB", m}')
+    [ -n "$m" ] && _peak_mem="$m"
+}
+
 print_branch() {
     local branch_dir="$1"
     local branch_name
@@ -84,12 +97,12 @@ print_branch() {
     commit_id=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")
     hostname_str=$(hostname)
 
-    local sep="-----------------------------------------------------------------------"
+    local sep="--------------------------------------------------------------------------------"
     printf "\n Server: %s\n" "$hostname_str"
     printf " Branch: %s\n" "$branch_name"
     printf " Commit: %s\n" "$commit_id"
     echo "$sep"
-    printf "%-12s %8s %8s %8s %8s %12s\n" "Scene" "PSNR" "SSIM" "LPIPS" "Pts" "Time"
+    printf "%-12s %8s %8s %8s %8s %10s %12s\n" "Scene" "PSNR" "SSIM" "LPIPS" "Pts" "PeakMem" "Time"
     echo "$sep"
 
     local sum_psnr=0 sum_ssim=0 sum_lpips=0 sum_time=0 count=0
@@ -111,10 +124,12 @@ print_branch() {
             : "${psnr:=N/A}" "${ssim:=N/A}" "${lpips:=N/A}"
         fi
 
-        local pts="N/A"
+        local pts="N/A" peak_mem="N/A"
         if [ -n "$train_log" ]; then
             parse_train_tail "$train_log"
             [ -n "$_pts" ] && pts="$_pts"
+            parse_train_peak "$train_log"
+            [ -n "$_peak_mem" ] && peak_mem="$_peak_mem"
         fi
 
         local dur="$_duration"
@@ -128,9 +143,9 @@ print_branch() {
             sum_ssim=$(awk "BEGIN{print $sum_ssim + $ssim}")
             sum_lpips=$(awk "BEGIN{print $sum_lpips + $lpips}")
             count=$((count + 1))
-            printf "%-12s %8.4f %8.4f %8.4f %8s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$time_s"
+            printf "%-12s %8.4f %8.4f %8.4f %8s %10s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$peak_mem" "$time_s"
         else
-            printf "%-12s %8s %8s %8s %8s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$time_s"
+            printf "%-12s %8s %8s %8s %8s %10s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$peak_mem" "$time_s"
         fi
     done
 

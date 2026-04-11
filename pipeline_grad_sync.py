@@ -55,6 +55,35 @@ class PipelinedGradSync:
             return
         self._allocate_pinned_buffers(submodel)
 
+    def _grad_tensors_flat(self, submodel: GaussianModel, n_vis: int):
+        gpu_attrs = [
+            submodel._xyz_gpu,
+            submodel._features_dc_gpu,
+            submodel._features_rest_gpu,
+            submodel._scaling_gpu,
+            submodel._rotation_gpu,
+            submodel._opacity_gpu,
+        ]
+        grads_flat = []
+        for name, gpu_p in zip(ATTR_NAMES, gpu_attrs):
+            grad = gpu_p.grad
+            if grad is None:
+                raise RuntimeError(f"missing grad for {name} in block grad D2H")
+            grads_flat.append((name, grad.reshape(n_vis, -1)))
+        return grads_flat
+
+    def _copy_grad_d2h(self, submodel: GaussianModel, submodel_id: int, n_vis: int):
+        """Pack grads on GPU, then issue one contiguous D2H copy."""
+        tm = self.tracer
+        total_cols = int(getattr(submodel, "_pack_D", submodel._packed_staging.shape[1]))
+        total_bytes = int(n_vis * total_cols * 4)
+        grads_flat = [grad for _, grad in self._grad_tensors_flat(submodel, n_vis)]
+        with tm.gpu_span("grad_pack_cat", block_id=submodel_id, n_vis=n_vis, bytes=total_bytes):
+            gpu_grad_packed = torch.cat(grads_flat, dim=1)  # [n_vis, D], contiguous
+        staging = submodel._packed_staging[:n_vis]
+        with tm.transfer_span("grad_d2h_cat_copy", block_id=submodel_id, n_vis=n_vis, bytes=total_bytes):
+            staging.copy_(gpu_grad_packed, non_blocking=True)
+
     def kick_async_d2h(self, submodel: GaussianModel, submodel_id: int,
                         render_pkg: dict, sub_viewspace_point_tensor,
                         needs_densify_stats: bool):
@@ -66,22 +95,11 @@ class PipelinedGradSync:
         Returns captured state tuple for deferred work.
         """
         tm = self.tracer
-        with tm.transfer_span("d2h_kick", block_id=submodel_id, densify_stats=needs_densify_stats):
+        with tm.transfer_span("d2h_kick", block_id=submodel_id,
+                              densify_stats=needs_densify_stats):
             cur_idx = submodel.visible_indices.to("cpu")
             n_vis = cur_idx.shape[0]
-
-            # Pack 6 grad tensors into [n_vis, D] on GPU, then single D2H
-            gpu_attrs = [submodel._xyz_gpu, submodel._features_dc_gpu, submodel._features_rest_gpu,
-                            submodel._scaling_gpu, submodel._rotation_gpu, submodel._opacity_gpu]
-            grads_flat = []
-            for gpu_p in gpu_attrs:
-                g = gpu_p.grad
-                grads_flat.append(g.reshape(n_vis, -1))
-            gpu_grad_packed = torch.cat(grads_flat, dim=1)  # [n_vis, D], contiguous
-
-            # Single contiguous D2H into pinned staging (H2D already consumed it)
-            staging = submodel._packed_staging[:n_vis]
-            staging.copy_(gpu_grad_packed, non_blocking=True)
+            self._copy_grad_d2h(submodel, submodel_id, n_vis)
 
             pin_sub_vf = None
             pin_sub_radii = None

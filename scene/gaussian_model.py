@@ -1131,7 +1131,8 @@ class GaussianModel:
         self._cached_gpu_packed_n = 0
         self._cached_gpu_packed_bytes = 0
 
-    def kick_h2d_and_activate(self, requires_grad=True, cache_gpu_packed=False, use_cached_gpu_packed=False):
+    def kick_h2d_and_activate(self, requires_grad=True, cache_gpu_packed=False,
+                              use_cached_gpu_packed=False):
         """H2D transfer + GPU unpack. Assumes pre_gather() was already called."""
         n = self._db_n
         if use_cached_gpu_packed:
