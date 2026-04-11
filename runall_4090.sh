@@ -15,8 +15,9 @@ if [[ -z "$DAEMONIZED" ]]; then
 fi
 # ======================
 
-set -e
 set -o pipefail
+# Note: removed `set -e` so a single scene failure doesn't abort the whole pipeline.
+# Each scene's errors are captured in its train.log; check those if results are missing.
 
 ########################################
 # 配置区
