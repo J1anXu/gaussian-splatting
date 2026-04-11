@@ -63,7 +63,8 @@ log() {
 
 run_and_log() {
   log "+ $*" | tee -a "$RUN_LOG"
-  "$@" 2>&1 | tr -d '\r' | tee -a "$RUN_LOG"
+  # Keep carriage returns so tqdm can refresh a single console line.
+  "$@" 2>&1 | tee -a "$RUN_LOG"
 }
 
 {
