@@ -183,6 +183,50 @@ def attach_runtime_options(opt, args):
     return opt
 
 
+def maybe_empty_cuda_cache(opt, iteration=None, profiler=None, reason="",
+                           force=False, respect_interval=True, key_prefix="cuda"):
+    """Release PyTorch CUDA allocator cache when it is mostly unused.
+
+    `memory_reserved()` is what tools like nvidia-smi see.  A skipped iteration
+    can bypass the normal end-of-iteration cleanup, so callers can force this on
+    early-exit paths after dropping tensor references.
+    """
+    if not torch.cuda.is_available():
+        return False
+
+    alloc_bytes = torch.cuda.memory_allocated()
+    reserved_bytes = torch.cuda.memory_reserved()
+    cache_slack_gb = (reserved_bytes - alloc_bytes) / 1024**3
+    cache_threshold_gb = getattr(opt, "gpu_cache_threshold_gb", config.GPU_CACHE_THRESHOLD_GB)
+    cache_interval = max(1, getattr(opt, "cuda_empty_cache_interval", config.CUDA_EMPTY_CACHE_INTERVAL))
+    interval_ok = (
+        not respect_interval
+        or iteration is None
+        or iteration % cache_interval == 0
+    )
+    should_empty_cache = force or (
+        cache_threshold_gb > 0
+        and cache_slack_gb > cache_threshold_gb
+        and interval_ok
+    )
+
+    if profiler is not None:
+        profiler.set(f"{key_prefix}_cache_slack_gb", round(float(cache_slack_gb), 4))
+        profiler.set(f"{key_prefix}_cache_alloc_gb_before", round(float(alloc_bytes / 1024**3), 4))
+        profiler.set(f"{key_prefix}_cache_reserved_gb_before", round(float(reserved_bytes / 1024**3), 4))
+        profiler.set(f"{key_prefix}_empty_cache", False)
+        if reason:
+            profiler.set(f"{key_prefix}_empty_cache_reason", reason)
+
+    if should_empty_cache:
+        torch.cuda.empty_cache()
+        if profiler is not None:
+            profiler.set(f"{key_prefix}_empty_cache", True)
+            profiler.set(f"{key_prefix}_cache_reserved_gb_after", round(float(torch.cuda.memory_reserved() / 1024**3), 4))
+
+    return should_empty_cache
+
+
 def estimate_gpu_packed_bytes(submodel, n_vis):
     pack_d = int(getattr(submodel, "_pack_D", 0) or 0)
     alloc_step = int(getattr(submodel, "ALLOC_STEP", 4096) or 4096)
@@ -420,6 +464,15 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
     for iteration in range(first_iter, opt.iterations + 1):
         profiler.begin(iteration)
+        with profiler.span("pre_iter_cuda_cache_cleanup"):
+            maybe_empty_cuda_cache(
+                opt,
+                iteration,
+                profiler,
+                reason="pre_iter_before_reset_peak",
+                respect_interval=False,
+                key_prefix="pre_iter_cuda",
+            )
         with profiler.span("reset_peak_memory_stats"):
             torch.cuda.reset_peak_memory_stats()
 
@@ -643,6 +696,20 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             print(f"Iteration {iteration}: No visible blocks after filtering, skipping.")
             profiler.set("skip_reason", "no_visible_blocks_after_filter")
             clear_gpu_packed_caches(submodel_list, gpu_packed_cache_ids)
+            all_rendered, all_depth, all_alpha, all_submodel_ids = None, None, None, None
+            rendered_list, depth_list, alpha_list = None, None, None
+            image, alphaLeft, depth = None, None, None
+            render_pkg = None
+            with profiler.span("skip_cuda_cache_cleanup"):
+                maybe_empty_cuda_cache(
+                    opt,
+                    iteration,
+                    profiler,
+                    reason="no_visible_blocks_after_filter",
+                    force=True,
+                    respect_interval=False,
+                    key_prefix="skip_cuda",
+                )
             profiler.end()
             continue
         # execute merge
@@ -842,23 +909,49 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         if processed_grad_blocks == 0 or loss is None:
             LOGGER.warning(f"[iter {iteration}] no gradient block was processed; skipping optimizer/log step")
             profiler.set("skip_reason", "no_gradient_block_processed")
-            profiler.end()
             del C_sorted, prefix_T, block_rank, colors_bg, merge_res
             del rendered_list, depth_list, alpha_list
+            all_rendered, all_depth, all_alpha, all_submodel_ids = None, None, None, None
             del gt_image
             final_rgb_grad = None
             image = None
             alphaLeft = None
             depth = None
+            rank_map = None
+            sub_img = None
+            sub_viewspace_point_tensor = None
+            render_pkg = None
+            backward_target = None
+            backward_grad = None
+            prefix_T_k = None
+            with profiler.span("skip_cuda_cache_cleanup"):
+                maybe_empty_cuda_cache(
+                    opt,
+                    iteration,
+                    profiler,
+                    reason="no_gradient_block_processed",
+                    force=True,
+                    respect_interval=False,
+                    key_prefix="skip_cuda",
+                )
+            profiler.end()
             continue
 
         del C_sorted, prefix_T, block_rank, colors_bg, merge_res
         del rendered_list, depth_list, alpha_list
+        all_rendered, all_depth, all_alpha, all_submodel_ids = None, None, None, None
         del gt_image
         final_rgb_grad = None
         image = None
         alphaLeft = None
         depth = None
+        rank_map = None
+        sub_img = None
+        sub_viewspace_point_tensor = None
+        render_pkg = None
+        backward_target = None
+        backward_grad = None
+        prefix_T_k = None
 
         # Queue non-visible blocks for densify/reset (visible blocks already queued in adam)
         with profiler.span("queue_densify_nonvisible"):
@@ -897,21 +990,14 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
         # reserved 超过 allocated 太多时才清缓存，避免频繁清导致性能下降
         with profiler.span("cuda_cache_check"):
-            alloc_bytes = torch.cuda.memory_allocated()
-            reserved_bytes = torch.cuda.memory_reserved()
-            cache_slack_gb = (reserved_bytes - alloc_bytes) / 1024**3
-            profiler.set("cuda_cache_slack_gb", round(float(cache_slack_gb), 4))
-            profiler.set("cuda_empty_cache", False)
-            cache_threshold_gb = getattr(opt, "gpu_cache_threshold_gb", config.GPU_CACHE_THRESHOLD_GB)
-            cache_interval = max(1, getattr(opt, "cuda_empty_cache_interval", config.CUDA_EMPTY_CACHE_INTERVAL))
-            should_empty_cache = (
-                cache_threshold_gb > 0
-                and cache_slack_gb > cache_threshold_gb
-                and iteration % cache_interval == 0
+            maybe_empty_cuda_cache(
+                opt,
+                iteration,
+                profiler,
+                reason="end_of_iteration",
+                respect_interval=True,
+                key_prefix="cuda",
             )
-            if should_empty_cache:
-                torch.cuda.empty_cache()
-                profiler.set("cuda_empty_cache", True)
 
         with torch.no_grad():
             # Progress bar
