@@ -320,7 +320,8 @@ def merge_opt( N_total, render_list, depth_list, alphaLeft_list, vis_filter_list
 
 def merge_opt_kid(render_list, depth_list, alphaLeft_list, eps=1e-10, chunk_size=32):
     import config
-    if config.MERGE_FAST:
+    K = len(render_list)
+    if config.MERGE_FAST and K <= getattr(config, "MERGE_FAST_MAX_K", 16):
         return _merge_opt_kid_fast(render_list, depth_list, alphaLeft_list, eps)
     return _merge_opt_kid_chunked(render_list, depth_list, alphaLeft_list, eps, chunk_size)
 

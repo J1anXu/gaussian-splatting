@@ -33,7 +33,8 @@ GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo 
 LOCAL_RASTERIZER_PATH="${LOCAL_RASTERIZER_PATH:-$REPO_DIR/submodules/diff-gaussian-rasterization}"
 export PYTHONPATH="$LOCAL_RASTERIZER_PATH${PYTHONPATH:+:$PYTHONPATH}"
 
-DATASETS=(mip360 deepblending tandt)
+#DATASETS=(mip360 deepblending tandt)
+DATASETS=(deepblending)
 
 ########################################
 # 每个数据集的场景列表

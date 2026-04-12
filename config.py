@@ -36,7 +36,8 @@ GPU_CACHE_HARD_LIMIT_GB = 1.35  # reserved 过高时无视 interval 直接清理
 GPU_CACHE_STAGE_ENTRY_LIMIT_GB = 0.0  # 进入大 render 阶段前的 reserved 水位；0 表示关闭预清理
 CUDA_EMPTY_CACHE_INTERVAL = 16  # 每 N 轮允许清一次 CUDA allocator cache；skip 路径仍会强制清理
 
-MERGE_FAST = True  # True: 全图merge(快,多用~90MB), False: 分块merge(省显存,慢)
+MERGE_FAST = False  # FastMerge 总开关；False 时全部回退到 PyTorch chunked argsort merge
+MERGE_FAST_MAX_K = 16  # fused CUDA FastMerge 支持的最大 block 数；超过后回退到 PyTorch argsort
 
 HALF = False        # 半精度梯度拷贝加速
 TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
