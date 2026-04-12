@@ -78,6 +78,9 @@ class IterationProfiler:
         self._t0 = None
         self.spans = {}
         self.data = {}
+        self._last_peak_alloc_gb = 0.0
+        self._last_peak_reserved_gb = 0.0
+        self._mem_spike_threshold_gb = 0.02
 
     def begin(self, iteration):
         self.iteration = iteration
@@ -87,6 +90,8 @@ class IterationProfiler:
         self._t0 = time.perf_counter()
         self.spans = {}
         self.data = {}
+        self._last_peak_alloc_gb = 0.0
+        self._last_peak_reserved_gb = 0.0
 
     def set(self, key, value):
         if self.active:
@@ -123,6 +128,51 @@ class IterationProfiler:
                 torch.cuda.synchronize()
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             self.spans[name] = self.spans.get(name, 0.0) + elapsed_ms
+            self._record_mem_peak(name)
+
+    def _record_mem_peak(self, span_name):
+        if not torch.cuda.is_available():
+            return
+        peak_alloc_gb = torch.cuda.max_memory_allocated() / 1024**3
+        peak_reserved_gb = torch.cuda.max_memory_reserved() / 1024**3
+        alloc_gb = torch.cuda.memory_allocated() / 1024**3
+        reserved_gb = torch.cuda.memory_reserved() / 1024**3
+
+        # This cleanup intentionally runs before reset_peak_memory_stats(), so
+        # the CUDA peak counters still describe the previous iteration.
+        if span_name == "pre_iter_cuda_cache_cleanup":
+            return
+
+        if span_name == "reset_peak_memory_stats":
+            self._last_peak_alloc_gb = peak_alloc_gb
+            self._last_peak_reserved_gb = peak_reserved_gb
+            return
+
+        # reset_peak_memory_stats can lower the counters inside an active
+        # profiling window; restart the local spike detector after that.
+        if peak_reserved_gb + 1e-6 < self._last_peak_reserved_gb:
+            self._last_peak_alloc_gb = peak_alloc_gb
+            self._last_peak_reserved_gb = peak_reserved_gb
+            return
+
+        d_peak_alloc = peak_alloc_gb - self._last_peak_alloc_gb
+        d_peak_reserved = peak_reserved_gb - self._last_peak_reserved_gb
+        if (
+            d_peak_alloc >= self._mem_spike_threshold_gb
+            or d_peak_reserved >= self._mem_spike_threshold_gb
+        ):
+            spikes = self.data.setdefault("mem_spikes", [])
+            spikes.append({
+                "span": span_name,
+                "d_peak_alloc_gb": round(float(max(0.0, d_peak_alloc)), 4),
+                "d_peak_reserved_gb": round(float(max(0.0, d_peak_reserved)), 4),
+                "peak_alloc_gb": round(float(peak_alloc_gb), 4),
+                "peak_reserved_gb": round(float(peak_reserved_gb), 4),
+                "alloc_gb": round(float(alloc_gb), 4),
+                "reserved_gb": round(float(reserved_gb), 4),
+            })
+            self._last_peak_alloc_gb = max(self._last_peak_alloc_gb, peak_alloc_gb)
+            self._last_peak_reserved_gb = max(self._last_peak_reserved_gb, peak_reserved_gb)
 
     def end(self):
         if not self.active:
@@ -165,26 +215,37 @@ def log_trace_summary(tracer: TraceManager, logger, top_n=30):
 
 
 def attach_runtime_options(opt, args):
-    opt.profile_log = args.profile_log
+    opt.test_diagnostics = args.test_diagnostics
+    opt.profile_log_requested = args.profile_log
+    opt.profile_log = args.profile_log and args.test_diagnostics
     opt.profile_from = args.profile_from
     opt.profile_until = args.profile_until
     opt.profile_every = args.profile_every
-    opt.profile_sync = args.profile_sync
+    opt.profile_sync = args.profile_sync and opt.profile_log
     opt.trace_from = args.trace_from
     opt.trace_until = args.trace_until
     opt.bench_from = args.bench_from
     opt.bench_until = args.bench_until
     opt.disable_densify = args.disable_densify
     opt.gpu_cache_threshold_gb = args.gpu_cache_threshold_gb
+    opt.gpu_cache_hard_limit_gb = args.gpu_cache_hard_limit_gb
+    opt.gpu_cache_stage_entry_limit_gb = args.gpu_cache_stage_entry_limit_gb
     opt.cuda_empty_cache_interval = args.cuda_empty_cache_interval
     opt.split_size_override = args.split_size_override
     opt.legacy_per_block_loss = args.legacy_per_block_loss
     opt.gpu_packed_cache_strategy = args.gpu_packed_cache_strategy
+    opt.gpu_packed_cache_point_budget = (
+        args.gpu_packed_cache_point_budget
+        if args.gpu_packed_cache_point_budget > 0
+        else config.GPU_PACKED_CACHE_POINT_BUDGET
+    )
     return opt
 
 
 def maybe_empty_cuda_cache(opt, iteration=None, profiler=None, reason="",
-                           force=False, respect_interval=True, key_prefix="cuda"):
+                           force=False, respect_interval=True, allow_periodic=True,
+                           hard_limit_override_gb=None,
+                           key_prefix="cuda"):
     """Release PyTorch CUDA allocator cache when it is mostly unused.
 
     `memory_reserved()` is what tools like nvidia-smi see.  A skipped iteration
@@ -198,22 +259,36 @@ def maybe_empty_cuda_cache(opt, iteration=None, profiler=None, reason="",
     reserved_bytes = torch.cuda.memory_reserved()
     cache_slack_gb = (reserved_bytes - alloc_bytes) / 1024**3
     cache_threshold_gb = getattr(opt, "gpu_cache_threshold_gb", config.GPU_CACHE_THRESHOLD_GB)
+    hard_limit_gb = (
+        hard_limit_override_gb
+        if hard_limit_override_gb is not None
+        else getattr(opt, "gpu_cache_hard_limit_gb", config.GPU_CACHE_HARD_LIMIT_GB)
+    )
     cache_interval = max(1, getattr(opt, "cuda_empty_cache_interval", config.CUDA_EMPTY_CACHE_INTERVAL))
     interval_ok = (
         not respect_interval
         or iteration is None
         or iteration % cache_interval == 0
     )
+    hard_limit_exceeded = hard_limit_gb > 0 and reserved_bytes / 1024**3 > hard_limit_gb
     should_empty_cache = force or (
         cache_threshold_gb > 0
         and cache_slack_gb > cache_threshold_gb
-        and interval_ok
+        and (
+            hard_limit_exceeded
+            or (allow_periodic and interval_ok)
+        )
     )
 
     if profiler is not None:
         profiler.set(f"{key_prefix}_cache_slack_gb", round(float(cache_slack_gb), 4))
         profiler.set(f"{key_prefix}_cache_alloc_gb_before", round(float(alloc_bytes / 1024**3), 4))
         profiler.set(f"{key_prefix}_cache_reserved_gb_before", round(float(reserved_bytes / 1024**3), 4))
+        profiler.set(f"{key_prefix}_cache_hard_limit_gb", round(float(hard_limit_gb), 4))
+        profiler.set(f"{key_prefix}_cache_hard_limit_exceeded", bool(hard_limit_exceeded))
+        profiler.set(f"{key_prefix}_cache_interval", int(cache_interval))
+        profiler.set(f"{key_prefix}_cache_interval_ok", bool(interval_ok))
+        profiler.set(f"{key_prefix}_cache_periodic_allowed", bool(allow_periodic))
         profiler.set(f"{key_prefix}_empty_cache", False)
         if reason:
             profiler.set(f"{key_prefix}_empty_cache_reason", reason)
@@ -265,8 +340,9 @@ def select_best_fit_gpu_packed_cache(candidates, point_budget):
     return list(best_state[2])
 
 
-def plan_gpu_packed_cache(submodel_list, valid_ids, strategy):
+def plan_gpu_packed_cache(submodel_list, valid_ids, strategy, point_budget):
     strategy = strategy or "none"
+    point_budget = int(point_budget or 0)
     selected_ids = []
     budget_n_vis = 0
     budget_bytes = 0
@@ -291,9 +367,9 @@ def plan_gpu_packed_cache(submodel_list, valid_ids, strategy):
             budget_source = "largest_visible"
             selection_policy = "largest"
         elif strategy == "tail":
-            budget_n_vis = int(config.SPLIT_SIZE)
+            budget_n_vis = point_budget
             budget_bytes = estimate_gpu_packed_bytes(submodel_list[largest_id], budget_n_vis)
-            budget_source = "split_size"
+            budget_source = "point_budget"
             candidates = []
             for sid in valid_ids[1:]:
                 n_vis = int(submodel_list[sid].visible_indices.shape[0])
@@ -361,6 +437,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     log_kv(LOGGER, "training_runtime_options", {
         "first_iter": first_iter,
         "iterations": opt.iterations,
+        "test_diagnostics": getattr(opt, "test_diagnostics", False),
+        "profile_log_requested": getattr(opt, "profile_log_requested", False),
         "profile_log": getattr(opt, "profile_log", False),
         "profile_from": getattr(opt, "profile_from", None),
         "profile_until": getattr(opt, "profile_until", None),
@@ -368,6 +446,9 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         "profile_sync": getattr(opt, "profile_sync", False),
         "trace_from": getattr(opt, "trace_from", None),
         "trace_until": getattr(opt, "trace_until", None),
+        "trace_enabled": bool(getattr(opt, "test_diagnostics", False)
+                              and getattr(opt, "trace_from", 0) > 0
+                              and getattr(opt, "trace_until", 0) >= getattr(opt, "trace_from", 0)),
         "bench_from": getattr(opt, "bench_from", None),
         "bench_until": getattr(opt, "bench_until", None),
         "disable_densify": getattr(opt, "disable_densify", False),
@@ -378,13 +459,18 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         "frustum_culling": config.FRUSTUM_CULLING_ENABLED,
         "frustum_cache": config.FRUSTUM_CULLING_CACHE_ENABLED,
         "gpu_cache_threshold_gb": getattr(opt, "gpu_cache_threshold_gb", config.GPU_CACHE_THRESHOLD_GB),
+        "gpu_cache_hard_limit_gb": getattr(opt, "gpu_cache_hard_limit_gb", config.GPU_CACHE_HARD_LIMIT_GB),
+        "gpu_cache_stage_entry_limit_gb": getattr(opt, "gpu_cache_stage_entry_limit_gb", config.GPU_CACHE_STAGE_ENTRY_LIMIT_GB),
         "cuda_empty_cache_interval": getattr(opt, "cuda_empty_cache_interval", config.CUDA_EMPTY_CACHE_INTERVAL),
         "legacy_per_block_loss": getattr(opt, "legacy_per_block_loss", False),
         "gpu_packed_cache_strategy": getattr(opt, "gpu_packed_cache_strategy", "tail"),
+        "gpu_packed_cache_point_budget": getattr(opt, "gpu_packed_cache_point_budget", config.GPU_PACKED_CACHE_POINT_BUDGET),
         "trained_ply_path": res.get("trained_ply_path"),
     })
     if getattr(opt, "disable_densify", False):
         LOGGER.info("[runtime] densify/prune/opacity reset disabled; dynamic block splitting remains enabled")
+    if getattr(opt, "profile_log_requested", False) and not getattr(opt, "profile_log", False):
+        LOGGER.info("[runtime] --profile_log ignored because --test_diagnostics was not set")
 
     initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, initial_gaussians, on_cpu=True)
@@ -438,7 +524,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     # Timeline tracing is windowed to avoid CUDA event overhead across full training.
     TRACE_START = getattr(opt, "trace_from", 681)
     TRACE_END = getattr(opt, "trace_until", 750)
-    TRACE_ENABLED = TRACE_START > 0 and TRACE_END >= TRACE_START
+    TRACE_ENABLED = getattr(opt, "test_diagnostics", False) and TRACE_START > 0 and TRACE_END >= TRACE_START
     tracer = TraceManager(enabled=False)
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer,
                                    frustum_cache=frustum_cache)
@@ -470,7 +556,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 iteration,
                 profiler,
                 reason="pre_iter_before_reset_peak",
-                respect_interval=False,
+                respect_interval=True,
+                allow_periodic=False,
                 key_prefix="pre_iter_cuda",
             )
         with profiler.span("reset_peak_memory_stats"):
@@ -586,10 +673,31 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 submodel_list,
                 valid_ids,
                 getattr(opt, "gpu_packed_cache_strategy", "tail"),
+                getattr(opt, "gpu_packed_cache_point_budget", config.GPU_PACKED_CACHE_POINT_BUDGET),
             )
             profiler.set("gpu_packed_cache", gpu_packed_cache_info)
             gpu_packed_cache_n_vis_actual = 0
             gpu_packed_cache_bytes_actual = 0
+
+            stage_entry_limit_gb = getattr(
+                opt,
+                "gpu_cache_stage_entry_limit_gb",
+                config.GPU_CACHE_STAGE_ENTRY_LIMIT_GB,
+            )
+            if stage_entry_limit_gb > 0:
+                # Max-memory guard: render can request a large workspace on top
+                # of stale reserved cache, so clear slack before entering it.
+                with profiler.span("stage_entry_cuda_cache_cleanup"):
+                    maybe_empty_cuda_cache(
+                        opt,
+                        iteration,
+                        profiler,
+                        reason="before_nograd_render_pass",
+                        respect_interval=True,
+                        allow_periodic=False,
+                        hard_limit_override_gb=stage_entry_limit_gb,
+                        key_prefix="stage_entry_cuda",
+                    )
 
             # 流水线: 提前 gather 下一个 block，与当前 block 的 h2d+render 重叠
             # 每个 submodel 有自己的 _packed_staging，天然双缓冲
@@ -795,6 +903,18 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                                 requires_grad=True,
                                 use_cached_gpu_packed=True,
                             )
+                    # The grad activation clones the cached packed tensor into
+                    # trainable per-attribute tensors, so the packed source can
+                    # be released before render/backward request their workspace.
+                    released_bytes = submodel.cached_gpu_packed_bytes()
+                    submodel.clear_gpu_packed_cache()
+                    profiler.add("gpu_packed_cache_grad_released_after_activate_bytes", released_bytes)
+                    profiler.block(
+                        "grad",
+                        submodel_id,
+                        gpu_packed_cache_released_after_activate=True,
+                        gpu_packed_cache_released_bytes=int(released_bytes),
+                    )
                 else:
                     if submodel_id in gpu_packed_cache_ids:
                         profiler.add("gpu_packed_cache_grad_misses", 1)
@@ -1113,13 +1233,13 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         p(f"  总平均 mem:           {(sum(bench_alloc_list)+sum(bench_rsv_list))/(2*n):.2f} GB\n")
         p(f"{'='*50}\n")
 
-    # 导出最后两个 iter 的 timeline
-    os.makedirs("timeline", exist_ok=True)
-    trace_stamp = time.strftime("%Y%m%d_%H%M%S")
-    trace_path = f"timeline/trace_{BRANCH}_{SCENE_NAME}_{trace_stamp}.json"
-    tracer.export(trace_path)
-    log_kv(LOGGER, "timeline_export", {"path": trace_path, "stamp": trace_stamp})
-    log_trace_summary(tracer, LOGGER)
+    if getattr(opt, "test_diagnostics", False):
+        os.makedirs("timeline", exist_ok=True)
+        trace_stamp = time.strftime("%Y%m%d_%H%M%S")
+        trace_path = f"timeline/trace_{BRANCH}_{SCENE_NAME}_{trace_stamp}.json"
+        tracer.export(trace_path)
+        log_kv(LOGGER, "timeline_export", {"path": trace_path, "stamp": trace_stamp})
+        log_trace_summary(tracer, LOGGER)
         
     # if (iteration in checkpoint_iterations):
     #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
@@ -1172,7 +1292,9 @@ if __name__ == "__main__":
     parser.add_argument('--disable_densify', action='store_true', default=False,
                         help='Skip densify/prune/opacity reset while keeping dynamic block splitting.')
     parser.add_argument('--profile_log', action='store_true', default=False,
-                        help='Log detailed per-iteration timing/profile payloads.')
+                        help='Request detailed per-iteration timing/profile payloads; only active with --test_diagnostics.')
+    parser.add_argument('--test_diagnostics', action='store_true', default=False,
+                        help='Enable test/benchmark-only diagnostics. Normal training should not pass this.')
     parser.add_argument('--profile_from', type=int, default=1)
     parser.add_argument('--profile_until', type=int, default=0,
                         help='Last iteration for profile logs; 0 means no upper bound.')
@@ -1185,14 +1307,20 @@ if __name__ == "__main__":
     parser.add_argument('--bench_until', type=int, default=700)
     parser.add_argument('--gpu_cache_threshold_gb', type=float, default=config.GPU_CACHE_THRESHOLD_GB,
                         help='Call torch.cuda.empty_cache when reserved-allocated exceeds this many GB; default is mem-first.')
+    parser.add_argument('--gpu_cache_hard_limit_gb', type=float, default=config.GPU_CACHE_HARD_LIMIT_GB,
+                        help='Force empty_cache when reserved memory exceeds this GB limit; 0 disables the hard limit.')
+    parser.add_argument('--gpu_cache_stage_entry_limit_gb', type=float, default=config.GPU_CACHE_STAGE_ENTRY_LIMIT_GB,
+                        help='Force empty_cache before no-grad render when reserved exceeds this GB limit; 0 disables the stage-entry guard.')
     parser.add_argument('--cuda_empty_cache_interval', type=int, default=config.CUDA_EMPTY_CACHE_INTERVAL,
-                        help='Only allow empty_cache every N iterations; default 1 keeps peak/reserved tightly controlled.')
+                        help='Only allow periodic empty_cache every N iterations; hard-limit and force paths can still clean sooner.')
     parser.add_argument('--split_size_override', type=int, default=0,
                         help='Override config.SPLIT_SIZE after indoor/outdoor scene default is selected; 0 keeps the default.')
     parser.add_argument('--legacy_per_block_loss', action='store_true', default=False,
                         help='Use the older per-block composed-image loss/backward path instead of one image-loss gradient per iteration.')
     parser.add_argument('--gpu_packed_cache_strategy', type=str, default="tail", choices=["none", "largest", "tail"],
-                        help='Reuse no-grad GPU packed buffers in grad pass: none, largest block, or best-fit tail blocks within the configured split-size visible-point budget.')
+                        help='Reuse no-grad GPU packed buffers in grad pass: none, largest block, or best-fit tail blocks within the configured visible-point budget.')
+    parser.add_argument('--gpu_packed_cache_point_budget', type=int, default=0,
+                        help='Visible-point budget for tail GPU packed cache admission; 0 uses the scene default.')
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -1206,11 +1334,19 @@ if __name__ == "__main__":
     # Set SPLIT_SIZE based on indoor/outdoor scene
     if SCENE_NAME in config.INDOOR_SCENES:
         config.SPLIT_SIZE = config.SPLIT_SIZE_INDOOR
+        config.GPU_PACKED_CACHE_POINT_BUDGET = config.GPU_PACKED_CACHE_POINT_BUDGET_INDOOR
     elif SCENE_NAME in config.OUTDOOR_SCENES:
         config.SPLIT_SIZE = config.SPLIT_SIZE_OUTDOOR
+        config.GPU_PACKED_CACHE_POINT_BUDGET = config.GPU_PACKED_CACHE_POINT_BUDGET_OUTDOOR
     if args.split_size_override > 0:
         config.SPLIT_SIZE = args.split_size_override
-    print(f"Scene: {SCENE_NAME} ({'indoor' if SCENE_NAME in config.INDOOR_SCENES else 'outdoor'}), SPLIT_SIZE={config.SPLIT_SIZE}")
+    if args.gpu_packed_cache_point_budget > 0:
+        config.GPU_PACKED_CACHE_POINT_BUDGET = args.gpu_packed_cache_point_budget
+    print(
+        f"Scene: {SCENE_NAME} ({'indoor' if SCENE_NAME in config.INDOOR_SCENES else 'outdoor'}), "
+        f"SPLIT_SIZE={config.SPLIT_SIZE}, "
+        f"GPU_PACKED_CACHE_POINT_BUDGET={config.GPU_PACKED_CACHE_POINT_BUDGET}"
+    )
 
     if args.git_branch is not None:
         BRANCH = args.git_branch
