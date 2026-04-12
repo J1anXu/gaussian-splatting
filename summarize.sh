@@ -38,27 +38,37 @@ format_duration() {
 }
 
 parse_train_tail() {
-    # Parse train.log for duration and Pts
+    # Parse train.log for duration, Pts, and final block count
     # The log has very few lines but each line can be huge (progress bar),
     # so we use tail/head -c to grab small chunks and avoid processing huge lines.
-    # Sets: _duration _pts
+    # Sets: _duration _pts _blk
     local train_log="$1"
-    _duration="" _pts=""
+    _duration="" _pts="" _blk=""
     [ ! -f "$train_log" ] && return
 
-    # Last 2KB is enough to find final Pts and end timestamp
+    # Last 2KB is enough to find final Pts, blk, and end timestamp
     local tail_block
     tail_block=$(tail -c 2048 "$train_log")
     # First 512B is enough for the start timestamp
     local head_block
     head_block=$(head -c 512 "$train_log")
 
-    # Pts: find last occurrence of 'pts': '4.42M' or 'pts': 54275
-    _pts=$(echo "$tail_block" | grep -oP "'pts':\s*'\K[\d.]+M" | tail -1)
+    # Pts: search whole log (some formats put dict/progress-bar output far from tail).
+    # Try 'pts': '4.42M' (dict str), 'pts': 54275 (dict raw), or pts=4.42M (progress bar).
+    _pts=$(grep -oP "'pts':\s*'\K[\d.]+M" "$train_log" 2>/dev/null | tail -1)
     if [ -z "$_pts" ]; then
         local raw_pts
-        raw_pts=$(echo "$tail_block" | grep -oP "'pts':\s*\K\d+" | tail -1)
+        raw_pts=$(grep -oP "'pts':\s*\K\d+" "$train_log" 2>/dev/null | tail -1)
         [ -n "$raw_pts" ] && _pts=$(awk "BEGIN{printf \"%.2fM\", $raw_pts/1000000}")
+    fi
+    if [ -z "$_pts" ]; then
+        _pts=$(grep -oP "pts=\K[\d.]+M" "$train_log" 2>/dev/null | tail -1)
+    fi
+
+    # Block count: try dict 'blk': N or progress bar blk=N (whole-log scan)
+    _blk=$(grep -oP "'blk':\s*\K\d+" "$train_log" 2>/dev/null | tail -1)
+    if [ -z "$_blk" ]; then
+        _blk=$(grep -oP "blk=\K\d+" "$train_log" 2>/dev/null | tail -1)
     fi
 
     # Timestamps: format is MMDD,HH:MM
@@ -76,8 +86,9 @@ parse_train_tail() {
 }
 
 parse_train_peak() {
-    # Find the maximum peak_rsv (GPU reserved memory in GB) across the whole log.
-    # Each iter logs 'peak_rsv': X.XX from torch.cuda.max_memory_reserved().
+    # Find the maximum peak memory (GB) across the whole log.
+    # Prefers 'peak_rsv': X.XX (LOGGER dict format, reserved memory in GB).
+    # Falls back to progress bar 'peak=X.XX' which is max_memory_allocated.
     # Sets: _peak_mem
     local train_log="$1"
     _peak_mem=""
@@ -85,6 +96,10 @@ parse_train_peak() {
     local m
     m=$(grep -oP "'peak_rsv':\s*\K[\d.]+" "$train_log" 2>/dev/null \
         | awk 'BEGIN{m=0} {if($1+0>m) m=$1+0} END{if(m>0) printf "%.2fGB", m}')
+    if [ -z "$m" ]; then
+        m=$(grep -oP "peak=\K[\d.]+" "$train_log" 2>/dev/null \
+            | awk 'BEGIN{m=0} {if($1+0>m) m=$1+0} END{if(m>0) printf "%.2fGB", m}')
+    fi
     [ -n "$m" ] && _peak_mem="$m"
 }
 
@@ -97,12 +112,12 @@ print_branch() {
     commit_id=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")
     hostname_str=$(hostname)
 
-    local sep="--------------------------------------------------------------------------------"
+    local sep="-----------------------------------------------------------------------------------"
     printf "\n Server: %s\n" "$hostname_str"
     printf " Branch: %s\n" "$branch_name"
     printf " Commit: %s\n" "$commit_id"
     echo "$sep"
-    printf "%-12s %8s %8s %8s %8s %10s %12s\n" "Scene" "PSNR" "SSIM" "LPIPS" "Pts" "PeakMem" "Time"
+    printf "%-12s %8s %8s %8s %8s %5s %10s %12s\n" "Scene" "PSNR" "SSIM" "LPIPS" "Pts" "Blk" "PeakMem" "Time"
     echo "$sep"
 
     local sum_psnr=0 sum_ssim=0 sum_lpips=0 sum_time=0 count=0
@@ -124,10 +139,11 @@ print_branch() {
             : "${psnr:=N/A}" "${ssim:=N/A}" "${lpips:=N/A}"
         fi
 
-        local pts="N/A" peak_mem="N/A"
+        local pts="N/A" blk="N/A" peak_mem="N/A"
         if [ -n "$train_log" ]; then
             parse_train_tail "$train_log"
             [ -n "$_pts" ] && pts="$_pts"
+            [ -n "$_blk" ] && blk="$_blk"
             parse_train_peak "$train_log"
             [ -n "$_peak_mem" ] && peak_mem="$_peak_mem"
         fi
@@ -143,9 +159,9 @@ print_branch() {
             sum_ssim=$(awk "BEGIN{print $sum_ssim + $ssim}")
             sum_lpips=$(awk "BEGIN{print $sum_lpips + $lpips}")
             count=$((count + 1))
-            printf "%-12s %8.4f %8.4f %8.4f %8s %10s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$peak_mem" "$time_s"
+            printf "%-12s %8.4f %8.4f %8.4f %8s %5s %10s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$blk" "$peak_mem" "$time_s"
         else
-            printf "%-12s %8s %8s %8s %8s %10s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$peak_mem" "$time_s"
+            printf "%-12s %8s %8s %8s %8s %5s %10s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$blk" "$peak_mem" "$time_s"
         fi
     done
 
