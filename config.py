@@ -1,4 +1,28 @@
 # config.py
+import os
+
+
+def _env_bool(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name, default):
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+def _env_float(name, default):
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
 # 控制加载数据集大小,减少启动时间,用于调试
 LIMITED_DATASIZE = False
 DATASIZE_LIMIT = 5
@@ -36,8 +60,15 @@ GPU_CACHE_HARD_LIMIT_GB = 1.35  # reserved 过高时无视 interval 直接清理
 GPU_CACHE_STAGE_ENTRY_LIMIT_GB = 0.0  # 进入大 render 阶段前的 reserved 水位；0 表示关闭预清理
 CUDA_EMPTY_CACHE_INTERVAL = 16  # 每 N 轮允许清一次 CUDA allocator cache；skip 路径仍会强制清理
 
-MERGE_FAST = False  # FastMerge 总开关；False 时全部回退到 PyTorch chunked argsort merge
-MERGE_FAST_MAX_K = 16  # fused CUDA FastMerge 支持的最大 block 数；超过后回退到 PyTorch argsort
+MERGE_FAST = _env_bool("MERGE_FAST", False)  # FastMerge 总开关；False 时全部回退到 PyTorch chunked argsort merge
+MERGE_FAST_MAX_K = 16  # 固定 fused CUDA FastMerge 最大 block 数；超过后报警并回退到 PyTorch argsort
+MERGE_FAST_VALIDATE = _env_bool("MERGE_FAST_VALIDATE", False)  # 只建议 test_4090 开；同时跑 PyTorch reference 校验 FastMerge
+MERGE_FAST_VALIDATE_EVERY = _env_int("MERGE_FAST_VALIDATE_EVERY", 1)
+MERGE_FAST_VALIDATE_UNTIL = _env_int("MERGE_FAST_VALIDATE_UNTIL", 750)
+MERGE_FAST_VALIDATE_ATOL = _env_float("MERGE_FAST_VALIDATE_ATOL", 1e-5)
+MERGE_FAST_VALIDATE_BG_ATOL = _env_float("MERGE_FAST_VALIDATE_BG_ATOL", MERGE_FAST_VALIDATE_ATOL)
+MERGE_FAST_VALIDATE_MAX_PRINT = _env_int("MERGE_FAST_VALIDATE_MAX_PRINT", 20)
+MERGE_FAST_VALIDATE_FATAL = _env_bool("MERGE_FAST_VALIDATE_FATAL", False)
 
 HALF = False        # 半精度梯度拷贝加速
 TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)

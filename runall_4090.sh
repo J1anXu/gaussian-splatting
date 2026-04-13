@@ -34,7 +34,7 @@ LOCAL_RASTERIZER_PATH="${LOCAL_RASTERIZER_PATH:-$REPO_DIR/submodules/diff-gaussi
 export PYTHONPATH="$LOCAL_RASTERIZER_PATH${PYTHONPATH:+:$PYTHONPATH}"
 
 #DATASETS=(mip360 deepblending tandt)
-DATASETS=(deepblending)
+DATASETS=(mip360 deepblending tandt)
 
 ########################################
 # 每个数据集的场景列表

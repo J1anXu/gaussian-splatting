@@ -16,6 +16,170 @@ import diff_gaussian_rasterization_wenqi_tam._C as _merge_C
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 
+_MERGE_FAST_VALIDATE_CALLS = 0
+_MERGE_FAST_VALIDATE_BAD = 0
+_MERGE_FAST_FALLBACK_CALLS = 0
+_MERGE_FAST_FALLBACK_WARNED_KS = set()
+
+
+def _tensor_diff_stats(a, b):
+    diff = (a - b).abs()
+    if diff.numel() == 0:
+        return 0.0, 0.0
+    return float(diff.max().item()), float(diff.mean().item())
+
+
+def _stable_bg_from_sorted(front_rgbs, front_alphas):
+    if front_rgbs.shape[0] <= 1:
+        return torch.zeros_like(front_rgbs[0])
+    tail_rgbs = front_rgbs[1:]
+    tail_alphas = front_alphas[1:]
+    tail_cumT = torch.cumprod(tail_alphas, dim=0)
+    tail_prefix_T = torch.cat([torch.ones_like(tail_cumT[:1]), tail_cumT[:-1]], dim=0)
+    return (tail_prefix_T * tail_rgbs).sum(dim=0)
+
+
+def _format_merge_pixel_debug(render_list, depth_list, alphaLeft_list, fast, ref, y, x):
+    depths = []
+    alphas = []
+    for d in depth_list:
+        d0 = d if d.dim() == 3 else d.unsqueeze(0)
+        depths.append(float(d0[0, y, x].item()))
+    for a in alphaLeft_list:
+        a0 = a if a.dim() == 3 else a.unsqueeze(0)
+        alphas.append(float(a0[0, y, x].item()))
+
+    fast_rank = fast["block_rank"][:, y, x]
+    ref_rank = ref["block_rank"][:, y, x]
+    fast_order = torch.argsort(fast_rank).detach().cpu().tolist()
+    ref_order = torch.argsort(ref_rank).detach().cpu().tolist()
+    fast_prefix = fast["prefix_T"][:, 0, y, x].detach().cpu().tolist()
+    ref_prefix = ref["prefix_T"][:, 0, y, x].detach().cpu().tolist()
+
+    return {
+        "pixel": [int(y), int(x)],
+        "depths": [round(v, 8) for v in depths],
+        "alphas": [round(v, 8) for v in alphas],
+        "fast_order": [int(v) for v in fast_order],
+        "ref_order": [int(v) for v in ref_order],
+        "fast_rank": fast_rank.detach().cpu().tolist(),
+        "ref_rank": ref_rank.detach().cpu().tolist(),
+        "fast_prefix_T": [round(float(v), 8) for v in fast_prefix],
+        "ref_prefix_T": [round(float(v), 8) for v in ref_prefix],
+    }
+
+
+def _validate_merge_fast(render_list, depth_list, alphaLeft_list, fast, eps, chunk_size):
+    import config
+    global _MERGE_FAST_VALIDATE_CALLS, _MERGE_FAST_VALIDATE_BAD
+
+    _MERGE_FAST_VALIDATE_CALLS += 1
+    call_id = _MERGE_FAST_VALIDATE_CALLS
+    every = max(1, int(getattr(config, "MERGE_FAST_VALIDATE_EVERY", 1)))
+    until = int(getattr(config, "MERGE_FAST_VALIDATE_UNTIL", 750))
+    if call_id > until or call_id % every != 0:
+        return
+
+    ref = _merge_opt_kid_chunked(render_list, depth_list, alphaLeft_list, eps, chunk_size)
+    atol = float(getattr(config, "MERGE_FAST_VALIDATE_ATOL", 1e-5))
+    bg_atol = float(getattr(config, "MERGE_FAST_VALIDATE_BG_ATOL", atol))
+    ref_bg_stable = _stable_bg_from_sorted(ref["front_rgbs"], ref["front_alphas"])
+
+    final_max, final_mean = _tensor_diff_stats(fast["final_rgb"], ref["final_rgb"])
+    bg_max, bg_mean = _tensor_diff_stats(fast["bg_rgb"], ref_bg_stable)
+    bg_legacy_max, bg_legacy_mean = _tensor_diff_stats(fast["bg_rgb"], ref["bg_rgb"])
+    front_max, front_mean = _tensor_diff_stats(fast["front_rgbs"], ref["front_rgbs"])
+    prefix_max, prefix_mean = _tensor_diff_stats(fast["prefix_T"], ref["prefix_T"])
+    rank_mismatch = int((fast["block_rank"] != ref["block_rank"]).sum().item())
+
+    bad = (
+        final_max > atol
+        or bg_max > bg_atol
+        or front_max > atol
+        or prefix_max > atol
+        or rank_mismatch > 0
+    )
+    if not bad and not (call_id <= 3 or call_id % max(1, every * 50) == 0):
+        return
+
+    status = "BAD" if bad else "OK"
+    details = {
+        "call": int(call_id),
+        "status": status,
+        "K": int(len(render_list)),
+        "final_rgb_max": round(final_max, 8),
+        "final_rgb_mean": round(final_mean, 10),
+        "bg_rgb_max": round(bg_max, 8),
+        "bg_rgb_mean": round(bg_mean, 10),
+        "bg_rgb_legacy_max": round(bg_legacy_max, 8),
+        "bg_rgb_legacy_mean": round(bg_legacy_mean, 10),
+        "front_rgbs_max": round(front_max, 8),
+        "front_rgbs_mean": round(front_mean, 10),
+        "prefix_T_max": round(prefix_max, 8),
+        "prefix_T_mean": round(prefix_mean, 10),
+        "rank_mismatch": rank_mismatch,
+        "atol": atol,
+        "bg_atol": bg_atol,
+    }
+
+    if bad:
+        _MERGE_FAST_VALIDATE_BAD += 1
+        max_print = int(getattr(config, "MERGE_FAST_VALIDATE_MAX_PRINT", 20))
+        if _MERGE_FAST_VALIDATE_BAD <= max_print:
+            H, W = fast["final_rgb"].shape[-2:]
+            if rank_mismatch > 0:
+                details["bad_metric"] = "block_rank"
+                bad_pos = (fast["block_rank"] != ref["block_rank"]).nonzero(as_tuple=False)[0]
+                y = int(bad_pos[1].item())
+                x = int(bad_pos[2].item())
+            else:
+                metric_tensors = [
+                    ("final_rgb", (fast["final_rgb"] - ref["final_rgb"]).abs()),
+                    ("bg_rgb", (fast["bg_rgb"] - ref_bg_stable).abs()),
+                    ("front_rgbs", (fast["front_rgbs"] - ref["front_rgbs"]).abs()),
+                    ("prefix_T", (fast["prefix_T"] - ref["prefix_T"]).abs()),
+                ]
+                metric_name, metric_diff = max(
+                    metric_tensors,
+                    key=lambda item: float(item[1].max().item()) if item[1].numel() else 0.0,
+                )
+                details["bad_metric"] = metric_name
+                flat = metric_diff.reshape(-1).argmax()
+                pixel = int(flat.item()) % (H * W)
+                y = pixel // W
+                x = pixel % W
+            details["debug"] = _format_merge_pixel_debug(
+                render_list, depth_list, alphaLeft_list, fast, ref, y, x
+            )
+    print(f"[merge_fast_validate] {details}", flush=True)
+
+    if bad and bool(getattr(config, "MERGE_FAST_VALIDATE_FATAL", False)):
+        raise RuntimeError(f"FastMerge validation failed: {details}")
+
+
+def _warn_merge_fast_fallback(K, max_k, render_list):
+    global _MERGE_FAST_FALLBACK_CALLS
+
+    _MERGE_FAST_FALLBACK_CALLS += 1
+    first_for_k = K not in _MERGE_FAST_FALLBACK_WARNED_KS
+    periodic = _MERGE_FAST_FALLBACK_CALLS % 100 == 0
+    if not first_for_k and not periodic:
+        return
+
+    _MERGE_FAST_FALLBACK_WARNED_KS.add(K)
+    _, H, W = render_list[0].shape
+    details = {
+        "status": "WARNING",
+        "reason": "merge_k_exceeds_fast_limit",
+        "K": int(K),
+        "fast_max_k": int(max_k),
+        "fallback": "pytorch_chunked_argsort",
+        "fallback_calls": int(_MERGE_FAST_FALLBACK_CALLS),
+        "image_hw": [int(H), int(W)],
+    }
+    print(f"[merge_fast_fallback_warning] {details}", flush=True)
+
+
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor,
            scaling_modifier = 1.0, separate_sh = False, override_color = None,
            use_trained_exp=False, retain_viewspace_grad=None):
@@ -233,7 +397,7 @@ def merge_opt( N_total, render_list, depth_list, alphaLeft_list, vis_filter_list
         # 2.2 局部 Sort & Gather (原版逻辑)
         # -------------------------------------------------
         # Sort along depth
-        sort_idx_chunk = torch.argsort(depths_chunk.squeeze(1), dim=0, descending=True) # [K, h, W]
+        sort_idx_chunk = torch.argsort(depths_chunk.squeeze(1), dim=0, descending=True, stable=True) # [K, h, W]
         
         # Gather RGB
         idx_rgb = sort_idx_chunk.unsqueeze(1).expand(-1, 3, -1, -1)
@@ -321,8 +485,14 @@ def merge_opt( N_total, render_list, depth_list, alphaLeft_list, vis_filter_list
 def merge_opt_kid(render_list, depth_list, alphaLeft_list, eps=1e-10, chunk_size=32):
     import config
     K = len(render_list)
-    if config.MERGE_FAST and K <= getattr(config, "MERGE_FAST_MAX_K", 16):
-        return _merge_opt_kid_fast(render_list, depth_list, alphaLeft_list, eps)
+    max_k = int(getattr(config, "MERGE_FAST_MAX_K", 16))
+    if config.MERGE_FAST:
+        if K <= max_k:
+            fast = _merge_opt_kid_fast(render_list, depth_list, alphaLeft_list, eps)
+            if getattr(config, "MERGE_FAST_VALIDATE", False):
+                _validate_merge_fast(render_list, depth_list, alphaLeft_list, fast, eps, chunk_size)
+            return fast
+        _warn_merge_fast_fallback(K, max_k, render_list)
     return _merge_opt_kid_chunked(render_list, depth_list, alphaLeft_list, eps, chunk_size)
 
 
@@ -366,7 +536,7 @@ def _merge_opt_kid_fast_py(render_list, depth_list, alphaLeft_list, eps=1e-10):
     alphas = torch.stack([a if a.dim() == 3 else a.unsqueeze(0)
                           for a in alphaLeft_list], dim=0)
 
-    sort_idx = torch.argsort(depths.squeeze(1), dim=0, descending=True)
+    sort_idx = torch.argsort(depths.squeeze(1), dim=0, descending=True, stable=True)
     idx_rgb = sort_idx.unsqueeze(1).expand(-1, 3, -1, -1)
     idx_1ch = sort_idx.unsqueeze(1)
 
@@ -471,7 +641,7 @@ def _merge_opt_kid_chunked(render_list, depth_list, alphaLeft_list, eps=1e-10, c
         # 2.2 局部 Sort & Gather (原版逻辑)
         # -------------------------------------------------
         # Sort along depth
-        sort_idx_chunk = torch.argsort(depths_chunk.squeeze(1), dim=0, descending=True) # [K, h, W]
+        sort_idx_chunk = torch.argsort(depths_chunk.squeeze(1), dim=0, descending=True, stable=True) # [K, h, W]
         
         # Gather RGB
         idx_rgb = sort_idx_chunk.unsqueeze(1).expand(-1, 3, -1, -1)
