@@ -1,45 +1,14 @@
-# config.py
-import os
-
-
-def _env_bool(name, default):
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name, default):
-    value = os.getenv(name)
-    if value is None or value == "":
-        return default
-    return int(value)
-
-
-def _env_float(name, default):
-    value = os.getenv(name)
-    if value is None or value == "":
-        return default
-    return float(value)
-
-
 # 控制加载数据集大小,减少启动时间,用于调试
 LIMITED_DATASIZE = False
 DATASIZE_LIMIT = 5
 
-
-CAL_RES_2_CPU = False  #把计算结果移动到CPU节省内存 (能节省内存但是移动非常慢)
-
 SAVE_BLOCK_IMG = False  # 是否保存 block 渲染结果
 DRAW_BOX = False # 是否在 block 渲染结果上绘制点云和block的边界框
-
 
 SAVE_RGB_LAYERS = False  # 是否保存合并前的各个RGB图层
 SAVE_LAYERS_CONTRIBUTION = False  # 是否保存每个block对各个图层的贡献
 SAVE_DEPTH_LIST = False  # 是否保存各个block的深度图
 
-
-PARTITIONING_ENABLED = True  # 是否启用分块处理
 FRUSTUM_CULLING_ENABLED = True  # 是否启用视锥剔除
 FRUSTUM_CULLING_CACHE_ENABLED = True  # 是否缓存视锥剔除结果（densify_until_iter后位置不再增长，可复用）
 
@@ -60,22 +29,8 @@ GPU_CACHE_HARD_LIMIT_GB = 1.35  # reserved 过高时无视 interval 直接清理
 GPU_CACHE_STAGE_ENTRY_LIMIT_GB = 0.0  # 进入大 render 阶段前的 reserved 水位；0 表示关闭预清理
 CUDA_EMPTY_CACHE_INTERVAL = 16  # 每 N 轮允许清一次 CUDA allocator cache；skip 路径仍会强制清理
 
-MERGE_FAST = _env_bool("MERGE_FAST", False)  # FastMerge 总开关；False 时全部回退到 PyTorch chunked argsort merge
-MERGE_FAST_MAX_K = 16  # 固定 fused CUDA FastMerge 最大 block 数；超过后报警并回退到 PyTorch argsort
-MERGE_FAST_VALIDATE = _env_bool("MERGE_FAST_VALIDATE", False)  # 只建议 test_4090 开；同时跑 PyTorch reference 校验 FastMerge
-MERGE_FAST_VALIDATE_EVERY = _env_int("MERGE_FAST_VALIDATE_EVERY", 1)
-MERGE_FAST_VALIDATE_UNTIL = _env_int("MERGE_FAST_VALIDATE_UNTIL", 750)
-MERGE_FAST_VALIDATE_ATOL = _env_float("MERGE_FAST_VALIDATE_ATOL", 1e-5)
-MERGE_FAST_VALIDATE_BG_ATOL = _env_float("MERGE_FAST_VALIDATE_BG_ATOL", MERGE_FAST_VALIDATE_ATOL)
-MERGE_FAST_VALIDATE_MAX_PRINT = _env_int("MERGE_FAST_VALIDATE_MAX_PRINT", 20)
-MERGE_FAST_VALIDATE_FATAL = _env_bool("MERGE_FAST_VALIDATE_FATAL", False)
+MERGE_FAST = True  # FastMerge 总开关；False 时全部回退到 PyTorch chunked argsort merge
 
-HALF = False        # 半精度梯度拷贝加速
-TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
-
-
-KEEP_TRAINING = False  # 由命令行参数 --keep_training 控制
 
 SKIP_SMALL_BLOCK_THRESH = 0.05  # 跳过可见点数小于最大块该比例的小块，设为0关闭
-
 DENSIFY_GRAD_SCALE = 0.95  # densify 梯度阈值缩放，补偿 block 分割后 prefix_T 对梯度的缩放 (1.0=不补偿, 越小越激进)

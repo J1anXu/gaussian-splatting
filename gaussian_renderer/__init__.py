@@ -9,8 +9,9 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
-import torch
 import math
+import os
+import torch
 from diff_gaussian_rasterization_wenqi_tam import GaussianRasterizationSettings, GaussianRasterizer
 import diff_gaussian_rasterization_wenqi_tam._C as _merge_C
 from scene.gaussian_model import GaussianModel
@@ -20,6 +21,14 @@ _MERGE_FAST_VALIDATE_CALLS = 0
 _MERGE_FAST_VALIDATE_BAD = 0
 _MERGE_FAST_FALLBACK_CALLS = 0
 _MERGE_FAST_FALLBACK_WARNED_KS = set()
+_MERGE_FAST_MAX_K = 16
+
+
+def _env_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _tensor_diff_stats(a, b):
@@ -70,19 +79,18 @@ def _format_merge_pixel_debug(render_list, depth_list, alphaLeft_list, fast, ref
 
 
 def _validate_merge_fast(render_list, depth_list, alphaLeft_list, fast, eps, chunk_size):
-    import config
     global _MERGE_FAST_VALIDATE_CALLS, _MERGE_FAST_VALIDATE_BAD
 
     _MERGE_FAST_VALIDATE_CALLS += 1
     call_id = _MERGE_FAST_VALIDATE_CALLS
-    every = max(1, int(getattr(config, "MERGE_FAST_VALIDATE_EVERY", 1)))
-    until = int(getattr(config, "MERGE_FAST_VALIDATE_UNTIL", 750))
+    every = 1
+    until = 750
     if call_id > until or call_id % every != 0:
         return
 
     ref = _merge_opt_kid_chunked(render_list, depth_list, alphaLeft_list, eps, chunk_size)
-    atol = float(getattr(config, "MERGE_FAST_VALIDATE_ATOL", 1e-5))
-    bg_atol = float(getattr(config, "MERGE_FAST_VALIDATE_BG_ATOL", atol))
+    atol = 1e-5
+    bg_atol = 1e-5
     ref_bg_stable = _stable_bg_from_sorted(ref["front_rgbs"], ref["front_alphas"])
 
     final_max, final_mean = _tensor_diff_stats(fast["final_rgb"], ref["final_rgb"])
@@ -124,7 +132,7 @@ def _validate_merge_fast(render_list, depth_list, alphaLeft_list, fast, eps, chu
 
     if bad:
         _MERGE_FAST_VALIDATE_BAD += 1
-        max_print = int(getattr(config, "MERGE_FAST_VALIDATE_MAX_PRINT", 20))
+        max_print = 20
         if _MERGE_FAST_VALIDATE_BAD <= max_print:
             H, W = fast["final_rgb"].shape[-2:]
             if rank_mismatch > 0:
@@ -152,9 +160,6 @@ def _validate_merge_fast(render_list, depth_list, alphaLeft_list, fast, eps, chu
                 render_list, depth_list, alphaLeft_list, fast, ref, y, x
             )
     print(f"[merge_fast_validate] {details}", flush=True)
-
-    if bad and bool(getattr(config, "MERGE_FAST_VALIDATE_FATAL", False)):
-        raise RuntimeError(f"FastMerge validation failed: {details}")
 
 
 def _warn_merge_fast_fallback(K, max_k, render_list):
@@ -485,14 +490,13 @@ def merge_opt( N_total, render_list, depth_list, alphaLeft_list, vis_filter_list
 def merge_opt_kid(render_list, depth_list, alphaLeft_list, eps=1e-10, chunk_size=32):
     import config
     K = len(render_list)
-    max_k = int(getattr(config, "MERGE_FAST_MAX_K", 16))
     if config.MERGE_FAST:
-        if K <= max_k:
+        if K <= _MERGE_FAST_MAX_K:
             fast = _merge_opt_kid_fast(render_list, depth_list, alphaLeft_list, eps)
-            if getattr(config, "MERGE_FAST_VALIDATE", False):
+            if _env_bool("MERGE_FAST_VALIDATE", False):
                 _validate_merge_fast(render_list, depth_list, alphaLeft_list, fast, eps, chunk_size)
             return fast
-        _warn_merge_fast_fallback(K, max_k, render_list)
+        _warn_merge_fast_fallback(K, _MERGE_FAST_MAX_K, render_list)
     return _merge_opt_kid_chunked(render_list, depth_list, alphaLeft_list, eps, chunk_size)
 
 
