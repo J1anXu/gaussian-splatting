@@ -1,0 +1,645 @@
+#!/usr/bin/env bash
+# Summarize CapGS results and show metric deltas against vanilla 3DGS.
+# Usage: bash summarize_compare.sh [branch1 branch2 ...]
+#   No args = use current git branch name
+#   CAPGS_OUTPUT_ROOT can override /data/jian/output/CapGS
+#   GS_OUTPUT_ROOT can override /data/jian/output/gaussian-splatting
+#   GS_BASELINE_BRANCH can override vanilla3DGS
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+python3 - "$SCRIPT_DIR" "$@" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(sys.argv[1]).resolve()
+DEBUG_DIR = SCRIPT_DIR / "debug"
+CAPGS_ROOT = Path(os.environ.get("CAPGS_OUTPUT_ROOT") or "/data/jian/output/CapGS").expanduser()
+GS_ROOT = Path(os.environ.get("GS_OUTPUT_ROOT") or "/data/jian/output/gaussian-splatting").expanduser()
+BASELINE_BRANCH = os.environ.get("GS_BASELINE_BRANCH") or "vanilla3DGS"
+BRANCH_ARGS = sys.argv[2:]
+
+DATASETS = ("mip360", "deepblending", "tandt")
+DATASET_ORDER = {name: i for i, name in enumerate(DATASETS)}
+
+SCENE_DATASET = {
+    "bicycle": "mip360",
+    "flowers": "mip360",
+    "garden": "mip360",
+    "stump": "mip360",
+    "treehill": "mip360",
+    "room": "mip360",
+    "counter": "mip360",
+    "kitchen": "mip360",
+    "bonsai": "mip360",
+    "drjohnson": "deepblending",
+    "playroom": "deepblending",
+    "train": "tandt",
+    "truck": "tandt",
+}
+
+SCENE_ORDER = {
+    "bicycle": 0,
+    "flowers": 1,
+    "garden": 2,
+    "stump": 3,
+    "treehill": 4,
+    "room": 5,
+    "counter": 6,
+    "kitchen": 7,
+    "bonsai": 8,
+    "drjohnson": 9,
+    "playroom": 10,
+    "train": 11,
+    "truck": 12,
+}
+
+INDOOR = {"room", "counter", "kitchen", "bonsai", "drjohnson", "playroom"}
+OUTDOOR = {"bicycle", "flowers", "garden", "stump", "treehill", "train", "truck"}
+
+
+@dataclass
+class Metrics:
+    psnr: float | None
+    ssim: float | None
+    lpips: float | None
+    metric_iter: str
+
+
+@dataclass
+class Summary:
+    dataset: str
+    kind: str
+    scene: str
+    status: str
+    metric_iter: str
+    psnr: float | None
+    ssim: float | None
+    lpips: float | None
+    points: str
+    blocks: str
+    peak_mem: str
+    duration_s: float | None
+    source_dir: Path
+    train_points_raw: int | None
+    render_points_raw: int | None
+    train_blocks_raw: int | None
+    saved_blocks: int | None
+
+
+def run_git(args: list[str]) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(SCRIPT_DIR), *args],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def current_branch() -> str:
+    return run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+
+
+def read_text(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return ""
+    return path.read_text(errors="ignore")
+
+
+def latest_log(scene_dir: Path, prefix: str) -> Path | None:
+    candidates = list(scene_dir.glob(f"{prefix}_*.log"))
+    plain = scene_dir / f"{prefix}.log"
+    if plain.exists():
+        candidates.append(plain)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
+
+
+def latest_output_train_log(scene_root: Path) -> Path | None:
+    log_dir = scene_root / "logs"
+    if not log_dir.is_dir():
+        return None
+    candidates = list(log_dir.glob("*.log"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
+
+
+def capgs_results_path(scene_root: Path, branch: str) -> Path | None:
+    preferred = scene_root / "rendered_p" / branch / "results.json"
+    if preferred.exists():
+        return preferred
+
+    rendered_root = scene_root / "rendered_p"
+    if not rendered_root.is_dir():
+        return None
+    candidates = list(rendered_root.glob("*/results.json"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: (p.stat().st_mtime, str(p)))
+
+
+def last_float(pattern: str, text: str) -> float | None:
+    matches = re.findall(pattern, text)
+    if not matches:
+        return None
+    value = matches[-1]
+    if isinstance(value, tuple):
+        value = next((x for x in value if x), "")
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def max_float(pattern: str, text: str) -> float | None:
+    values: list[float] = []
+    for value in re.findall(pattern, text):
+        if isinstance(value, tuple):
+            value = next((x for x in value if x), "")
+        try:
+            values.append(float(value))
+        except ValueError:
+            pass
+    return max(values) if values else None
+
+
+def last_int(pattern: str, text: str) -> int | None:
+    matches = re.findall(pattern, text)
+    if not matches:
+        return None
+    value = matches[-1]
+    if isinstance(value, tuple):
+        value = next((x for x in value if x), "")
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def format_points(raw: int | float | None) -> str:
+    if raw is None:
+        return "N/A"
+    return f"{raw / 1_000_000:.2f}M"
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "N/A"
+    total = int(round(seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    return f"{m}m {s}s"
+
+
+def scene_kind(scene: str) -> str:
+    if scene in INDOOR:
+        return "indoor"
+    if scene in OUTDOOR:
+        return "outdoor"
+    return "unknown"
+
+
+def infer_dataset(scene: str, parent_dataset: str | None = None) -> str:
+    if parent_dataset:
+        return parent_dataset
+    return SCENE_DATASET.get(scene, "unknown")
+
+
+def result_iteration(key: str) -> int | None:
+    match = re.search(r"_(\d+)$", key)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def choose_result_entry(data: object) -> tuple[str, dict[str, object]] | None:
+    if not isinstance(data, dict):
+        return None
+    entries = [(str(k), v) for k, v in data.items() if isinstance(v, dict)]
+    if not entries:
+        return None
+    for key, value in entries:
+        if key == "ours_30000":
+            return key, value
+    return max(entries, key=lambda item: (result_iteration(item[0]) or -1, item[0]))
+
+
+def metric_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_results(results_path: Path | None) -> tuple[Metrics, str, int | None]:
+    empty = Metrics(None, None, None, "N/A")
+    if results_path is None or not results_path.exists():
+        return empty, "N/A", None
+    try:
+        data = json.loads(read_text(results_path))
+    except json.JSONDecodeError:
+        return empty, "N/A", None
+
+    chosen = choose_result_entry(data)
+    if chosen is None:
+        return empty, "N/A", None
+
+    key, entry = chosen
+    iteration = result_iteration(key)
+    metric_iter = str(iteration) if iteration is not None else "N/A"
+    metrics = Metrics(
+        psnr=metric_float(entry.get("PSNR")),
+        ssim=metric_float(entry.get("SSIM")),
+        lpips=metric_float(entry.get("LPIPS")),
+        metric_iter=metric_iter,
+    )
+
+    raw_points_float = metric_float(entry.get("num_gaussians"))
+    raw_points = int(raw_points_float) if raw_points_float is not None else None
+    points = format_points(raw_points) if raw_points is not None else "N/A"
+    return metrics, points, raw_points
+
+
+def parse_debug_metrics(metrics_log: Path | None) -> Metrics:
+    text = read_text(metrics_log)
+    if not text:
+        return Metrics(None, None, None, "N/A")
+
+    metric_iter = "N/A"
+    for pattern in (r"Method:\s*ours_(\d+)", r"\bours_(\d+)\b", r"iteration[_\s-]*(\d+)"):
+        matches = re.findall(pattern, text, flags=re.IGNORECASE)
+        if matches:
+            metric_iter = str(matches[-1])
+            break
+
+    return Metrics(
+        psnr=last_float(r"PSNR\s*:\s*([0-9.]+)", text),
+        ssim=last_float(r"SSIM\s*:\s*([0-9.]+)", text),
+        lpips=last_float(r"LPIPS\s*:\s*([0-9.]+)", text),
+        metric_iter=metric_iter,
+    )
+
+
+def parse_train(train_log: Path | None) -> tuple[str, str, str, float | None, bool, bool, int | None, int | None]:
+    text = read_text(train_log)
+    if not text:
+        return "N/A", "N/A", "N/A", None, False, False, None, None
+
+    final_points = last_int(r'"final_points"\s*:\s*(\d+)', text)
+    train_points_raw = final_points
+    points = format_points(final_points)
+    if points == "N/A":
+        pts_m = re.findall(r"'pts'\s*:\s*'([0-9.]+M)'", text)
+        if pts_m:
+            points = pts_m[-1]
+    if points == "N/A":
+        raw = last_int(r"'pts'\s*:\s*(\d+)", text)
+        if raw is not None:
+            train_points_raw = raw
+            points = format_points(raw)
+    if points == "N/A":
+        pts_m = re.findall(r"\bpts=([0-9.]+M)", text)
+        if pts_m:
+            points = pts_m[-1]
+
+    final_blocks = last_int(r'"final_blocks"\s*:\s*(\d+)', text)
+    if final_blocks is None:
+        final_blocks = last_int(r"'blk'\s*:\s*(\d+)", text)
+    if final_blocks is None:
+        final_blocks = last_int(r"\bblk=(\d+)", text)
+    blocks = str(final_blocks) if final_blocks is not None else "N/A"
+
+    peak = max_float(r"'peak_rsv'\s*:\s*([0-9.]+)", text)
+    if peak is None:
+        peak = max_float(r'"peak_reserved_gb"\s*:\s*([0-9.]+)', text)
+    if peak is None:
+        peak = max_float(r"\bpeak=([0-9.]+)", text)
+    peak_mem = f"{peak:.2f}GB" if peak is not None else "N/A"
+
+    duration = last_float(r'"seconds"\s*:\s*([0-9.]+)', text)
+    if duration is None:
+        duration = last_float(r"Training time cost:\s*\[([0-9.]+)\]\s*seconds", text)
+    if duration is None:
+        duration = last_float(r"'elapsed'\s*:\s*'([0-9.]+)s'", text)
+
+    has_complete = "[training_complete]" in text or "Training time cost:" in text or "'iter': 30000" in text
+    crashed = bool(re.search(r"core dumped|Traceback|RuntimeError|Aborted", text, flags=re.IGNORECASE))
+    return points, blocks, peak_mem, duration, has_complete, crashed, train_points_raw, final_blocks
+
+
+def has_any_log(scene_dir: Path) -> bool:
+    return any(scene_dir.glob("train*.log")) or any(scene_dir.glob("metrics*.log")) or any(scene_dir.glob("render*.log"))
+
+
+def has_real_output(scene_root: Path, branch: str) -> bool:
+    return latest_output_train_log(scene_root) is not None or capgs_results_path(scene_root, branch) is not None
+
+
+def status_for(metrics: Metrics, train_log: Path | None, train_complete: bool, crashed: bool) -> str:
+    if crashed:
+        return "CRASH"
+    if metrics.psnr is None:
+        return "NO_METRIC"
+    if metrics.metric_iter != "N/A" and metrics.metric_iter != "30000":
+        return f"ITER_{metrics.metric_iter}"
+    if train_log is not None and not train_complete:
+        return "TRAIN?"
+    return "OK"
+
+
+def summarize_debug_scene(dataset: str, scene_dir: Path) -> Summary:
+    scene = scene_dir.name
+    metrics = parse_debug_metrics(latest_log(scene_dir, "metrics"))
+    train_log = latest_log(scene_dir, "train")
+    points, blocks, peak_mem, duration, train_complete, crashed, train_points_raw, train_blocks_raw = parse_train(train_log)
+
+    return Summary(
+        dataset=dataset,
+        kind=scene_kind(scene),
+        scene=scene,
+        status=status_for(metrics, train_log, train_complete, crashed),
+        metric_iter=metrics.metric_iter,
+        psnr=metrics.psnr,
+        ssim=metrics.ssim,
+        lpips=metrics.lpips,
+        points=points,
+        blocks=blocks,
+        peak_mem=peak_mem,
+        duration_s=duration,
+        source_dir=scene_dir,
+        train_points_raw=train_points_raw,
+        render_points_raw=None,
+        train_blocks_raw=train_blocks_raw,
+        saved_blocks=None,
+    )
+
+
+def count_saved_blocks(scene_root: Path, branch: str, metric_iter: str) -> int | None:
+    if metric_iter == "N/A":
+        return None
+    point_cloud_dir = scene_root / "point_cloud" / branch / f"iteration_{metric_iter}"
+    if not point_cloud_dir.is_dir():
+        return None
+    return len(list(point_cloud_dir.glob("point_cloud_sub_*.ply")))
+
+
+def summarize_output_scene(branch: str, dataset: str, scene_root: Path) -> Summary:
+    scene = scene_root.name
+    metrics, result_points, render_points_raw = parse_results(capgs_results_path(scene_root, branch))
+    train_log = latest_output_train_log(scene_root)
+    points, blocks, peak_mem, duration, train_complete, crashed, train_points_raw, train_blocks_raw = parse_train(train_log)
+    if points == "N/A" and result_points != "N/A":
+        points = result_points
+
+    return Summary(
+        dataset=dataset,
+        kind=scene_kind(scene),
+        scene=scene,
+        status=status_for(metrics, train_log, train_complete, crashed),
+        metric_iter=metrics.metric_iter,
+        psnr=metrics.psnr,
+        ssim=metrics.ssim,
+        lpips=metrics.lpips,
+        points=points,
+        blocks=blocks,
+        peak_mem=peak_mem,
+        duration_s=duration,
+        source_dir=scene_root,
+        train_points_raw=train_points_raw,
+        render_points_raw=render_points_raw,
+        train_blocks_raw=train_blocks_raw,
+        saved_blocks=count_saved_blocks(scene_root, branch, metrics.metric_iter),
+    )
+
+
+def collect_debug_branch(branch: str) -> list[Summary]:
+    branch_dir = DEBUG_DIR / branch
+    if not branch_dir.is_dir():
+        return []
+
+    candidates: dict[tuple[str, str], tuple[tuple[int, float], Path, str]] = {}
+    for dataset in DATASETS:
+        dataset_dir = branch_dir / dataset
+        if not dataset_dir.is_dir():
+            continue
+        for scene_dir in dataset_dir.iterdir():
+            if not scene_dir.is_dir() or not has_any_log(scene_dir):
+                continue
+            score = (0, max((p.stat().st_mtime for p in scene_dir.glob("*.log")), default=0.0))
+            candidates[(dataset, scene_dir.name)] = (score, scene_dir, dataset)
+
+    for scene_dir in branch_dir.iterdir():
+        if not scene_dir.is_dir() or scene_dir.name in DATASETS or not has_any_log(scene_dir):
+            continue
+        dataset = infer_dataset(scene_dir.name)
+        key = (dataset, scene_dir.name)
+        score = (1, max((p.stat().st_mtime for p in scene_dir.glob("*.log")), default=0.0))
+        old = candidates.get(key)
+        if old is None or score > old[0]:
+            candidates[key] = (score, scene_dir, dataset)
+
+    return [summarize_debug_scene(dataset, scene_dir) for _, scene_dir, dataset in candidates.values()]
+
+
+def collect_output_branch(branch: str) -> list[Summary]:
+    if not CAPGS_ROOT.is_dir():
+        return []
+
+    rows: list[Summary] = []
+    for dataset in DATASETS:
+        branch_dir = CAPGS_ROOT / dataset / branch
+        if not branch_dir.is_dir():
+            continue
+        for scene_root in branch_dir.iterdir():
+            if scene_root.is_dir() and has_real_output(scene_root, branch):
+                rows.append(summarize_output_scene(branch, dataset, scene_root))
+    return rows
+
+
+def collect_branch(branch: str) -> list[Summary]:
+    by_scene: dict[tuple[str, str], tuple[int, Summary]] = {}
+    for row in collect_debug_branch(branch):
+        by_scene[(row.dataset, row.scene)] = (0, row)
+    for row in collect_output_branch(branch):
+        by_scene[(row.dataset, row.scene)] = (1, row)
+
+    rows = [row for _, row in by_scene.values()]
+    rows.sort(key=lambda r: (DATASET_ORDER.get(r.dataset, 99), SCENE_ORDER.get(r.scene, 99), r.scene))
+    return rows
+
+
+def load_baseline_metrics() -> dict[tuple[str, str], Metrics]:
+    metrics_by_scene: dict[tuple[str, str], Metrics] = {}
+    for dataset in DATASETS:
+        branch_dir = GS_ROOT / dataset / BASELINE_BRANCH
+        if not branch_dir.is_dir():
+            continue
+        for scene_root in branch_dir.iterdir():
+            if not scene_root.is_dir():
+                continue
+            metrics, _, _ = parse_results(scene_root / "results.json")
+            if metrics.psnr is None and metrics.ssim is None and metrics.lpips is None:
+                continue
+            metrics_by_scene[(dataset, scene_root.name)] = metrics
+    return metrics_by_scene
+
+
+def fmt_metric(value: float | None, baseline: float | None) -> str:
+    if value is None:
+        return "N/A"
+    if baseline is None:
+        return f"{value:.4f}(N/A)"
+    return f"{value:.4f}({value - baseline:+.4f})"
+
+
+def print_rows(rows: list[Summary], baseline: dict[tuple[str, str], Metrics]) -> None:
+    sep = "-" * 148
+    print(sep)
+    print(
+        f"{'Dataset':<13} {'Type':<8} {'Scene':<12} {'Iter':>6} "
+        f"{'PSNR(diff)':>17} {'SSIM(diff)':>17} {'LPIPS(diff)':>17} "
+        f"{'Pts':>8} {'Blk':>5} {'PeakMem':>9} {'Time':>11}"
+    )
+    print(sep)
+    for row in rows:
+        base = baseline.get((row.dataset, row.scene), Metrics(None, None, None, "N/A"))
+        print(
+            f"{row.dataset:<13} {row.kind:<8} {row.scene:<12} {row.metric_iter:>6} "
+            f"{fmt_metric(row.psnr, base.psnr):>17} "
+            f"{fmt_metric(row.ssim, base.ssim):>17} "
+            f"{fmt_metric(row.lpips, base.lpips):>17} "
+            f"{row.points:>8} {row.blocks:>5} {row.peak_mem:>9} "
+            f"{format_duration(row.duration_s):>11}"
+        )
+    print(sep)
+
+
+def metric_average(rows: list[Summary], attr: str) -> float | None:
+    values = [getattr(r, attr) for r in rows if getattr(r, attr) is not None]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def baseline_average(rows: list[Summary], baseline: dict[tuple[str, str], Metrics], attr: str) -> float | None:
+    values: list[float] = []
+    for row in rows:
+        base = baseline.get((row.dataset, row.scene))
+        value = getattr(base, attr) if base is not None else None
+        if value is not None:
+            values.append(value)
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def print_average_line(label: str, rows: list[Summary], baseline: dict[tuple[str, str], Metrics]) -> None:
+    seconds = [r.duration_s for r in rows if r.duration_s is not None]
+    time_text = format_duration(sum(seconds)) if seconds else "N/A"
+    psnr = metric_average(rows, "psnr")
+    ssim = metric_average(rows, "ssim")
+    lpips = metric_average(rows, "lpips")
+    base_psnr = baseline_average(rows, baseline, "psnr")
+    base_ssim = baseline_average(rows, baseline, "ssim")
+    base_lpips = baseline_average(rows, baseline, "lpips")
+    print(
+        f"  {label:<13} scenes={len(rows):<2}  "
+        f"PSNR={fmt_metric(psnr, base_psnr):>17}  "
+        f"SSIM={fmt_metric(ssim, base_ssim):>17}  "
+        f"LPIPS={fmt_metric(lpips, base_lpips):>17}  "
+        f"total_time={time_text}"
+    )
+
+
+def print_averages(rows: list[Summary], baseline: dict[tuple[str, str], Metrics]) -> None:
+    valid = [r for r in rows if r.psnr is not None and r.ssim is not None and r.lpips is not None and r.status in {"OK", "TRAIN?"}]
+    if not valid:
+        return
+    print("Averages:")
+    for dataset in DATASETS:
+        subset = [r for r in valid if r.dataset == dataset]
+        if subset:
+            print_average_line(dataset, subset, baseline)
+    print_average_line("overall", valid, baseline)
+
+
+def print_warnings(rows: list[Summary], baseline: dict[tuple[str, str], Metrics]) -> None:
+    warnings: list[str] = []
+    for row in rows:
+        label = f"{row.dataset}/{row.scene}"
+        if (row.dataset, row.scene) not in baseline:
+            warnings.append(f"  {label}: missing baseline metrics")
+        if row.train_points_raw is not None and row.render_points_raw is not None:
+            delta = abs(row.train_points_raw - row.render_points_raw)
+            if delta > max(10_000, row.train_points_raw * 0.005):
+                warnings.append(
+                    f"  {label}: train_pts={format_points(row.train_points_raw)}, "
+                    f"render_pts={format_points(row.render_points_raw)}"
+                )
+        if row.train_blocks_raw is not None and row.saved_blocks is not None and row.train_blocks_raw != row.saved_blocks:
+            warnings.append(
+                f"  {label}: train_blocks={row.train_blocks_raw}, "
+                f"saved_point_cloud_files={row.saved_blocks}"
+            )
+    if not warnings:
+        return
+    print("Warnings:")
+    for warning in warnings:
+        print(warning)
+
+
+def branches_to_print() -> list[str]:
+    if BRANCH_ARGS:
+        return BRANCH_ARGS
+    branch = current_branch()
+    if branch and ((DEBUG_DIR / branch).is_dir() or any((CAPGS_ROOT / dataset / branch).is_dir() for dataset in DATASETS)):
+        return [branch]
+    print(f"No results found for current branch '{branch}' under {CAPGS_ROOT} or debug/", file=sys.stderr)
+    sys.exit(1)
+
+
+def main() -> None:
+    commit_id = run_git(["rev-parse", "HEAD"])
+    hostname = os.uname().nodename
+    baseline = load_baseline_metrics()
+
+    for branch in branches_to_print():
+        rows = collect_branch(branch)
+        print()
+        print(f"Server:    {hostname}")
+        print(f"Branch:    {branch}")
+        print(f"Baseline:  {BASELINE_BRANCH}")
+        print(f"Commit:    {commit_id}")
+        print(f"Source:    {CAPGS_ROOT} (debug fallback)")
+        print(f"Base Src:  {GS_ROOT}")
+        print("Diff:      CapGS - baseline")
+        if not rows:
+            print("No scene logs found.")
+            continue
+        print_rows(rows, baseline)
+        print_averages(rows, baseline)
+        print_warnings(rows, baseline)
+
+
+if __name__ == "__main__":
+    main()
+PY
