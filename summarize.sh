@@ -1,191 +1,611 @@
-#!/bin/bash
-# Summarize training results from debug/<branch>/<scene>/ directories.
-# Usage: ./summarize.sh [branch1 branch2 ...]
+#!/usr/bin/env bash
+# Summarize training results from /data/jian/output/CapGS first, with
+# debug/<branch>/ as a fallback mirror.
+# Usage: bash summarize.sh [branch1 branch2 ...]
 #   No args = use current git branch name
+#   CAPGS_OUTPUT_ROOT can override /data/jian/output/CapGS
+
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEBUG_DIR="$SCRIPT_DIR/debug"
 
-parse_seconds() {
-    # Convert "MMDD,HH:MM" timestamp to seconds (with day offset)
-    local ts="$1"
-    local daypart="${ts%%,*}"
-    local timepart="${ts#*,}"
-    local day="${daypart:2:2}"
-    local h="${timepart%%:*}"
-    local m="${timepart#*:}"
-    # Strip leading zeros
-    day=$((10#$day)); h=$((10#$h)); m=$((10#$m))
-    echo $(( day * 86400 + h * 3600 + m * 60 ))
+python3 - "$SCRIPT_DIR" "$@" <<'PY'
+from __future__ import annotations
+
+import os
+import json
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(sys.argv[1]).resolve()
+DEBUG_DIR = SCRIPT_DIR / "debug"
+OUTPUT_ROOT = Path(os.environ.get("CAPGS_OUTPUT_ROOT") or "/data/jian/output/CapGS").expanduser()
+BRANCH_ARGS = sys.argv[2:]
+
+DATASETS = ("mip360", "deepblending", "tandt")
+DATASET_ORDER = {name: i for i, name in enumerate(DATASETS)}
+
+SCENE_DATASET = {
+    "bicycle": "mip360",
+    "flowers": "mip360",
+    "garden": "mip360",
+    "stump": "mip360",
+    "treehill": "mip360",
+    "room": "mip360",
+    "counter": "mip360",
+    "kitchen": "mip360",
+    "bonsai": "mip360",
+    "drjohnson": "deepblending",
+    "playroom": "deepblending",
+    "train": "tandt",
+    "truck": "tandt",
 }
 
-find_latest() {
-    # Find the latest file matching prefix_*.log in a directory
-    local dir="$1" prefix="$2"
-    ls -1 "$dir"/${prefix}_*.log 2>/dev/null | sort | tail -1
+SCENE_ORDER = {
+    "bicycle": 0,
+    "flowers": 1,
+    "garden": 2,
+    "stump": 3,
+    "treehill": 4,
+    "room": 5,
+    "counter": 6,
+    "kitchen": 7,
+    "bonsai": 8,
+    "drjohnson": 9,
+    "playroom": 10,
+    "train": 11,
+    "truck": 12,
 }
 
-format_duration() {
-    local total=$1
-    local h=$((total / 3600))
-    local m=$(( (total % 3600) / 60 ))
-    local s=$((total % 60))
-    if [ "$h" -gt 0 ]; then
-        printf "%dh %dm %ds" "$h" "$m" "$s"
-    else
-        printf "%dm %ds" "$m" "$s"
-    fi
-}
+INDOOR = {"room", "counter", "kitchen", "bonsai", "drjohnson", "playroom"}
+OUTDOOR = {"bicycle", "flowers", "garden", "stump", "treehill", "train", "truck"}
 
-parse_train_tail() {
-    # Parse train.log for duration, Pts, and final block count
-    # The log has very few lines but each line can be huge (progress bar),
-    # so we use tail/head -c to grab small chunks and avoid processing huge lines.
-    # Sets: _duration _pts _blk
-    local train_log="$1"
-    _duration="" _pts="" _blk=""
-    [ ! -f "$train_log" ] && return
 
-    # Last 2KB is enough to find final Pts, blk, and end timestamp
-    local tail_block
-    tail_block=$(tail -c 2048 "$train_log")
-    # First 512B is enough for the start timestamp
-    local head_block
-    head_block=$(head -c 512 "$train_log")
+@dataclass
+class Summary:
+    dataset: str
+    kind: str
+    scene: str
+    status: str
+    metric_iter: str
+    psnr: float | None
+    ssim: float | None
+    lpips: float | None
+    points: str
+    blocks: str
+    peak_mem: str
+    duration_s: float | None
+    no_grad: int
+    source_dir: Path
+    train_points_raw: int | None
+    render_points_raw: int | None
+    train_blocks_raw: int | None
+    saved_blocks: int | None
 
-    # Pts: search whole log (some formats put dict/progress-bar output far from tail).
-    # Try 'pts': '4.42M' (dict str), 'pts': 54275 (dict raw), or pts=4.42M (progress bar).
-    _pts=$(grep -oP "'pts':\s*'\K[\d.]+M" "$train_log" 2>/dev/null | tail -1)
-    if [ -z "$_pts" ]; then
-        local raw_pts
-        raw_pts=$(grep -oP "'pts':\s*\K\d+" "$train_log" 2>/dev/null | tail -1)
-        [ -n "$raw_pts" ] && _pts=$(awk "BEGIN{printf \"%.2fM\", $raw_pts/1000000}")
-    fi
-    if [ -z "$_pts" ]; then
-        _pts=$(grep -oP "pts=\K[\d.]+M" "$train_log" 2>/dev/null | tail -1)
-    fi
 
-    # Block count: try dict 'blk': N or progress bar blk=N (whole-log scan)
-    _blk=$(grep -oP "'blk':\s*\K\d+" "$train_log" 2>/dev/null | tail -1)
-    if [ -z "$_blk" ]; then
-        _blk=$(grep -oP "blk=\K\d+" "$train_log" 2>/dev/null | tail -1)
-    fi
+def run_git(args: list[str]) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(SCRIPT_DIR), *args],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
 
-    # Timestamps: format is MMDD,HH:MM
-    local first_ts last_ts
-    first_ts=$(echo "$head_block" | grep -oP '\d{4},\d{2}:\d{2}' | head -1)
-    last_ts=$(echo "$tail_block" | grep -oP '\d{4},\d{2}:\d{2}' | tail -1)
-    [ -z "$first_ts" ] || [ -z "$last_ts" ] && return
 
-    local t0 t1 diff
-    t0=$(parse_seconds "$first_ts")
-    t1=$(parse_seconds "$last_ts")
-    diff=$((t1 - t0))
-    [ "$diff" -lt 0 ] && diff=$((diff + 86400))
-    _duration="$diff"
-}
+def current_branch() -> str:
+    return run_git(["rev-parse", "--abbrev-ref", "HEAD"])
 
-parse_train_peak() {
-    # Find the maximum peak memory (GB) across the whole log.
-    # Prefers 'peak_rsv': X.XX (LOGGER dict format, reserved memory in GB).
-    # Falls back to progress bar 'peak=X.XX' which is max_memory_allocated.
-    # Sets: _peak_mem
-    local train_log="$1"
-    _peak_mem=""
-    [ ! -f "$train_log" ] && return
-    local m
-    m=$(grep -oP "'peak_rsv':\s*\K[\d.]+" "$train_log" 2>/dev/null \
-        | awk 'BEGIN{m=0} {if($1+0>m) m=$1+0} END{if(m>0) printf "%.2fGB", m}')
-    if [ -z "$m" ]; then
-        m=$(grep -oP "peak=\K[\d.]+" "$train_log" 2>/dev/null \
-            | awk 'BEGIN{m=0} {if($1+0>m) m=$1+0} END{if(m>0) printf "%.2fGB", m}')
-    fi
-    [ -n "$m" ] && _peak_mem="$m"
-}
 
-print_branch() {
-    local branch_dir="$1"
-    local branch_name
-    branch_name=$(basename "$branch_dir")
+def latest_log(scene_dir: Path, prefix: str) -> Path | None:
+    candidates = list(scene_dir.glob(f"{prefix}_*.log"))
+    plain = scene_dir / f"{prefix}.log"
+    if plain.exists():
+        candidates.append(plain)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
 
-    local commit_id hostname_str
-    commit_id=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")
-    hostname_str=$(hostname)
 
-    local sep="-----------------------------------------------------------------------------------"
-    printf "\n Server: %s\n" "$hostname_str"
-    printf " Branch: %s\n" "$branch_name"
-    printf " Commit: %s\n" "$commit_id"
-    echo "$sep"
-    printf "%-12s %8s %8s %8s %8s %5s %10s %12s\n" "Scene" "PSNR" "SSIM" "LPIPS" "Pts" "Blk" "PeakMem" "Time"
-    echo "$sep"
+def latest_output_train_log(scene_root: Path) -> Path | None:
+    log_dir = scene_root / "logs"
+    if not log_dir.is_dir():
+        return None
+    candidates = list(log_dir.glob("*.log"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
 
-    local sum_psnr=0 sum_ssim=0 sum_lpips=0 sum_time=0 count=0
 
-    for scene_dir in "$branch_dir"/*/; do
-        [ ! -d "$scene_dir" ] && continue
-        local scene
-        scene=$(basename "$scene_dir")
+def results_json_path(scene_root: Path, branch: str) -> Path | None:
+    preferred = scene_root / "rendered_p" / branch / "results.json"
+    if preferred.exists():
+        return preferred
 
-        local psnr="N/A" ssim="N/A" lpips="N/A" time_s="N/A"
-        local metrics_log train_log
-        metrics_log=$(find_latest "$scene_dir" "metrics")
-        train_log=$(find_latest "$scene_dir" "train")
+    rendered_root = scene_root / "rendered_p"
+    if not rendered_root.is_dir():
+        return None
+    candidates = list(rendered_root.glob("*/results.json"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: (p.stat().st_mtime, str(p)))
 
-        if [ -n "$metrics_log" ] && [ -f "$metrics_log" ]; then
-            psnr=$(grep -oP 'PSNR\s*:\s*\K[\d.]+' "$metrics_log" | head -1)
-            ssim=$(grep -oP 'SSIM\s*:\s*\K[\d.]+' "$metrics_log" | head -1)
-            lpips=$(grep -oP 'LPIPS\s*:\s*\K[\d.]+' "$metrics_log" | head -1)
-            : "${psnr:=N/A}" "${ssim:=N/A}" "${lpips:=N/A}"
-        fi
 
-        local pts="N/A" blk="N/A" peak_mem="N/A"
-        if [ -n "$train_log" ]; then
-            parse_train_tail "$train_log"
-            [ -n "$_pts" ] && pts="$_pts"
-            [ -n "$_blk" ] && blk="$_blk"
-            parse_train_peak "$train_log"
-            [ -n "$_peak_mem" ] && peak_mem="$_peak_mem"
-        fi
+def read_text(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return ""
+    return path.read_text(errors="ignore")
 
-        local dur="$_duration"
-        if [ -n "$dur" ]; then
-            time_s=$(format_duration "$dur")
-            sum_time=$((sum_time + dur))
-        fi
 
-        if [ "$psnr" != "N/A" ]; then
-            sum_psnr=$(awk "BEGIN{print $sum_psnr + $psnr}")
-            sum_ssim=$(awk "BEGIN{print $sum_ssim + $ssim}")
-            sum_lpips=$(awk "BEGIN{print $sum_lpips + $lpips}")
-            count=$((count + 1))
-            printf "%-12s %8.4f %8.4f %8.4f %8s %5s %10s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$blk" "$peak_mem" "$time_s"
-        else
-            printf "%-12s %8s %8s %8s %8s %5s %10s %12s\n" "$scene" "$psnr" "$ssim" "$lpips" "$pts" "$blk" "$peak_mem" "$time_s"
-        fi
-    done
+def last_float(pattern: str, text: str) -> float | None:
+    matches = re.findall(pattern, text)
+    if not matches:
+        return None
+    value = matches[-1]
+    if isinstance(value, tuple):
+        value = next((x for x in value if x), "")
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
-    echo "$sep"
-}
 
-# Main
-if [ $# -gt 0 ]; then
-    branches=("$@")
-else
-    current_branch=$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
-    if [ -n "$current_branch" ] && [ -d "$DEBUG_DIR/$current_branch" ]; then
-        branches=("$current_branch")
-    else
-        echo "No results found for current branch '$current_branch' under debug/"
-        exit 1
-    fi
-fi
+def max_float(pattern: str, text: str) -> float | None:
+    values: list[float] = []
+    for value in re.findall(pattern, text):
+        if isinstance(value, tuple):
+            value = next((x for x in value if x), "")
+        try:
+            values.append(float(value))
+        except ValueError:
+            pass
+    return max(values) if values else None
 
-for branch in "${branches[@]}"; do
-    branch_dir="$DEBUG_DIR/$branch"
-    if [ ! -d "$branch_dir" ]; then
-        echo "Warning: $branch_dir not found, skipping."
-        continue
-    fi
-    print_branch "$branch_dir"
-done
+
+def last_int(pattern: str, text: str) -> int | None:
+    matches = re.findall(pattern, text)
+    if not matches:
+        return None
+    value = matches[-1]
+    if isinstance(value, tuple):
+        value = next((x for x in value if x), "")
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def format_points(raw: int | float | None) -> str:
+    if raw is None:
+        return "N/A"
+    return f"{raw / 1_000_000:.2f}M"
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "N/A"
+    total = int(round(seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    return f"{m}m {s}s"
+
+
+def parse_metric_iter(text: str) -> str:
+    patterns = [
+        r"Method:\s*ours_(\d+)",
+        r"\bours_(\d+)\b",
+        r"iteration[_\s-]*(\d+)",
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, text, flags=re.IGNORECASE)
+        if matches:
+            return str(matches[-1])
+    return "N/A"
+
+
+def parse_metrics(metrics_log: Path | None) -> tuple[float | None, float | None, float | None, str]:
+    text = read_text(metrics_log)
+    if not text:
+        return None, None, None, "N/A"
+    psnr = last_float(r"PSNR\s*:\s*([0-9.]+)", text)
+    ssim = last_float(r"SSIM\s*:\s*([0-9.]+)", text)
+    lpips = last_float(r"LPIPS\s*:\s*([0-9.]+)", text)
+    return psnr, ssim, lpips, parse_metric_iter(text)
+
+
+def result_iteration(key: str) -> int | None:
+    match = re.search(r"_(\d+)$", key)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def choose_result_entry(data: object) -> tuple[str, dict[str, object]] | None:
+    if not isinstance(data, dict):
+        return None
+    entries = [(str(k), v) for k, v in data.items() if isinstance(v, dict)]
+    if not entries:
+        return None
+    for key, value in entries:
+        if key == "ours_30000":
+            return key, value
+    return max(entries, key=lambda item: (result_iteration(item[0]) or -1, item[0]))
+
+
+def metric_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_results(results_path: Path | None) -> tuple[float | None, float | None, float | None, str, str, int | None]:
+    if results_path is None or not results_path.exists():
+        return None, None, None, "N/A", "N/A", None
+    try:
+        data = json.loads(read_text(results_path))
+    except json.JSONDecodeError:
+        return None, None, None, "N/A", "N/A", None
+
+    chosen = choose_result_entry(data)
+    if chosen is None:
+        return None, None, None, "N/A", "N/A", None
+
+    key, entry = chosen
+    psnr = metric_float(entry.get("PSNR"))
+    ssim = metric_float(entry.get("SSIM"))
+    lpips = metric_float(entry.get("LPIPS"))
+    iteration = result_iteration(key)
+    metric_iter = str(iteration) if iteration is not None else "N/A"
+
+    raw_points_float = metric_float(entry.get("num_gaussians"))
+    raw_points = int(raw_points_float) if raw_points_float is not None else None
+    points = format_points(raw_points) if raw_points is not None else "N/A"
+    return psnr, ssim, lpips, metric_iter, points, raw_points
+
+
+def parse_train(train_log: Path | None) -> tuple[str, str, str, float | None, int, bool, bool, int | None, int | None]:
+    text = read_text(train_log)
+    if not text:
+        return "N/A", "N/A", "N/A", None, 0, False, False, None, None
+
+    final_points = last_int(r'"final_points"\s*:\s*(\d+)', text)
+    train_points_raw = final_points
+    points = format_points(final_points)
+    if points == "N/A":
+        pts_m = re.findall(r"'pts'\s*:\s*'([0-9.]+M)'", text)
+        if pts_m:
+            points = pts_m[-1]
+    if points == "N/A":
+        raw = last_int(r"'pts'\s*:\s*(\d+)", text)
+        points = format_points(raw)
+        train_points_raw = raw
+    if points == "N/A":
+        pts_m = re.findall(r"\bpts=([0-9.]+M)", text)
+        if pts_m:
+            points = pts_m[-1]
+
+    final_blocks = last_int(r'"final_blocks"\s*:\s*(\d+)', text)
+    if final_blocks is None:
+        final_blocks = last_int(r"'blk'\s*:\s*(\d+)", text)
+    if final_blocks is None:
+        final_blocks = last_int(r"\bblk=(\d+)", text)
+    blocks = str(final_blocks) if final_blocks is not None else "N/A"
+
+    peak = max_float(r"'peak_rsv'\s*:\s*([0-9.]+)", text)
+    if peak is None:
+        peak = max_float(r'"peak_reserved_gb"\s*:\s*([0-9.]+)', text)
+    if peak is None:
+        peak = max_float(r"\bpeak=([0-9.]+)", text)
+    peak_mem = f"{peak:.2f}GB" if peak is not None else "N/A"
+
+    duration = last_float(r'"seconds"\s*:\s*([0-9.]+)', text)
+    if duration is None:
+        duration = last_float(r"Training time cost:\s*\[([0-9.]+)\]\s*seconds", text)
+    if duration is None:
+        duration = last_float(r"'elapsed'\s*:\s*'([0-9.]+)s'", text)
+
+    no_grad = len(re.findall(r"no gradient block was processed", text))
+    has_complete = "[training_complete]" in text or "Training time cost:" in text or "'iter': 30000" in text
+    crashed = bool(re.search(r"core dumped|Traceback|RuntimeError|Aborted", text, flags=re.IGNORECASE))
+    return points, blocks, peak_mem, duration, no_grad, has_complete, crashed, train_points_raw, final_blocks
+
+
+def scene_kind(scene: str) -> str:
+    if scene in INDOOR:
+        return "indoor"
+    if scene in OUTDOOR:
+        return "outdoor"
+    return "unknown"
+
+
+def infer_dataset(scene: str, parent_dataset: str | None = None) -> str:
+    if parent_dataset:
+        return parent_dataset
+    return SCENE_DATASET.get(scene, "unknown")
+
+
+def has_any_log(scene_dir: Path) -> bool:
+    return any(scene_dir.glob("train*.log")) or any(scene_dir.glob("metrics*.log")) or any(scene_dir.glob("render*.log"))
+
+
+def has_real_output(scene_root: Path, branch: str) -> bool:
+    return latest_output_train_log(scene_root) is not None or results_json_path(scene_root, branch) is not None
+
+
+def summarize_scene(dataset: str, scene_dir: Path) -> Summary:
+    scene = scene_dir.name
+    metrics_log = latest_log(scene_dir, "metrics")
+    train_log = latest_log(scene_dir, "train")
+
+    psnr, ssim, lpips, metric_iter = parse_metrics(metrics_log)
+    points, blocks, peak_mem, duration, no_grad, train_complete, crashed, train_points_raw, train_blocks_raw = parse_train(train_log)
+
+    if crashed:
+        status = "CRASH"
+    elif psnr is None:
+        status = "NO_METRIC"
+    elif metric_iter != "N/A" and metric_iter != "30000":
+        status = f"ITER_{metric_iter}"
+    elif train_log is not None and not train_complete:
+        status = "TRAIN?"
+    else:
+        status = "OK"
+
+    return Summary(
+        dataset=dataset,
+        kind=scene_kind(scene),
+        scene=scene,
+        status=status,
+        metric_iter=metric_iter,
+        psnr=psnr,
+        ssim=ssim,
+        lpips=lpips,
+        points=points,
+        blocks=blocks,
+        peak_mem=peak_mem,
+        duration_s=duration,
+        no_grad=no_grad,
+        source_dir=scene_dir,
+        train_points_raw=train_points_raw,
+        render_points_raw=None,
+        train_blocks_raw=train_blocks_raw,
+        saved_blocks=None,
+    )
+
+
+def count_saved_blocks(scene_root: Path, branch: str, metric_iter: str) -> int | None:
+    if metric_iter == "N/A":
+        return None
+    point_cloud_dir = scene_root / "point_cloud" / branch / f"iteration_{metric_iter}"
+    if not point_cloud_dir.is_dir():
+        return None
+    return len(list(point_cloud_dir.glob("point_cloud_sub_*.ply")))
+
+
+def summarize_output_scene(branch: str, dataset: str, scene_root: Path) -> Summary:
+    scene = scene_root.name
+    results_path = results_json_path(scene_root, branch)
+    train_log = latest_output_train_log(scene_root)
+
+    psnr, ssim, lpips, metric_iter, result_points, render_points_raw = parse_results(results_path)
+    points, blocks, peak_mem, duration, no_grad, train_complete, crashed, train_points_raw, train_blocks_raw = parse_train(train_log)
+    if points == "N/A" and result_points != "N/A":
+        points = result_points
+    saved_blocks = count_saved_blocks(scene_root, branch, metric_iter)
+
+    if crashed:
+        status = "CRASH"
+    elif psnr is None:
+        status = "NO_METRIC"
+    elif metric_iter != "N/A" and metric_iter != "30000":
+        status = f"ITER_{metric_iter}"
+    elif train_log is not None and not train_complete:
+        status = "TRAIN?"
+    else:
+        status = "OK"
+
+    return Summary(
+        dataset=dataset,
+        kind=scene_kind(scene),
+        scene=scene,
+        status=status,
+        metric_iter=metric_iter,
+        psnr=psnr,
+        ssim=ssim,
+        lpips=lpips,
+        points=points,
+        blocks=blocks,
+        peak_mem=peak_mem,
+        duration_s=duration,
+        no_grad=no_grad,
+        source_dir=scene_root,
+        train_points_raw=train_points_raw,
+        render_points_raw=render_points_raw,
+        train_blocks_raw=train_blocks_raw,
+        saved_blocks=saved_blocks,
+    )
+
+
+def collect_debug_branch(branch_dir: Path) -> list[Summary]:
+    candidates: dict[tuple[str, str], tuple[tuple[int, float], Path, str]] = {}
+
+    for dataset in DATASETS:
+        dataset_dir = branch_dir / dataset
+        if not dataset_dir.is_dir():
+            continue
+        for scene_dir in dataset_dir.iterdir():
+            if not scene_dir.is_dir() or not has_any_log(scene_dir):
+                continue
+            # Canonical pipeline layout. Keep it as fallback when a richer
+            # flat debug/<branch>/<scene>/ mirror exists for the same scene.
+            score = (0, max((p.stat().st_mtime for p in scene_dir.glob("*.log")), default=0.0))
+            candidates[(dataset, scene_dir.name)] = (score, scene_dir, dataset)
+
+    for scene_dir in branch_dir.iterdir():
+        if not scene_dir.is_dir() or scene_dir.name in DATASETS or not has_any_log(scene_dir):
+            continue
+        dataset = infer_dataset(scene_dir.name)
+        key = (dataset, scene_dir.name)
+        # Flat per-scene dirs usually contain the detailed logger output
+        # (train_*.log with peak_rsv/profile fields), so prefer them over the
+        # plain pipeline train.log when both are present.
+        score = (1, max((p.stat().st_mtime for p in scene_dir.glob("*.log")), default=0.0))
+        old = candidates.get(key)
+        if old is None or score > old[0]:
+            candidates[key] = (score, scene_dir, dataset)
+
+    rows = [summarize_scene(dataset, scene_dir) for _, scene_dir, dataset in candidates.values()]
+    rows.sort(key=lambda r: (DATASET_ORDER.get(r.dataset, 99), SCENE_ORDER.get(r.scene, 99), r.scene))
+    return rows
+
+
+def collect_output_branch(branch: str) -> list[Summary]:
+    if not OUTPUT_ROOT.is_dir():
+        return []
+
+    rows: list[Summary] = []
+    for dataset in DATASETS:
+        branch_dir = OUTPUT_ROOT / dataset / branch
+        if not branch_dir.is_dir():
+            continue
+        for scene_root in branch_dir.iterdir():
+            if not scene_root.is_dir() or not has_real_output(scene_root, branch):
+                continue
+            rows.append(summarize_output_scene(branch, dataset, scene_root))
+
+    rows.sort(key=lambda r: (DATASET_ORDER.get(r.dataset, 99), SCENE_ORDER.get(r.scene, 99), r.scene))
+    return rows
+
+
+def collect_branch(branch: str) -> list[Summary]:
+    by_scene: dict[tuple[str, str], tuple[int, Summary]] = {}
+
+    debug_dir = DEBUG_DIR / branch
+    if debug_dir.is_dir():
+        for row in collect_debug_branch(debug_dir):
+            by_scene[(row.dataset, row.scene)] = (0, row)
+
+    for row in collect_output_branch(branch):
+        # The real output tree is authoritative. Keep debug only for scenes
+        # that have not yet been copied/rendered into /data.
+        by_scene[(row.dataset, row.scene)] = (1, row)
+
+    rows = [row for _, row in by_scene.values()]
+    rows.sort(key=lambda r: (DATASET_ORDER.get(r.dataset, 99), SCENE_ORDER.get(r.scene, 99), r.scene))
+    return rows
+
+
+def fmt_float(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.4f}"
+
+
+def print_rows(rows: list[Summary]) -> None:
+    sep = "-" * 112
+    print(sep)
+    print(
+        f"{'Dataset':<13} {'Type':<8} {'Scene':<12} {'Iter':>6} "
+        f"{'PSNR':>8} {'SSIM':>8} {'LPIPS':>8} {'Pts':>8} {'Blk':>5} "
+        f"{'PeakMem':>9} {'Time':>11}"
+    )
+    print(sep)
+    for row in rows:
+        print(
+            f"{row.dataset:<13} {row.kind:<8} {row.scene:<12} {row.metric_iter:>6} "
+            f"{fmt_float(row.psnr):>8} {fmt_float(row.ssim):>8} {fmt_float(row.lpips):>8} "
+            f"{row.points:>8} {row.blocks:>5} {row.peak_mem:>9} "
+            f"{format_duration(row.duration_s):>11}"
+        )
+    print(sep)
+
+
+def print_averages(rows: list[Summary]) -> None:
+    valid = [r for r in rows if r.psnr is not None and r.ssim is not None and r.lpips is not None and r.status in {"OK", "TRAIN?"}]
+    if not valid:
+        return
+
+    print("Averages:")
+    for dataset in DATASETS:
+        subset = [r for r in valid if r.dataset == dataset]
+        if not subset:
+            continue
+        print_average_line(dataset, subset)
+    print_average_line("overall", valid)
+
+
+def print_warnings(rows: list[Summary]) -> None:
+    warnings: list[str] = []
+    for row in rows:
+        label = f"{row.dataset}/{row.scene}"
+        if row.train_points_raw is not None and row.render_points_raw is not None:
+            delta = abs(row.train_points_raw - row.render_points_raw)
+            if delta > max(10_000, row.train_points_raw * 0.005):
+                warnings.append(
+                    f"  {label}: train_pts={format_points(row.train_points_raw)}, "
+                    f"render_pts={format_points(row.render_points_raw)}"
+                )
+        if row.train_blocks_raw is not None and row.saved_blocks is not None and row.train_blocks_raw != row.saved_blocks:
+            warnings.append(
+                f"  {label}: train_blocks={row.train_blocks_raw}, "
+                f"saved_point_cloud_files={row.saved_blocks}"
+            )
+
+    if not warnings:
+        return
+    print("Warnings:")
+    for warning in warnings:
+        print(warning)
+
+
+def print_average_line(label: str, rows: list[Summary]) -> None:
+    n = len(rows)
+    psnr = sum(r.psnr for r in rows if r.psnr is not None) / n
+    ssim = sum(r.ssim for r in rows if r.ssim is not None) / n
+    lpips = sum(r.lpips for r in rows if r.lpips is not None) / n
+    seconds = [r.duration_s for r in rows if r.duration_s is not None]
+    time_text = format_duration(sum(seconds)) if seconds else "N/A"
+    print(f"  {label:<13} scenes={n:<2}  PSNR={psnr:7.4f}  SSIM={ssim:7.4f}  LPIPS={lpips:7.4f}  total_time={time_text}")
+
+
+def branches_to_print() -> list[str]:
+    if BRANCH_ARGS:
+        return BRANCH_ARGS
+    branch = current_branch()
+    if branch and ((DEBUG_DIR / branch).is_dir() or any((OUTPUT_ROOT / dataset / branch).is_dir() for dataset in DATASETS)):
+        return [branch]
+    print(f"No results found for current branch '{branch}' under {OUTPUT_ROOT} or debug/", file=sys.stderr)
+    sys.exit(1)
+
+
+def main() -> None:
+    commit_id = run_git(["rev-parse", "HEAD"])
+    hostname = os.uname().nodename
+
+    for branch in branches_to_print():
+        rows = collect_branch(branch)
+        print()
+        print(f"Server:  {hostname}")
+        print(f"Branch:  {branch}")
+        print(f"Commit:  {commit_id}")
+        print(f"Source:  {OUTPUT_ROOT} (debug fallback)")
+        if not rows:
+            print("No scene logs found.")
+            continue
+        print_rows(rows)
+        print_averages(rows)
+        print_warnings(rows)
+
+
+if __name__ == "__main__":
+    main()
+PY
