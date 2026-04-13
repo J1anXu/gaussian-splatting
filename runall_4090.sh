@@ -30,7 +30,7 @@ LOG_ROOT=debug
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
 
-DATASETS=(mip360 deepblending tandt)
+DATASETS=(mip360_outdoor mip360_indoor deepblending tandt)
 
 ########################################
 # 每个数据集的场景列表
@@ -38,9 +38,18 @@ DATASETS=(mip360 deepblending tandt)
 get_scenes() {
   local dataset=$1
   case $dataset in
-    mip360)        echo "bicycle flowers garden stump treehill room counter kitchen bonsai" ;;
-    deepblending)  echo "drjohnson playroom" ;;
-    tandt)         echo "train truck" ;;
+    mip360_outdoor) echo "bicycle flowers garden stump treehill" ;;
+    mip360_indoor)  echo "room counter kitchen bonsai" ;;
+    deepblending)   echo "drjohnson playroom" ;;
+    tandt)          echo "train truck" ;;
+  esac
+}
+
+get_real_dataset() {
+  local dataset=$1
+  case $dataset in
+    mip360_outdoor|mip360_indoor) echo "mip360" ;;
+    *)                            echo "$dataset" ;;
   esac
 }
 
@@ -51,7 +60,7 @@ get_scenes() {
 get_img_flag() {
   local dataset=$1
   local scene=$2
-  if [[ "$dataset" == "mip360" ]]; then
+  if [[ "$dataset" == "mip360" || "$dataset" == "mip360_indoor" || "$dataset" == "mip360_outdoor" ]]; then
     case $scene in
       room|counter|kitchen|bonsai) echo "-i images_2" ;;
       *)                           echo "-i images_4" ;;
@@ -64,14 +73,16 @@ get_img_flag() {
 ########################################
 run_pipeline() {
   local gpu=$1 dataset=$2 scene=$3
+  local real_dataset
   local img_flag
+  real_dataset=$(get_real_dataset "$dataset")
   img_flag=$(get_img_flag "$dataset" "$scene")
 
   export CUDA_VISIBLE_DEVICES=$gpu
 
-  local data_path="$DATA_BASE/$dataset/$scene"
-  local model_path="$OUT_BASE/$dataset/$GIT_BRANCH/$scene"
-  local log_dir="$LOG_ROOT/$GIT_BRANCH/$dataset/$scene"
+  local data_path="$DATA_BASE/$real_dataset/$scene"
+  local model_path="$OUT_BASE/$real_dataset/$GIT_BRANCH/$scene"
+  local log_dir="$LOG_ROOT/$GIT_BRANCH/$real_dataset/$scene"
   mkdir -p "$log_dir"
 
   echo "========================================"
@@ -123,6 +134,7 @@ for i in "${!ALL_TASKS[@]}"; do
 done
 
 echo "Launching $NUM_GPUS GPU queues  (branch: $GIT_BRANCH)"
+echo "Datasets: ${DATASETS[*]}"
 for gpu in "${GPUS[@]}"; do
   echo "  GPU $gpu: ${GPU_QUEUES[$gpu]}"
 done
