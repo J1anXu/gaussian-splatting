@@ -5,13 +5,9 @@
 # ============================================================
 #
 # Useful overrides:
-#   GPU=1 TRACE_FROM=650 TRACE_UNTIL=720 bash test_4090.sh
-#   DISABLE_DENSIFY=0 bash test_4090.sh   # compare with densify enabled
-#   SPLIT_SIZE_OVERRIDE=1200000 bash test_4090.sh
-#   GPU_PACKED_CACHE_POINT_BUDGET=750000 bash test_4090.sh
-#   GPU_PACKED_CACHE_STRATEGY=largest bash test_4090.sh
-#   GPU_PACKED_CACHE_STRATEGY=tail bash test_4090.sh
-#
+#   GPU=1 bash test_4090.sh
+#   MERGE_FAST=0 bash test_4090.sh
+#   MERGE_FAST_VALIDATE=1 bash test_4090.sh
 
 set -Eeuo pipefail
 
@@ -20,40 +16,28 @@ BRANCH="$(git -C "$SCRIPT_DIR" branch --show-current 2>/dev/null || echo no_git)
 COMMIT="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo no_commit)"
 STAMP="$(date +"%Y%m%d_%H%M%S")"
 
-# ============================================================
-# Config (all can be overridden by environment variables)
-# ============================================================
+# Stable bicycle benchmark. Keep these fixed unless we intentionally create a
+# new script for another scene.
+TRAINED_PLY_PATH="/data/jian/output/gaussian-splatting/mip360/vanilla3DGS/bicycle/point_cloud/iteration_30000/point_cloud.ply"
+DATA_PATH="/data/jian/data/mip360/bicycle"
+MODEL_PATH="/data/jian/output"
+IMG_FLAG="images_4"
 
-TRAINED_PLY_PATH="${TRAINED_PLY_PATH:-/data/jian/output/gaussian-splatting/mip360/vanilla3DGS/bicycle/point_cloud/iteration_30000/point_cloud.ply}"
-DATA_PATH="${DATA_PATH:-/data/jian/data/mip360/bicycle}"
-MODEL_PATH="${MODEL_PATH:-/data/jian/output}"
 GPU="${GPU:-0}"
-IMG_FLAG="${IMG_FLAG:-images_4}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 LOCAL_RASTERIZER_PATH="${LOCAL_RASTERIZER_PATH:-$SCRIPT_DIR/submodules/diff-gaussian-rasterization}"
 
-BENCH_FROM="${BENCH_FROM:-301}"
-BENCH_UNTIL="${BENCH_UNTIL:-700}"
-TRACE_FROM="${TRACE_FROM:-681}"
-TRACE_UNTIL="${TRACE_UNTIL:-750}"
-PROFILE_FROM="${PROFILE_FROM:-1}"
-PROFILE_UNTIL="${PROFILE_UNTIL:-750}"
-PROFILE_EVERY="${PROFILE_EVERY:-1}"
-PROFILE_SYNC=1
-TEST_DIAGNOSTICS=1
-GPU_CACHE_THRESHOLD_GB="${GPU_CACHE_THRESHOLD_GB:-0.5}"
-GPU_CACHE_HARD_LIMIT_GB="${GPU_CACHE_HARD_LIMIT_GB:-1.35}"
-GPU_CACHE_STAGE_ENTRY_LIMIT_GB="${GPU_CACHE_STAGE_ENTRY_LIMIT_GB:-0}"
-CUDA_EMPTY_CACHE_INTERVAL="${CUDA_EMPTY_CACHE_INTERVAL:-16}"
-SPLIT_SIZE_OVERRIDE="${SPLIT_SIZE_OVERRIDE:-0}"
-LEGACY_PER_BLOCK_LOSS="${LEGACY_PER_BLOCK_LOSS:-0}"
-GPU_PACKED_CACHE_STRATEGY="${GPU_PACKED_CACHE_STRATEGY:-tail}"
-GPU_PACKED_CACHE_POINT_BUDGET="${GPU_PACKED_CACHE_POINT_BUDGET:-0}"
-MERGE_FAST="${MERGE_FAST:-1}"
-MERGE_FAST_VALIDATE="${MERGE_FAST_VALIDATE:-1}"
+# Fixed diagnostic window. These values make different test runs comparable.
+BENCH_FROM=301
+BENCH_UNTIL=700
+TRACE_FROM=681
+TRACE_UNTIL=750
+PROFILE_FROM=1
+PROFILE_UNTIL=750
+PROFILE_EVERY=1
 
-# For a fixed-point-cloud Phase 2 benchmark, this should normally stay on.
-DISABLE_DENSIFY="${DISABLE_DENSIFY:-1}"
+MERGE_FAST="${MERGE_FAST:-1}"
+MERGE_FAST_VALIDATE="${MERGE_FAST_VALIDATE:-0}"
 
 LOG_ROOT="${LOG_ROOT:-$SCRIPT_DIR/debug/$BRANCH/benchmark_4090}"
 RUN_LOG="$LOG_ROOT/test_4090_${STAMP}.log"
@@ -90,61 +74,11 @@ run_and_log() {
   log "MODEL_PATH=$MODEL_PATH"
   log "IMG_FLAG=$IMG_FLAG"
   log "PYTHON_BIN=$PYTHON_BIN"
-  log "PYTHONPATH=$PYTHONPATH"
-  log "LOCAL_RASTERIZER_PATH=$LOCAL_RASTERIZER_PATH"
   log "BENCH=${BENCH_FROM}-${BENCH_UNTIL} TRACE=${TRACE_FROM}-${TRACE_UNTIL}"
-  log "PROFILE=${PROFILE_FROM}-${PROFILE_UNTIL}/every=${PROFILE_EVERY} sync=${PROFILE_SYNC} test_diagnostics=${TEST_DIAGNOSTICS}"
-  log "GPU_CACHE_THRESHOLD_GB=$GPU_CACHE_THRESHOLD_GB GPU_CACHE_HARD_LIMIT_GB=$GPU_CACHE_HARD_LIMIT_GB GPU_CACHE_STAGE_ENTRY_LIMIT_GB=$GPU_CACHE_STAGE_ENTRY_LIMIT_GB CUDA_EMPTY_CACHE_INTERVAL=$CUDA_EMPTY_CACHE_INTERVAL"
-  log "SPLIT_SIZE_OVERRIDE=$SPLIT_SIZE_OVERRIDE"
-  log "LEGACY_PER_BLOCK_LOSS=$LEGACY_PER_BLOCK_LOSS"
-  log "GPU_PACKED_CACHE_STRATEGY=$GPU_PACKED_CACHE_STRATEGY"
-  log "GPU_PACKED_CACHE_POINT_BUDGET=$GPU_PACKED_CACHE_POINT_BUDGET"
+  log "PROFILE=${PROFILE_FROM}-${PROFILE_UNTIL}/every=${PROFILE_EVERY} sync=1"
   log "MERGE_FAST=$MERGE_FAST"
   log "MERGE_FAST_VALIDATE=$MERGE_FAST_VALIDATE"
-  log "DISABLE_DENSIFY=$DISABLE_DENSIFY"
   log "RUN_LOG=$RUN_LOG"
-  log "------------------------------------------------------------"
-  log "git status --short:"
-  git -C "$SCRIPT_DIR" status --short || true
-  log "------------------------------------------------------------"
-  log "submodules:"
-  git -C "$SCRIPT_DIR" submodule status || true
-  log "------------------------------------------------------------"
-  log "nvidia-smi:"
-  nvidia-smi || true
-  log "------------------------------------------------------------"
-  log "python/torch:"
-  "$PYTHON_BIN" - <<'PY' || true
-import json
-import sys
-import torch
-info = {
-    "python": sys.version.replace("\n", " "),
-    "torch": torch.__version__,
-    "cuda": torch.version.cuda,
-    "cuda_available": torch.cuda.is_available(),
-    "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-    "sys_path_head": sys.path[:6],
-}
-if torch.cuda.is_available():
-    info["devices"] = [
-        {
-            "index": i,
-            "name": torch.cuda.get_device_properties(i).name,
-            "total_memory_gb": round(torch.cuda.get_device_properties(i).total_memory / 1024**3, 3),
-        }
-        for i in range(torch.cuda.device_count())
-    ]
-try:
-    import diff_gaussian_rasterization_wenqi_tam as raster_pkg
-    import diff_gaussian_rasterization_wenqi_tam._C as raster_c
-    info["raster_pkg"] = raster_pkg.__file__
-    info["raster_ext"] = raster_c.__file__
-    info["packed_sparse_adam_available"] = hasattr(raster_c, "packed_sparse_adam")
-except Exception as exc:
-    info["raster_import_error"] = repr(exc)
-print(json.dumps(info, indent=2))
-PY
   log "============================================================"
 } | tee "$RUN_LOG"
 
@@ -167,22 +101,8 @@ TRAIN_CMD=(
   --trace_until "$TRACE_UNTIL"
   --bench_from "$BENCH_FROM"
   --bench_until "$BENCH_UNTIL"
-  --gpu_cache_threshold_gb "$GPU_CACHE_THRESHOLD_GB"
-  --gpu_cache_hard_limit_gb "$GPU_CACHE_HARD_LIMIT_GB"
-  --gpu_cache_stage_entry_limit_gb "$GPU_CACHE_STAGE_ENTRY_LIMIT_GB"
-  --cuda_empty_cache_interval "$CUDA_EMPTY_CACHE_INTERVAL"
-  --split_size_override "$SPLIT_SIZE_OVERRIDE"
-  --gpu_packed_cache_strategy "$GPU_PACKED_CACHE_STRATEGY"
-  --gpu_packed_cache_point_budget "$GPU_PACKED_CACHE_POINT_BUDGET"
+  --disable_densify
 )
-
-if [[ "$DISABLE_DENSIFY" == "1" ]]; then
-  TRAIN_CMD+=(--disable_densify)
-fi
-
-if [[ "$LEGACY_PER_BLOCK_LOSS" == "1" ]]; then
-  TRAIN_CMD+=(--legacy_per_block_loss)
-fi
 
 log "training command:" | tee -a "$RUN_LOG"
 printf '  %q' "${TRAIN_CMD[@]}" | tee -a "$RUN_LOG"
