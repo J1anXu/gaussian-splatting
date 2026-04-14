@@ -29,7 +29,7 @@ SPLIT_SIZE = SPLIT_SIZE_OUTDOOR  # default, overridden at runtime by scene type
 
 GPU_CACHE_THRESHOLD_GB = 0.5  # reserved 超过 allocated 多少 GB 时清理 CUDA 缓存
 
-MERGE_FAST = False  # True: 全图merge(快,多用~90MB), False: 分块merge(省显存,慢)
+MERGE_FAST = True  # True: 全图merge(快,多用~90MB), False: 分块merge(省显存,慢)
 
 HALF = False        # 半精度梯度拷贝加速
 TIMELINE = False    # Timeline 日志开关 (Chrome Trace JSON → Perfetto UI)
