@@ -411,7 +411,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 progress_bar.close()
 
             if iteration % 1 == 0:
-                log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "blk": len(submodel_list), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": f"{elapsed:.1f}s"}
+                block_sizes = [int(gs._xyz.shape[0]) for gs in submodel_list]
+                log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "blk": len(submodel_list), "blk_sz": block_sizes, "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": f"{elapsed:.1f}s"}
                 wandb_log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": visible_pts, "pts": pts_total, "vis%": round(vis_pct, 1), "blk": len(submodel_list), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": round(elapsed, 1)}
 
                 # logging
@@ -562,5 +563,4 @@ if __name__ == "__main__":
         res = {"first_iter": 1}
 
     training(lp.extract(args), opt, pp.extract(args), args.save_iterations, args.debug_from, res)
-
 

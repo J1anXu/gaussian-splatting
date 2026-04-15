@@ -31,7 +31,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
 #DATASETS=(mip360_outdoor mip360_indoor deepblending tandt)
 
-DATASETS=(mip360_indoor deepblending tandt)
+DATASETS=(deepblending)
 
 ########################################
 # 每个数据集的场景列表

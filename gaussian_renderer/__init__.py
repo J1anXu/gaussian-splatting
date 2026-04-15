@@ -221,7 +221,7 @@ def merge_opt( N_total, render_list, depth_list, alphaLeft_list, vis_filter_list
         # 2.2 局部 Sort & Gather (原版逻辑)
         # -------------------------------------------------
         # Sort along depth
-        sort_idx_chunk = torch.argsort(depths_chunk.squeeze(1), dim=0, descending=True) # [K, h, W]
+        sort_idx_chunk = torch.argsort(depths_chunk.squeeze(1), dim=0, descending=True, stable=True) # [K, h, W]
         
         # Gather RGB
         idx_rgb = sort_idx_chunk.unsqueeze(1).expand(-1, 3, -1, -1)
@@ -353,7 +353,7 @@ def _merge_opt_kid_fast_py(render_list, depth_list, alphaLeft_list, eps=1e-10):
     alphas = torch.stack([a if a.dim() == 3 else a.unsqueeze(0)
                           for a in alphaLeft_list], dim=0)
 
-    sort_idx = torch.argsort(depths.squeeze(1), dim=0, descending=True)
+    sort_idx = torch.argsort(depths.squeeze(1), dim=0, descending=True, stable=True)
     idx_rgb = sort_idx.unsqueeze(1).expand(-1, 3, -1, -1)
     idx_1ch = sort_idx.unsqueeze(1)
 
@@ -458,7 +458,7 @@ def _merge_opt_kid_chunked(render_list, depth_list, alphaLeft_list, eps=1e-10, c
         # 2.2 局部 Sort & Gather (原版逻辑)
         # -------------------------------------------------
         # Sort along depth
-        sort_idx_chunk = torch.argsort(depths_chunk.squeeze(1), dim=0, descending=True) # [K, h, W]
+        sort_idx_chunk = torch.argsort(depths_chunk.squeeze(1), dim=0, descending=True, stable=True) # [K, h, W]
         
         # Gather RGB
         idx_rgb = sort_idx_chunk.unsqueeze(1).expand(-1, 3, -1, -1)
