@@ -29,6 +29,11 @@ SPLIT_SIZE = SPLIT_SIZE_OUTDOOR  # default, overridden at runtime by scene type
 
 GPU_CACHE_THRESHOLD_GB = 0.5  # reserved 超过 allocated 多少 GB 时清理 CUDA 缓存
 
+TRAIN_LOG_INTERVAL = 10  # 训练日志 / tqdm / 内存窗口统计间隔
+BENCHMARK_SAMPLE_INTERVAL = 10  # benchmark 采样间隔，避免每 iter 强同步
+CUDA_CACHE_CHECK_INTERVAL = 10  # 检查 empty_cache 的间隔
+VALIDATE_VISIBLE_INDICES = False  # 调试用：检查 visible_indices 是否越界，默认关闭避免每 iter .item()
+
 MERGE_FAST = True  # True: 全图merge(快,多用~90MB), False: 分块merge(省显存,慢)
 
 HALF = False        # 半精度梯度拷贝加速

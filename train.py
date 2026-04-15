@@ -76,7 +76,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     initial_gaussians.training_setup(opt)
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    progress_bar = tqdm(total=opt.iterations - first_iter + 1, desc="Training progress")
 
     if DEBUG_MODE:
         opt.iterations = 1050
@@ -129,12 +129,19 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     bench_its_list = []
     bench_alloc_list = []
     bench_rsv_list = []
+    bench_peak_alloc_list = []
+    bench_peak_rsv_list = []
     bench_vis_list = []
     bench_loss_list = []
+    log_interval = max(1, config.TRAIN_LOG_INTERVAL)
+    benchmark_sample_interval = max(1, config.BENCHMARK_SAMPLE_INTERVAL)
+    cache_check_interval = max(1, config.CUDA_CACHE_CHECK_INTERVAL)
+    validate_visible_indices = DEBUG_MODE or config.VALIDATE_VISIBLE_INDICES
+    progress_last_iter = first_iter - 1
+    mem_window_start_iter = first_iter
+    torch.cuda.reset_peak_memory_stats()
 
     for iteration in range(first_iter, opt.iterations + 1):
-        torch.cuda.reset_peak_memory_stats()
-
         if iteration == TRACE_START:
             tracer.enabled = True
         tracer.step(iteration)
@@ -185,16 +192,17 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 for model in submodel_list:
                     model.visible_indices = torch.arange(model._xyz.shape[0], device="cuda")
             # DEBUG: validate visible_indices vs _packed
-            for sid, m in enumerate(submodel_list):
-                vi = m.visible_indices
-                if vi is not None and len(vi) > 0 and hasattr(m, '_packed'):
-                    mx = vi.max().item()
-                    if mx >= m._packed.shape[0]:
-                        raise RuntimeError(
-                            f"[iter {iteration}] submodel {sid}: visible_indices.max()={mx} >= "
-                            f"_packed.shape[0]={m._packed.shape[0]}, _xyz_contig={m._xyz_contig.shape[0] if hasattr(m,'_xyz_contig') else 'N/A'}, "
-                            f"cached={use_fc_cache and sid in frustum_cache and cam_name in frustum_cache.get(sid,{})}"
-                        )
+            if validate_visible_indices:
+                for sid, m in enumerate(submodel_list):
+                    vi = m.visible_indices
+                    if vi is not None and len(vi) > 0 and hasattr(m, '_packed'):
+                        mx = vi.max().item()
+                        if mx >= m._packed.shape[0]:
+                            raise RuntimeError(
+                                f"[iter {iteration}] submodel {sid}: visible_indices.max()={mx} >= "
+                                f"_packed.shape[0]={m._packed.shape[0]}, _xyz_contig={m._xyz_contig.shape[0] if hasattr(m,'_xyz_contig') else 'N/A'}, "
+                                f"cached={use_fc_cache and sid in frustum_cache and cam_name in frustum_cache.get(sid,{})}"
+                            )
 
         # 无渲染全部结果 为计算Loss做准备
         all_rendered, all_depth, all_alpha, all_submodel_ids = [], [], [], []
@@ -377,43 +385,112 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 LOGGER.info(f"[iter {iteration}] Split block(s) {blocks_to_split}, now {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
                 print(f"[iter {iteration}] Split block(s) {blocks_to_split}, now {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
 
-        # reserved 超过 allocated 太多时才清缓存，避免频繁清导致性能下降
-        if torch.cuda.memory_reserved() > torch.cuda.memory_allocated() + config.GPU_CACHE_THRESHOLD_GB * 1024**3:
-            torch.cuda.empty_cache()
+        should_log = (
+            iteration == first_iter
+            or iteration == opt.iterations
+            or (iteration - first_iter + 1) % log_interval == 0
+        )
+        should_sample_benchmark = (
+            BENCH_START <= iteration <= BENCH_END
+            and (
+                iteration == BENCH_START
+                or iteration == BENCH_END
+                or (iteration - BENCH_START) % benchmark_sample_interval == 0
+            )
+        )
+        should_check_cache = should_log or (
+            (iteration - first_iter + 1) % cache_check_interval == 0
+        )
+
+        alloc_bytes = None
+        rsv_bytes = None
+        if should_check_cache:
+            alloc_bytes = torch.cuda.memory_allocated()
+            rsv_bytes = torch.cuda.memory_reserved()
+            if rsv_bytes > alloc_bytes + config.GPU_CACHE_THRESHOLD_GB * 1024**3:
+                torch.cuda.empty_cache()
+                # refresh current values after cache release if we are going to log/sample them
+                if should_log or should_sample_benchmark:
+                    alloc_bytes = torch.cuda.memory_allocated()
+                    rsv_bytes = torch.cuda.memory_reserved()
 
         with torch.no_grad():
-            # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
-
             pts_total = sum(submodel._xyz.shape[0] for submodel in submodel_list)
-            vis_M = visible_pts / 1e6
-            pts_M = pts_total / 1e6
-            vis_pct = visible_pts / pts_total * 100 if pts_total > 0 else 0
-            gpu_peak_alloc = torch.cuda.max_memory_allocated() / 1024**3
-            gpu_peak_rsv = torch.cuda.max_memory_reserved() / 1024**3
-            alloc = torch.cuda.memory_allocated() / 1024**3
-            rsv = torch.cuda.memory_reserved() / 1024**3
             elapsed = time.time() - time_start
-            its = (iteration - first_iter) / elapsed if elapsed > 0 else 0
-            # benchmark 收集
-            if BENCH_START <= iteration <= BENCH_END:
+            its = (iteration - first_iter + 1) / elapsed if elapsed > 0 else 0
+
+            if should_log or should_sample_benchmark:
+                if alloc_bytes is None or rsv_bytes is None:
+                    alloc_bytes = torch.cuda.memory_allocated()
+                    rsv_bytes = torch.cuda.memory_reserved()
+
+                loss_scalar = loss.item()
+                ema_loss_for_log = 0.4 * loss_scalar + 0.6 * ema_loss_for_log
+                ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
+
+                vis_M = visible_pts / 1e6
+                pts_M = pts_total / 1e6
+                vis_pct = visible_pts / pts_total * 100 if pts_total > 0 else 0
+                gpu_peak_alloc = torch.cuda.max_memory_allocated() / 1024**3
+                gpu_peak_rsv = torch.cuda.max_memory_reserved() / 1024**3
+                alloc = alloc_bytes / 1024**3
+                rsv = rsv_bytes / 1024**3
+
+            if should_sample_benchmark:
                 bench_its_list.append(its)
                 bench_alloc_list.append(alloc)
                 bench_rsv_list.append(rsv)
+                bench_peak_alloc_list.append(gpu_peak_alloc)
+                bench_peak_rsv_list.append(gpu_peak_rsv)
                 bench_vis_list.append(visible_pts)
                 bench_loss_list.append(ema_loss_for_log)
 
-            # progress bar - every iter
-            progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": len(submodel_list), "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "peak": f"{gpu_peak_alloc:.2f}", "it/s": f"{its:.1f}"})
-            progress_bar.update(1)
-            if iteration == opt.iterations:
-                progress_bar.close()
+            if should_log:
+                progress_bar.update(iteration - progress_last_iter)
+                progress_last_iter = iteration
+                progress_bar.set_postfix({
+                    "L": f"{ema_loss_for_log:.4f}",
+                    "vis": f"{vis_M:.2f}M",
+                    "pts": f"{pts_M:.2f}M",
+                    "vis%": f"{vis_pct:.0f}",
+                    "blk": len(submodel_list),
+                    "alloc": f"{alloc:.2f}",
+                    "rsv": f"{rsv:.2f}",
+                    "peakW": f"{gpu_peak_alloc:.2f}",
+                    "it/s": f"{its:.1f}",
+                })
 
-            if iteration % 1 == 0:
                 block_sizes = [int(gs._xyz.shape[0]) for gs in submodel_list]
-                log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "blk": len(submodel_list), "blk_sz": block_sizes, "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": f"{elapsed:.1f}s"}
-                wandb_log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": visible_pts, "pts": pts_total, "vis%": round(vis_pct, 1), "blk": len(submodel_list), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "peak_alloc": round(gpu_peak_alloc, 2), "peak_rsv": round(gpu_peak_rsv, 2), "it/s": round(its, 1), "elapsed": round(elapsed, 1)}
+                log = {
+                    "iter": iteration,
+                    "L": round(ema_loss_for_log, 4),
+                    "vis": f"{vis_M:.2f}M",
+                    "pts": f"{pts_M:.2f}M",
+                    "vis%": round(vis_pct, 1),
+                    "blk": len(submodel_list),
+                    "blk_sz": block_sizes,
+                    "alloc": round(alloc, 2),
+                    "rsv": round(rsv, 2),
+                    "win_peak_alloc": round(gpu_peak_alloc, 2),
+                    "win_peak_rsv": round(gpu_peak_rsv, 2),
+                    "mem_window": f"{mem_window_start_iter}-{iteration}",
+                    "it/s": round(its, 1),
+                    "elapsed": f"{elapsed:.1f}s",
+                }
+                wandb_log = {
+                    "iter": iteration,
+                    "L": round(ema_loss_for_log, 4),
+                    "vis": visible_pts,
+                    "pts": pts_total,
+                    "vis%": round(vis_pct, 1),
+                    "blk": len(submodel_list),
+                    "alloc": round(alloc, 2),
+                    "rsv": round(rsv, 2),
+                    "win_peak_alloc": round(gpu_peak_alloc, 2),
+                    "win_peak_rsv": round(gpu_peak_rsv, 2),
+                    "it/s": round(its, 1),
+                    "elapsed": round(elapsed, 1),
+                }
 
                 # logging
                 LOGGER.info(log)
@@ -422,6 +499,15 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if WANDB and not DEBUG_MODE:
                     wandb.log(wandb_log, step=iteration)
                     wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(submodel_list)}, step=iteration)
+
+                if iteration < opt.iterations:
+                    torch.cuda.reset_peak_memory_stats()
+                    mem_window_start_iter = iteration + 1
+
+            if iteration == opt.iterations:
+                if progress_last_iter < iteration:
+                    progress_bar.update(iteration - progress_last_iter)
+                progress_bar.close()
             
         # saving Gaussians ply    
         if (iteration in saving_iterations):
@@ -454,6 +540,10 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         p(f"  平均 visible pts:    {sum(bench_vis_list)/n/1e6:.2f}M\n")
         p(f"  平均占用 mem (alloc): {sum(bench_alloc_list)/n:.2f} GB\n")
         p(f"  平均分配 mem (rsv):   {sum(bench_rsv_list)/n:.2f} GB\n")
+        p(f"  平均区间峰值 alloc:   {sum(bench_peak_alloc_list)/n:.2f} GB\n")
+        p(f"  最大区间峰值 alloc:   {max(bench_peak_alloc_list):.2f} GB\n")
+        p(f"  平均区间峰值 rsv:     {sum(bench_peak_rsv_list)/n:.2f} GB\n")
+        p(f"  最大区间峰值 rsv:     {max(bench_peak_rsv_list):.2f} GB\n")
         p(f"  总平均 mem:           {(sum(bench_alloc_list)+sum(bench_rsv_list))/(2*n):.2f} GB\n")
         p(f"{'='*50}\n")
 
@@ -563,4 +653,3 @@ if __name__ == "__main__":
         res = {"first_iter": 1}
 
     training(lp.extract(args), opt, pp.extract(args), args.save_iterations, args.debug_from, res)
-
