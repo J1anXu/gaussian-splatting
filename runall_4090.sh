@@ -39,10 +39,10 @@ DATASETS=(deepblending)
 get_scenes() {
   local dataset=$1
   case $dataset in
-    mip360_outdoor) echo "bicycle flowers garden stump treehill" ;;
+    mip360_outdoor) echo "bicycle garden" ;;
     mip360_indoor)  echo "kitchen" ;; # room counter kitchen bonsai
-    deepblending)   echo "drjohnson playroom" ;;
-    tandt)          echo "train truck" ;;
+    deepblending)   echo "drjohnson" ;;
+    tandt)          echo "truck" ;;
   esac
 }
 
