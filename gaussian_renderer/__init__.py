@@ -244,20 +244,17 @@ def merge_opt( N_total, render_list, depth_list, alphaLeft_list, vis_filter_list
         final_depth_chunk = (prefix_T_chunk * front_depths_chunk).sum(dim=0)         # [1, h, W]
 
         # -------------------------------------------------
-        # 2.4 Background Color (原版逻辑)
+        # 2.4 Background Color (for rasterizer backward)
         # -------------------------------------------------
-        log_front_Ts = torch.log(front_alphas_chunk.clamp(min=eps))
-        log_post_prod_inc = torch.cumsum(log_front_Ts.flip(0), dim=0).flip(0)
-        log_post_prod_shift = torch.cat(
-            [log_post_prod_inc[1:], torch.zeros_like(log_post_prod_inc[:1])], dim=0
-        )
-        
-        inv_scale = torch.exp(-log_post_prod_inc).clamp(max=1e6)
-        C_scaled = front_rgbs_chunk * inv_scale
-        suffix_sum_C = torch.cumsum(C_scaled.flip(0), dim=0).flip(0) - C_scaled
-        scale = torch.exp(log_post_prod_shift)
-        suffix_color = scale * suffix_sum_C
-        bg_rgb_chunk = suffix_color[0] # [3, h, W]
+        # Leave out the front-most sorted block and re-composite the rest.
+        # This is the per-pixel background expected by the modified backward
+        # kernel, not the generic merge reference's suffix-sum bg.
+        if K > 1:
+            excl_prefix_T = torch.cumprod(front_alphas_chunk[1:], dim=0)
+            excl_prefix_T = torch.cat([torch.ones_like(excl_prefix_T[:1]), excl_prefix_T[:-1]], dim=0)
+            bg_rgb_chunk = (excl_prefix_T * front_rgbs_chunk[1:]).sum(dim=0)
+        else:
+            bg_rgb_chunk = torch.zeros_like(final_rgb_chunk)
 
         # -------------------------------------------------
         # 2.5 Block Rank Calculation (局部计算)
@@ -308,8 +305,16 @@ def merge_opt( N_total, render_list, depth_list, alphaLeft_list, vis_filter_list
 
 def merge_opt_kid(render_list, depth_list, alphaLeft_list, eps=1e-10, chunk_size=32):
     import config
-    if config.MERGE_FAST:
+
+    K = len(render_list)
+    assert K > 0, "render_list is empty"
+
+    if config.MERGE_FAST and K <= 16:
         return _merge_opt_kid_fast(render_list, depth_list, alphaLeft_list, eps)
+
+    if config.MERGE_FAST and K > 16:
+        print(f"[merge_opt_kid] Falling back to chunked merge because K={K} exceeds fast-kernel limit 16.")
+
     return _merge_opt_kid_chunked(render_list, depth_list, alphaLeft_list, eps, chunk_size)
 
 
@@ -364,15 +369,12 @@ def _merge_opt_kid_fast_py(render_list, depth_list, alphaLeft_list, eps=1e-10):
     prefix_T = torch.cat([torch.ones_like(cumT[:1]), cumT[:-1]], dim=0)
     final_rgb = (prefix_T * front_rgbs).sum(dim=0).clamp(0, 1)
 
-    log_front_Ts = torch.log(front_alphas.clamp(min=eps))
-    log_post_prod_inc = torch.cumsum(log_front_Ts.flip(0), dim=0).flip(0)
-    log_post_prod_shift = torch.cat(
-        [log_post_prod_inc[1:], torch.zeros_like(log_post_prod_inc[:1])], dim=0
-    )
-    inv_scale = torch.exp(-log_post_prod_inc).clamp(max=1e6)
-    C_scaled = front_rgbs * inv_scale
-    suffix_sum_C = torch.cumsum(C_scaled.flip(0), dim=0).flip(0) - C_scaled
-    bg_rgb = (torch.exp(log_post_prod_shift) * suffix_sum_C)[0]
+    if K > 1:
+        excl_prefix_T = torch.cumprod(front_alphas[1:], dim=0)
+        excl_prefix_T = torch.cat([torch.ones_like(excl_prefix_T[:1]), excl_prefix_T[:-1]], dim=0)
+        bg_rgb = (excl_prefix_T * front_rgbs[1:]).sum(dim=0)
+    else:
+        bg_rgb = torch.zeros_like(final_rgb)
 
     ranks = torch.arange(K, device=device).view(K, 1, 1).expand_as(sort_idx)
     block_rank = torch.zeros_like(sort_idx)
@@ -489,12 +491,12 @@ def _merge_opt_kid_chunked(render_list, depth_list, alphaLeft_list, eps=1e-10, c
             [log_post_prod_inc[1:], torch.zeros_like(log_post_prod_inc[:1])], dim=0
         )
         
-        inv_scale = torch.exp(-log_post_prod_inc).clamp(max=1e6)
-        C_scaled = front_rgbs_chunk * inv_scale
-        suffix_sum_C = torch.cumsum(C_scaled.flip(0), dim=0).flip(0) - C_scaled
-        scale = torch.exp(log_post_prod_shift)
-        suffix_color = scale * suffix_sum_C
-        bg_rgb_chunk = suffix_color[0] # [3, h, W]
+        if K > 1:
+            excl_prefix_T = torch.cumprod(front_alphas_chunk[1:], dim=0)
+            excl_prefix_T = torch.cat([torch.ones_like(excl_prefix_T[:1]), excl_prefix_T[:-1]], dim=0)
+            bg_rgb_chunk = (excl_prefix_T * front_rgbs_chunk[1:]).sum(dim=0)
+        else:
+            bg_rgb_chunk = torch.zeros_like(final_rgb_chunk)
 
         # -------------------------------------------------
         # 2.5 Block Rank Calculation (局部计算)

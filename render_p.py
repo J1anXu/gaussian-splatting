@@ -38,6 +38,10 @@ BRANCH = None
 SCENE_NAME = None
 LOGGER = None
 
+def _background_only_image(background, view):
+    return background[:, None, None].expand(3, int(view.image_height), int(view.image_width)).clone()
+
+
 def render_set(model_path, name, iteration, views, model_list: List[GaussianModel], pipeline, background, train_test_exp, separate_sh):
 
     render_path = os.path.join(model_path, "rendered_p", BRANCH, name, "ours_{}".format(iteration), "renders")
@@ -52,40 +56,66 @@ def render_set(model_path, name, iteration, views, model_list: List[GaussianMode
     # gaussians.visualize_blocks(save_path = f"debug/{BRANCH}_bbox")
     
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        # frustum_culling_available_mask = frustum_culling(gaussians._xyz, view.full_proj_transform)
         print(f"Rendering view {idx+1}/{len(views)}: {view.image_name}")
         rendered_list, depth_list, alpha_list = [], [], []
-        viewspace_points_list, radii_list = [], []
         visible_block_idxs = []
-        N_total = 0
-        
-        for block_idx in range(len(model_list)):
-            model = model_list[block_idx]
+        frustum_visible_blocks = 0
+
+        for block_idx, model in enumerate(model_list):
+            subset_indices = torch.nonzero(
+                frustum_culling(model._xyz, view.full_proj_transform),
+                as_tuple=True,
+            )[0]
+            if subset_indices.numel() == 0:
+                continue
+
+            frustum_visible_blocks += 1
             print(f"Processing block {block_idx+1}/{len(model_list)} with {model._xyz.shape[0]} gaussians")
-            visible_mask = frustum_culling(model._xyz, view.full_proj_transform)
-            subset_indices = torch.nonzero(visible_mask, as_tuple=True)[0]
             model.visible_indices = subset_indices
-            
+
             model.activate_subset()
-            render_pkg = render(view, model, pipeline, background, use_trained_exp=train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            render_pkg = render(
+                view,
+                model,
+                pipeline,
+                background,
+                use_trained_exp=train_test_exp,
+                separate_sh=SPARSE_ADAM_AVAILABLE,
+            )
             model.deactivate_subset()
-            
-            image, viewspace_point_tensor, visibility_filter, radii, alphaLeft = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["alphaLeft"]
-            rendered_list.append(image)
+
+            alphaLeft = render_pkg["alphaLeft"]
+            visible_pixels = int((alphaLeft < (1.0 - 1e-6)).sum().item())
+            if visible_pixels == 0:
+                continue
+
+            rendered_list.append(render_pkg["render"])
             depth_list.append(render_pkg["depth"])
             alpha_list.append(alphaLeft)
-            viewspace_points_list.append(viewspace_point_tensor)
-            radii_list.append(radii)
-            N_total += model._xyz.shape[0]
             visible_block_idxs.append(block_idx)
-            
-        merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)   
-        print(f"Length of rendered_list: {len(rendered_list)}, depth_list: {len(depth_list)}, alpha_list: {len(alpha_list)}")
-        image = merge_res["final_rgb"]
-        front_rgbs = merge_res["front_rgbs"]
-        prefix_T = merge_res["prefix_T"]
-        block_rank = merge_res["block_rank"] # [K, H, W]
-        
+
+        if rendered_list:
+            merge_res = merge_opt_kid(rendered_list, depth_list, alpha_list)
+            print(f"Length of rendered_list: {len(rendered_list)}, depth_list: {len(depth_list)}, alpha_list: {len(alpha_list)}")
+            image = merge_res["final_rgb"]
+            front_rgbs = merge_res["front_rgbs"]
+            prefix_T = merge_res["prefix_T"]
+            block_rank = merge_res["block_rank"]  # [K, H, W]
+        else:
+            image = _background_only_image(background, view)
+            h, w = image.shape[1:]
+            front_rgbs = torch.empty((0, 3, h, w), device=image.device, dtype=image.dtype)
+            prefix_T = torch.empty((0, 1, h, w), device=image.device, dtype=image.dtype)
+            block_rank = torch.empty((0, h, w), device=image.device, dtype=torch.long)
+
+        msg = (
+            f"View {view.image_name}: {frustum_visible_blocks} blocks survived frustum culling, "
+            f"{len(rendered_list)} blocks contributed pixels to the final merge."
+        )
+        print(msg)
+        if LOGGER:
+            LOGGER.info(msg)
+
         if view.alpha_mask is not None:
             alpha_mask = view.alpha_mask.cuda()
             image *= alpha_mask
@@ -99,16 +129,16 @@ def render_set(model_path, name, iteration, views, model_list: List[GaussianMode
 
         img_path_in_debug = os.path.join(debug_path, img_name)
         
-        if config.SAVE_RGB_LAYERS:
+        if rendered_list and config.SAVE_RGB_LAYERS:
             save_rgb_layers(img_path_in_debug, front_rgbs)
             
-        if config.SAVE_LAYERS_CONTRIBUTION:
+        if rendered_list and config.SAVE_LAYERS_CONTRIBUTION:
             save_layer_contribution(img_path_in_debug, block_rank, front_rgbs, prefix_T, visible_block_idxs)
                     
-        if config.SAVE_DEPTH_LIST:
+        if rendered_list and config.SAVE_DEPTH_LIST:
             save_depth_list(img_path_in_debug, depth_list, visible_block_idxs)
                 
-        if config.SAVE_BLOCK_IMG:
+        if rendered_list and config.SAVE_BLOCK_IMG:
             save_block_img(img_path_in_debug, rendered_list, visible_block_idxs, model_list, view, image, config)
             
         torchvision.utils.save_image(image, os.path.join(render_path, img_name + ".png"))            
