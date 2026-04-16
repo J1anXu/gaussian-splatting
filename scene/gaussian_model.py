@@ -883,8 +883,6 @@ class GaussianModel:
             self.denom = torch.zeros((final_n, 1), device=device)
             self.max_radii2D = torch.zeros((final_n), device=device)
 
-        torch.cuda.empty_cache()
-
     def add_densification_stats(self, viewspace_point_tensor, global_visibility_filter, frustum_visibility_filter):
         self.xyz_gradient_accum[global_visibility_filter] += torch.norm(viewspace_point_tensor.grad[frustum_visibility_filter,:2], dim=-1, keepdim=True)
         self.denom[global_visibility_filter] += 1
