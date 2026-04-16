@@ -146,6 +146,21 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             tracer.enabled = True
         tracer.step(iteration)
 
+        in_densify_window = iteration < opt.densify_until_iter
+        should_run_densify = (
+            in_densify_window
+            and iteration > opt.densify_from_iter
+            and iteration % opt.densification_interval == 0
+        )
+        should_reset_opacity = (
+            in_densify_window
+            and (
+                iteration % opt.opacity_reset_interval == 0
+                or (dataset.white_background and iteration == opt.densify_from_iter)
+            )
+        )
+        densify_size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+
         for submodel in submodel_list:
             submodel.update_learning_rate(iteration)
         
@@ -210,6 +225,47 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         visible_submodel_id_list = []
         visible_pts = 0
 
+        def run_maintenance_for_unprocessed(processed_ids):
+            if not in_densify_window:
+                return
+            for sm_id, sm in enumerate(submodel_list):
+                if sm_id in processed_ids:
+                    continue
+                with torch.no_grad():
+                    if should_run_densify:
+                        sm.densify_and_prune(
+                            opt.densify_grad_threshold * grad_sync.DENSIFY_GRAD_SCALE,
+                            0.005,
+                            scene.cameras_extent,
+                            densify_size_threshold,
+                            device="cpu",
+                        )
+                        sm.pack_to_buffer()
+                        grad_sync.reallocate_pinned_buffers(sm)
+                        if frustum_cache and sm_id in frustum_cache:
+                            del frustum_cache[sm_id]
+                    if should_reset_opacity:
+                        sm.reset_opacity()
+                        if hasattr(sm, '_pack_slices'):
+                            sm._re_view_opacity()
+
+        def split_large_blocks_if_needed():
+            if not in_densify_window:
+                return
+            blocks_to_split = [i for i, sm in enumerate(submodel_list) if sm._xyz.shape[0] > config.SPLIT_SIZE]
+            if not blocks_to_split:
+                return
+            for sm_id in sorted(blocks_to_split, reverse=True):
+                sm = submodel_list[sm_id]
+                left, right = sm.split_in_half(opt)
+                grad_sync.reallocate_pinned_buffers(left)
+                grad_sync.reallocate_pinned_buffers(right)
+                submodel_list[sm_id] = left
+                submodel_list.insert(sm_id + 1, right)
+            frustum_cache.clear()
+            LOGGER.info(f"[iter {iteration}] Split block(s) {blocks_to_split}, now {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
+            print(f"[iter {iteration}] Split block(s) {blocks_to_split}, now {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
+
         with torch.no_grad():
             # Phase 1: 连续发射所有 block 的 render，不做任何 CPU 同步
             # 按点数从多到少排序，让大 block 先上 GPU
@@ -220,7 +276,12 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             valid_ids = []
             for sid in sorted_submodel_ids:
                 n_vis = submodel_list[sid].visible_indices.shape[0]
-                if n_vis == 0 or (config.SKIP_SMALL_BLOCK_THRESH > 0 and n_vis < max_vis * config.SKIP_SMALL_BLOCK_THRESH):
+                skip_small_block = (
+                    not should_run_densify
+                    and config.SKIP_SMALL_BLOCK_THRESH > 0
+                    and n_vis < max_vis * config.SKIP_SMALL_BLOCK_THRESH
+                )
+                if n_vis == 0 or skip_small_block:
                     continue
                 valid_ids.append(sid)
 
@@ -259,7 +320,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
             for image, depth, alphaLeft, submodel_id in zip(all_rendered, all_depth, all_alpha, all_submodel_ids):
                 valid_pixels = (image > 0).any(dim=0).sum().item()
                 total_pixels = image.shape[1] * image.shape[2]
-                if valid_pixels / total_pixels < 0.05:
+                if not should_run_densify and valid_pixels / total_pixels < 0.05:
                     continue
 
                 rendered_list.append(image)
@@ -269,6 +330,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
         if len(rendered_list) == 0:
             print(f"Iteration {iteration}: No visible blocks after filtering, skipping.")
+            run_maintenance_for_unprocessed(set())
+            split_large_blocks_if_needed()
             continue
         # execute merge
         with torch.no_grad():
@@ -352,38 +415,10 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         # Fix: ensure ALL blocks get densify_and_prune / reset_opacity at the
         # correct intervals, not just blocks that were visible this iteration.
         # Non-visible blocks still have accumulated stats from prior iterations.
-        if iteration < opt.densify_until_iter:
-            processed_ids = set(visible_submodel_id_list)
-            for sm_id, sm in enumerate(submodel_list):
-                if sm_id in processed_ids:
-                    continue
-                with torch.no_grad():
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        sm.densify_and_prune(opt.densify_grad_threshold * grad_sync.DENSIFY_GRAD_SCALE, 0.005, scene.cameras_extent, size_threshold, device="cpu")
-                        sm.pack_to_buffer()
-                        grad_sync.reallocate_pinned_buffers(sm)
-                        if frustum_cache and sm_id in frustum_cache:
-                            del frustum_cache[sm_id]
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        sm.reset_opacity()
-                        if hasattr(sm, '_pack_slices'):
-                            sm._re_view_opacity()
+        run_maintenance_for_unprocessed(set(visible_submodel_id_list))
 
         # Dynamic block splitting: any block exceeding SPLIT_SIZE gets binary split
-        if iteration < opt.densify_until_iter:
-            blocks_to_split = [i for i, sm in enumerate(submodel_list) if sm._xyz.shape[0] > config.SPLIT_SIZE]
-            if blocks_to_split:
-                for sm_id in sorted(blocks_to_split, reverse=True):
-                    sm = submodel_list[sm_id]
-                    left, right = sm.split_in_half(opt)
-                    grad_sync.reallocate_pinned_buffers(left)
-                    grad_sync.reallocate_pinned_buffers(right)
-                    submodel_list[sm_id] = left
-                    submodel_list.insert(sm_id + 1, right)
-                frustum_cache.clear()
-                LOGGER.info(f"[iter {iteration}] Split block(s) {blocks_to_split}, now {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
-                print(f"[iter {iteration}] Split block(s) {blocks_to_split}, now {len(submodel_list)} blocks, sizes: {[s._xyz.shape[0] for s in submodel_list]}")
+        split_large_blocks_if_needed()
 
         should_log = (
             iteration == first_iter
