@@ -23,7 +23,7 @@ INDOOR_SCENES = {"room", "counter", "kitchen", "bonsai", "drjohnson", "playroom"
 OUTDOOR_SCENES = {"bicycle", "flowers", "garden", "stump", "treehill", "train", "truck"}
 
 
-SPLIT_SIZE = 400000  #
+SPLIT_SIZE = 800000  #
 
 GPU_CACHE_THRESHOLD_GB = 0.5  # reserved 超过 allocated 多少 GB 时清理 CUDA 缓存
 
