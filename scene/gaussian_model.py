@@ -87,6 +87,13 @@ class GaussianModel:
         
         self.subset_mode_1 = False # for render first time
         self.subset_mode_2 = False # for render second time
+        self._packed_capacity = 0
+        self._packed_full = torch.empty(0)
+        self._packed_staging_full = torch.empty(0)
+        self._xyz_contig_full = torch.empty(0)
+        self._packed_adam_capacity = 0
+        self._packed_exp_avg_full = torch.empty(0)
+        self._packed_exp_avg_sq_full = torch.empty(0)
         
         self.setup_functions()
         
@@ -925,6 +932,37 @@ class GaussianModel:
         "opacity": "_opacity", "scaling": "_scaling", "rotation": "_rotation",
     }
 
+    def _ensure_packed_capacity(self, required_n, D):
+        need_realloc = (
+            self._packed_capacity < required_n
+            or self._packed_full.numel() == 0
+            or self._packed_full.shape[1] != D
+        )
+        if need_realloc:
+            capacity = required_n
+            self._packed_full = torch.empty(capacity, D, dtype=torch.float32, pin_memory=True)
+            self._packed_staging_full = torch.empty(capacity, D, dtype=torch.float32, pin_memory=True)
+            self._xyz_contig_full = torch.empty(capacity, 3, dtype=torch.float32, pin_memory=True)
+            self._packed_capacity = capacity
+
+        self._packed = self._packed_full[:required_n, :D]
+        self._packed_staging = self._packed_staging_full[:required_n, :D]
+
+    def _ensure_packed_adam_capacity(self, required_n, D):
+        need_realloc = (
+            self._packed_adam_capacity < required_n
+            or self._packed_exp_avg_full.numel() == 0
+            or self._packed_exp_avg_full.shape[1] != D
+        )
+        if need_realloc:
+            capacity = required_n
+            self._packed_exp_avg_full = torch.zeros(capacity, D, dtype=torch.float32, pin_memory=True)
+            self._packed_exp_avg_sq_full = torch.zeros(capacity, D, dtype=torch.float32, pin_memory=True)
+            self._packed_adam_capacity = capacity
+
+        self._packed_exp_avg = self._packed_exp_avg_full[:required_n, :D]
+        self._packed_exp_avg_sq = self._packed_exp_avg_sq_full[:required_n, :D]
+
     def pack_to_buffer(self):
         """
         Pack six per-Gaussian CPU nn.Parameter tensors into a single contiguous
@@ -934,14 +972,14 @@ class GaussianModel:
         """
         slices, D = self._compute_pack_layout()
         N = self._xyz.shape[0]
-        packed = torch.empty(N, D, dtype=torch.float32, pin_memory=True)
+        self._ensure_packed_capacity(N, D)
+        packed = self._packed
         for name, (s, e, _) in slices.items():
             param = getattr(self, name)
             packed[:, s:e] = param.data.detach().reshape(N, e - s)
 
         old_params = {name: getattr(self, name) for name in slices}
 
-        self._packed = packed
         self._pack_slices = slices
         self._pack_D = D
 
@@ -951,8 +989,6 @@ class GaussianModel:
             if reshape is not None:
                 view = view.view(N, *reshape[1:])
             setattr(self, name, nn.Parameter(view, requires_grad=True))
-
-        self._packed_staging = torch.empty(N, D, dtype=torch.float32, pin_memory=True)
 
         if self.optimizer is not None:
             self._migrate_optimizer_state(old_params)
@@ -964,7 +1000,8 @@ class GaussianModel:
         # read the full [N,D] buffer (70MB) just to extract 3 cols.
         # This pre-extracted copy costs only 3.6MB per culling call.
         s, e, _ = slices['_xyz']
-        self._xyz_contig = packed[:, s:e].contiguous()  # [N,3], stride=(3,1)
+        self._xyz_contig = self._xyz_contig_full[:N]
+        self._xyz_contig.copy_(packed[:, s:e])
 
     def _migrate_optimizer_state(self, old_params):
         """Migrate optimizer state from old params to new view-params after pack_to_buffer."""
@@ -1037,9 +1074,11 @@ class GaussianModel:
         N, D = self._packed.shape
         if not hasattr(self, '_packed_adam_step'):
             self._packed_adam_step = 0
-        # Allocate new packed adam buffers
-        new_exp_avg = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
-        new_exp_avg_sq = torch.zeros(N, D, dtype=torch.float32, pin_memory=True)
+        self._ensure_packed_adam_capacity(N, D)
+        new_exp_avg = self._packed_exp_avg
+        new_exp_avg_sq = self._packed_exp_avg_sq
+        new_exp_avg.zero_()
+        new_exp_avg_sq.zero_()
         # Populate from optimizer.state if available (preserves momentum after densify/prune)
         for group in self.optimizer.param_groups:
             attr = self._GROUP_TO_ATTR.get(group["name"])
@@ -1054,8 +1093,6 @@ class GaussianModel:
                 n = min(ea.shape[0], N)
                 new_exp_avg[:n, s:e] = ea[:n]
                 new_exp_avg_sq[:n, s:e] = easq[:n]
-        self._packed_exp_avg = new_exp_avg
-        self._packed_exp_avg_sq = new_exp_avg_sq
 
     def _build_lr_per_col(self, iteration):
         """Build [D] tensor with per-column learning rate from optimizer param_groups."""
