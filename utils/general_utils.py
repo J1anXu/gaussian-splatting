@@ -82,7 +82,7 @@ def build_rotation(r):
 
     q = r / norm[:, None]
 
-    R = torch.zeros((q.size(0), 3, 3), device='cuda')
+    R = torch.zeros((q.size(0), 3, 3), device=q.device, dtype=q.dtype)
 
     r = q[:, 0]
     x = q[:, 1]
@@ -101,7 +101,10 @@ def build_rotation(r):
     return R
 
 def build_scaling_rotation(s, r):
-    L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device="cuda")
+    if s.device != r.device:
+        raise RuntimeError(f"build_scaling_rotation device mismatch: {s.device} vs {r.device}")
+
+    L = torch.zeros((s.shape[0], 3, 3), dtype=s.dtype, device=s.device)
     R = build_rotation(r)
 
     L[:,0,0] = s[:,0]
@@ -143,4 +146,3 @@ def get_git_branch():
         ).decode().strip()
     except Exception:
         return "unknown"
-
