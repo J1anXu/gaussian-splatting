@@ -645,12 +645,7 @@ if __name__ == "__main__":
     SCENE_NAME = args.source_path.split('/')[-1]
     DATASET_NAME = args.source_path.split('/')[-2]
 
-    # Set SPLIT_SIZE based on indoor/outdoor scene
-    if SCENE_NAME in config.INDOOR_SCENES:
-        config.SPLIT_SIZE = config.SPLIT_SIZE_INDOOR
-    elif SCENE_NAME in config.OUTDOOR_SCENES:
-        config.SPLIT_SIZE = config.SPLIT_SIZE_OUTDOOR
-    print(f"Scene: {SCENE_NAME} ({'indoor' if SCENE_NAME in config.INDOOR_SCENES else 'outdoor'}), SPLIT_SIZE={config.SPLIT_SIZE}")
+
 
     if args.git_branch is not None:
         BRANCH = args.git_branch
