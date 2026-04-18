@@ -86,6 +86,8 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from, saving_iteratio
     time_start = time.time()
 
     for iteration in range(first_iter, opt.iterations + 1):
+        torch.cuda.reset_peak_memory_stats()
+
         # partition
         if config.PARTITIONING_ENABLED:
             if initial_gaussians._xyz.shape[0] > config.SPLIT_SIZE:
@@ -162,8 +164,8 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from, saving_iteratio
             vis_M = visible_pts / 1e6
             pts_M = pts_total / 1e6
             vis_pct = visible_pts / pts_total * 100 if pts_total > 0 else 0
-            alloc = torch.cuda.memory_allocated() / 1024**3
-            rsv = torch.cuda.memory_reserved() / 1024**3
+            alloc = torch.cuda.max_memory_allocated() / 1024**3
+            rsv = torch.cuda.max_memory_reserved() / 1024**3
             elapsed = time.time() - time_start
             its = (iteration - first_iter) / elapsed if elapsed > 0 else 0
 
@@ -291,6 +293,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     bench_loss_list = []
 
     for iteration in range(first_iter, opt.iterations + 1):
+        torch.cuda.reset_peak_memory_stats()
+
         if iteration == TRACE_START:
             tracer.enabled = True
         tracer.step(iteration)
@@ -493,8 +497,8 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             vis_M = visible_pts / 1e6
             pts_M = pts_total / 1e6
             vis_pct = visible_pts / pts_total * 100 if pts_total > 0 else 0
-            alloc = torch.cuda.memory_allocated() / 1024**3
-            rsv = torch.cuda.memory_reserved() / 1024**3
+            alloc = torch.cuda.max_memory_allocated() / 1024**3
+            rsv = torch.cuda.max_memory_reserved() / 1024**3
             elapsed = time.time() - time_start
             its = (iteration - first_iter) / elapsed if elapsed > 0 else 0
             # benchmark 收集
