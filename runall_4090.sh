@@ -23,13 +23,33 @@ set -o pipefail
 # 场景分组
 ########################################
 OUTDOOR_SCENES=(bicycle flowers garden stump treehill)
-INDOOR_SCENES=(room counter kitchen bonsai)
-ALL_SCENES=("${OUTDOOR_SCENES[@]}" "${INDOOR_SCENES[@]}")
+INDOOR_SCENES=(room  counter kitchen bonsai) 
+TANDT_SCENES=(train truck)
+DB_SCENES=(drjohnson playroom)
+ALL_SCENES=("${OUTDOOR_SCENES[@]}"  "${INDOOR_SCENES[@]}" "${TANDT_SCENES[@]}" "${DB_SCENES[@]}") # 
 
-# 室内判断表
-declare -A IS_INDOOR
+# 每个场景所属的 dataset 根目录
+declare -A SCENE_ROOT
+for s in "${OUTDOOR_SCENES[@]}" "${INDOOR_SCENES[@]}"; do
+  SCENE_ROOT[$s]=/data/jian/data/mip360
+done
+for s in "${TANDT_SCENES[@]}"; do
+  SCENE_ROOT[$s]=/data/jian/data/tandt
+done
+for s in "${DB_SCENES[@]}"; do
+  SCENE_ROOT[$s]=/data/jian/data/deepblending
+done
+
+# 每个场景的 -i 参数（mip360 室内 images_2，室外 images_4；tandt/db 没有下采样，留空用默认 images）
+declare -A SCENE_IMG
+for s in "${OUTDOOR_SCENES[@]}"; do
+  SCENE_IMG[$s]="-i images_4"
+done
 for s in "${INDOOR_SCENES[@]}"; do
-  IS_INDOOR[$s]=1
+  SCENE_IMG[$s]="-i images_2"
+done
+for s in "${TANDT_SCENES[@]}" "${DB_SCENES[@]}"; do
+  SCENE_IMG[$s]=""
 done
 
 ########################################
@@ -38,12 +58,11 @@ done
 GPUS=(0)
 NUM_GPUS=${#GPUS[@]}
 
-DATA_ROOT=/home/jian/data/mip360
 LOG_ROOT=debug
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
-OUT_ROOT=/home/jian/output/mip360/$GIT_BRANCH
+OUT_ROOT=/home/jian/output/$GIT_BRANCH
 
 mkdir -p "$LOG_ROOT"
 
@@ -57,16 +76,9 @@ run_pipeline() {
 
   export CUDA_VISIBLE_DEVICES=$gpu
 
-  local data_path="$DATA_ROOT/$scene"
+  local data_path="${SCENE_ROOT[$scene]}/$scene"
   local model_path="$OUT_ROOT/$scene"
-
-  # 室内 images_2，室外 images_4
-  local img_flag=""
-  if [[ -n "${IS_INDOOR[$scene]}" ]]; then
-    img_flag="-i images_2"
-  else
-    img_flag="-i images_4"
-  fi
+  local img_flag="${SCENE_IMG[$scene]}"
 
   local log_dir="$LOG_ROOT/$GIT_BRANCH/$scene"
   mkdir -p "$log_dir"
@@ -81,6 +93,12 @@ run_pipeline() {
 
   # 1. TRAIN
   echo "  [1/3] Training $scene ..."
+
+  nvidia-smi dmon -i "$gpu" -d 1 -s pucvmet -o DT \
+    > "$log_dir/gpu.log" 2>&1 &
+  local dmon_pid=$!
+  trap 'kill $dmon_pid 2>/dev/null' RETURN
+
   python train.py \
     -s "$data_path" \
     --model_path "$model_path" \
@@ -88,6 +106,10 @@ run_pipeline() {
     --eval \
     $img_flag \
     > "$log_dir/train.log" 2>&1
+
+  kill "$dmon_pid" 2>/dev/null
+  wait "$dmon_pid" 2>/dev/null
+  trap - RETURN
 
   # 2. RENDER
   echo "  [2/3] Rendering $scene ..."
@@ -109,11 +131,8 @@ run_pipeline() {
 }
 
 ########################################
-# 轮询分配 9 个场景到 4 个 GPU 队列
-# GPU 0: bicycle treehill bonsai
-# GPU 1: flowers room
-# GPU 2: garden counter
-# GPU 3: stump kitchen
+# 轮询分配 13 个场景到可用 GPU 队列
+# mip360(9) + tandt(2) + deepblending(2)
 ########################################
 declare -A GPU_QUEUES
 for i in "${!ALL_SCENES[@]}"; do

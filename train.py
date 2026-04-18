@@ -55,7 +55,7 @@ except:
 
 
 
-def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
+def training_phase_1(dataset, opt, pipe, checkpoint, debug_from, saving_iterations):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -201,6 +201,13 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from):
                     initial_gaussians.optimizer.step()
                     initial_gaussians.optimizer.zero_grad(set_to_none = True)
 
+            if iteration in saving_iterations:
+                print(f"\n[ITER {iteration}] Saving Gaussians (phase 1, no partition)")
+                ply_path = os.path.join(scene.model_path, f"point_cloud/{BRANCH}/iteration_{iteration}/point_cloud.ply")
+                initial_gaussians.save_ply(ply_path, include_block=False)
+
+    print(f"Phase 1 finished all {opt.iterations} iterations without triggering partition; skipping phase 2.")
+    sys.exit(0)
 
 
 def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
@@ -637,7 +644,7 @@ if __name__ == "__main__":
         }
         opt.iterations = 700
     else:
-        res = training_phase_1(lp.extract(args), opt, pp.extract(args), args.start_checkpoint, args.debug_from)
+        res = training_phase_1(lp.extract(args), opt, pp.extract(args), args.start_checkpoint, args.debug_from, args.save_iterations)
 
 
 
