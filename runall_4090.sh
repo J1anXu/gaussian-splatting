@@ -31,7 +31,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GIT_BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "no_git")
 #DATASETS=(mip360_outdoor mip360_indoor deepblending tandt)
 
-DATASETS=(mip360_outdoor)
+DATASETS=(deepblending mip360_indoor)
 
 ########################################
 # 每个数据集的场景列表
@@ -39,10 +39,10 @@ DATASETS=(mip360_outdoor)
 get_scenes() {
   local dataset=$1
   case $dataset in
-    mip360_outdoor) echo "bicycle garden" ;;
-    mip360_indoor)  echo "kitchen" ;; # room counter kitchen bonsai
-    deepblending)   echo "drjohnson" ;;
-    tandt)          echo "truck" ;;
+    mip360_outdoor) echo "bicycle garden flowers stump treehill" ;;
+    mip360_indoor)  echo "kitchen room counter bonsai" ;; 
+    deepblending)   echo "drjohnson playroom" ;;
+    tandt)          echo "truck train" ;;
   esac
 }
 
