@@ -33,8 +33,10 @@ try:
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
+from logger import get_logger, add_output_path
 BRANCH = None
 SCENE_NAME = None
+LOGGER = None
 
 def render_set(model_path, name, iteration, views, model_list: List[GaussianModel], pipeline, background, train_test_exp, separate_sh):
 
@@ -136,20 +138,26 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             model_list.append(model)
             pts+= model._xyz.shape[0]
             print("loading", full_path, "with", model._xyz.shape[0], "gaussians success", )
-        
+        if LOGGER:
+            LOGGER.info(f"Loaded {len(model_list)} blocks, {pts} total gaussians from {ply_path}")
+
         res_path = os.path.join(scene.model_path, "rendered_p", BRANCH)
         os.makedirs(res_path, exist_ok=True)
         json_path = os.path.join(res_path, "results.json")
         store_pts(json_path, pts, scene = SCENE_NAME, key = f"ours_{scene.loaded_iter}")
-        
+
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
+             if LOGGER: LOGGER.info(f"Rendering train set, iter={scene.loaded_iter}")
              render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), model_list, pipeline, background, dataset.train_test_exp, separate_sh)
+             if LOGGER: LOGGER.info("Train set render done")
 
         if not skip_test:
+             if LOGGER: LOGGER.info(f"Rendering test set, iter={scene.loaded_iter}")
              render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), model_list, pipeline, background, dataset.train_test_exp, separate_sh)
+             if LOGGER: LOGGER.info("Test set render done")
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -172,7 +180,12 @@ if __name__ == "__main__":
         BRANCH = get_git_branch()
     SCENE_NAME = args.model_path.strip('/').split('/')[-1]
 
+    LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "render", BRANCH, SCENE_NAME))
+    add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="render")
+    LOGGER.info(f"Rendering {SCENE_NAME}, model_path={args.model_path}, branch={BRANCH}")
+
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
     render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, SPARSE_ADAM_AVAILABLE)
+    LOGGER.info("Render finished")

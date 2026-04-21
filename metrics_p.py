@@ -21,8 +21,10 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser
 from utils.general_utils import safe_state, get_git_branch
+from logger import get_logger, add_output_path
 
 BRANCH = None
+LOGGER = None
 
 def load_json_safe(path):
     if os.path.exists(path):
@@ -60,6 +62,7 @@ def evaluate(model_paths):
         scene_dir = scene_dir + f"/rendered_p/{BRANCH}"
         try:
             print("Scene:", scene_dir)
+            if LOGGER: LOGGER.info(f"Scene: {scene_dir}")
             full_dict[scene_dir] = {}
             per_view_dict[scene_dir] = {}
             full_dict_polytopeonly[scene_dir] = {}
@@ -88,10 +91,15 @@ def evaluate(model_paths):
                     psnrs.append(psnr(renders[idx], gts[idx]))
                     lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))
 
-                print("  SSIM : {:>12.7f}".format(torch.tensor(ssims).mean(), ".5"))
-                print("  PSNR : {:>12.7f}".format(torch.tensor(psnrs).mean(), ".5"))
-                print("  LPIPS: {:>12.7f}".format(torch.tensor(lpipss).mean(), ".5"))
+                ssim_val = torch.tensor(ssims).mean().item()
+                psnr_val = torch.tensor(psnrs).mean().item()
+                lpips_val = torch.tensor(lpipss).mean().item()
+                print("  SSIM : {:>12.7f}".format(ssim_val, ".5"))
+                print("  PSNR : {:>12.7f}".format(psnr_val, ".5"))
+                print("  LPIPS: {:>12.7f}".format(lpips_val, ".5"))
                 print("")
+                if LOGGER:
+                    LOGGER.info(f"{method} - SSIM: {ssim_val:.7f}, PSNR: {psnr_val:.7f}, LPIPS: {lpips_val:.7f}")
 
                 full_dict[scene_dir][method].update({"SSIM": torch.tensor(ssims).mean().item(),
                                                         "PSNR": torch.tensor(psnrs).mean().item(),
@@ -136,4 +144,11 @@ if __name__ == "__main__":
         BRANCH = args.git_branch
     else:
         BRANCH = get_git_branch()
+
+    scene_name = os.path.basename(args.model_paths[0].rstrip("/")) if args.model_paths else "unknown"
+    LOGGER = get_logger(scene_name, os.path.join("./logs", "metrics", BRANCH, scene_name))
+    add_output_path(LOGGER, os.path.join("debug", BRANCH, scene_name), prefix="metrics")
+    LOGGER.info(f"Metrics evaluation, branch={BRANCH}, model_paths={args.model_paths}")
+
     evaluate(args.model_paths)
+    LOGGER.info("Metrics finished")

@@ -29,11 +29,52 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import wandb
 import time
-from logger import get_logger
+from logger import get_logger, add_output_path
 import config
 import diff_gaussian_rasterization_wenqi_tam
 from TimerManager import  TraceManager, TID_MAIN, PID_CPU
 from pipeline_grad_sync import PipelinedGradSync
+
+# NVML (nvidia-smi equivalent) for process-level VRAM — the number nvitop
+# shows, which includes CUDA context + rasterizer workspace + lib buffers
+# not tracked by PyTorch's caching allocator.
+try:
+    import warnings as _w
+    _w.filterwarnings("ignore", category=FutureWarning, module="pynvml")
+    import pynvml
+    pynvml.nvmlInit()
+    _NVML_OK = True
+except Exception:
+    _NVML_OK = False
+
+def _nvml_handle():
+    if not _NVML_OK:
+        return None
+    # CUDA_VISIBLE_DEVICES may remap device 0; use the physical index it points to.
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")[0].strip()
+    idx = int(visible) if visible.isdigit() else 0
+    try:
+        return pynvml.nvmlDeviceGetHandleByIndex(idx)
+    except Exception:
+        return None
+
+_NVML_H = _nvml_handle()
+_NVML_PID = os.getpid()
+
+def nvml_proc_vram_bytes() -> int:
+    """Return this process's GPU VRAM residence in bytes (0 if unavailable).
+    Matches the number nvidia-smi / nvitop show."""
+    if _NVML_H is None:
+        return 0
+    try:
+        procs = pynvml.nvmlDeviceGetComputeRunningProcesses(_NVML_H)
+        for p in procs:
+            if p.pid == _NVML_PID:
+                return int(p.usedGpuMemory or 0)
+    except Exception:
+        pass
+    return 0
+
 SCENE_NAME = None
 BRANCH = None
 DEBUG_MODE = False
@@ -84,10 +125,12 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from, saving_iteratio
 
     colors_bg = None
     time_start = time.time()
+    mem_window_start_iter = first_iter
+    torch.cuda.reset_peak_memory_stats()
+    proc_vram_peak_bytes = 0
 
     for iteration in range(first_iter, opt.iterations + 1):
-        torch.cuda.reset_peak_memory_stats()
-
+        proc_vram_peak_bytes = max(proc_vram_peak_bytes, nvml_proc_vram_bytes())
         # partition
         if config.PARTITIONING_ENABLED:
             if initial_gaussians._xyz.shape[0] > config.SPLIT_SIZE:
@@ -164,19 +207,44 @@ def training_phase_1(dataset, opt, pipe, checkpoint, debug_from, saving_iteratio
             vis_M = visible_pts / 1e6
             pts_M = pts_total / 1e6
             vis_pct = visible_pts / pts_total * 100 if pts_total > 0 else 0
-            alloc = torch.cuda.max_memory_allocated() / 1024**3
-            rsv = torch.cuda.max_memory_reserved() / 1024**3
+            alloc = torch.cuda.memory_allocated() / 1024**3
+            rsv = torch.cuda.memory_reserved() / 1024**3
+            win_peak_alloc = torch.cuda.max_memory_allocated() / 1024**3
+            win_peak_rsv = torch.cuda.max_memory_reserved() / 1024**3
             elapsed = time.time() - time_start
             its = (iteration - first_iter) / elapsed if elapsed > 0 else 0
 
-            progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": 1, "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "it/s": f"{its:.1f}"})
+            progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": 1, "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "peakW": f"{win_peak_alloc:.2f}", "it/s": f"{its:.1f}"})
             progress_bar.update(1)
 
             if iteration % 10 == 0:
-                log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "it/s": round(its, 1)}
+                proc_vram_now = nvml_proc_vram_bytes() / 1024**3
+                proc_vram_peak = proc_vram_peak_bytes / 1024**3
+                log = {
+                    "iter": iteration,
+                    "L": round(ema_loss_for_log, 4),
+                    "vis": f"{vis_M:.2f}M",
+                    "pts": f"{pts_M:.2f}M",
+                    "vis%": round(vis_pct, 1),
+                    "blk": 1,
+                    "blk_sz": [int(initial_gaussians._xyz.shape[0])],
+                    "alloc": round(alloc, 2),
+                    "rsv": round(rsv, 2),
+                    "win_peak_alloc": round(win_peak_alloc, 2),
+                    "win_peak_rsv": round(win_peak_rsv, 2),
+                    "proc_vram": round(proc_vram_now, 2),
+                    "win_peak_proc_vram": round(proc_vram_peak, 2),
+                    "mem_window": f"{mem_window_start_iter}-{iteration}",
+                    "it/s": round(its, 1),
+                    "elapsed": f"{elapsed:.1f}s",
+                }
                 LOGGER.info(log)
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
+                if iteration < opt.iterations:
+                    torch.cuda.reset_peak_memory_stats()
+                    mem_window_start_iter = iteration + 1
+                    proc_vram_peak_bytes = 0
 
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -227,6 +295,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
     if isinstance(res, dict):
+        prepare_output_and_logger(dataset)
         trained_ply_path = res.get("trained_ply_path")
         first_iter = res.get("first_iter")
         initial_gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
@@ -283,6 +352,9 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     grad_sync = PipelinedGradSync(submodel_list, opt, dataset, scene, tracer=tracer)
 
     time_start = time.time()
+    mem_window_start_iter = first_iter
+    torch.cuda.reset_peak_memory_stats()
+    proc_vram_peak_bytes = 0
 
     # benchmark 统计收集 (iter 301-700, 共 400 个)
     BENCH_START, BENCH_END = 301, 700
@@ -293,7 +365,7 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
     bench_loss_list = []
 
     for iteration in range(first_iter, opt.iterations + 1):
-        torch.cuda.reset_peak_memory_stats()
+        proc_vram_peak_bytes = max(proc_vram_peak_bytes, nvml_proc_vram_bytes())
 
         if iteration == TRACE_START:
             tracer.enabled = True
@@ -497,8 +569,10 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
             vis_M = visible_pts / 1e6
             pts_M = pts_total / 1e6
             vis_pct = visible_pts / pts_total * 100 if pts_total > 0 else 0
-            alloc = torch.cuda.max_memory_allocated() / 1024**3
-            rsv = torch.cuda.max_memory_reserved() / 1024**3
+            alloc = torch.cuda.memory_allocated() / 1024**3
+            rsv = torch.cuda.memory_reserved() / 1024**3
+            win_peak_alloc = torch.cuda.max_memory_allocated() / 1024**3
+            win_peak_rsv = torch.cuda.max_memory_reserved() / 1024**3
             elapsed = time.time() - time_start
             its = (iteration - first_iter) / elapsed if elapsed > 0 else 0
             # benchmark 收集
@@ -510,13 +584,33 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 bench_loss_list.append(ema_loss_for_log)
 
             # progress bar - every iter
-            progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": len(submodel_list), "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "it/s": f"{its:.1f}"})
+            progress_bar.set_postfix({"L": f"{ema_loss_for_log:.4f}", "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": f"{vis_pct:.0f}", "blk": len(submodel_list), "alloc": f"{alloc:.2f}", "rsv": f"{rsv:.2f}", "peakW": f"{win_peak_alloc:.2f}", "it/s": f"{its:.1f}"})
             progress_bar.update(1)
             if iteration == opt.iterations:
                 progress_bar.close()
 
             if iteration % 10 == 0:
-                log = {"iter": iteration, "L": round(ema_loss_for_log, 4), "vis": f"{vis_M:.2f}M", "pts": f"{pts_M:.2f}M", "vis%": round(vis_pct, 1), "alloc": round(alloc, 2), "rsv": round(rsv, 2), "it/s": round(its, 1)}
+                block_sizes = [int(gs._xyz.shape[0]) for gs in submodel_list]
+                proc_vram_now = nvml_proc_vram_bytes() / 1024**3
+                proc_vram_peak = proc_vram_peak_bytes / 1024**3
+                log = {
+                    "iter": iteration,
+                    "L": round(ema_loss_for_log, 4),
+                    "vis": f"{vis_M:.2f}M",
+                    "pts": f"{pts_M:.2f}M",
+                    "vis%": round(vis_pct, 1),
+                    "blk": len(submodel_list),
+                    "blk_sz": block_sizes,
+                    "alloc": round(alloc, 2),
+                    "rsv": round(rsv, 2),
+                    "win_peak_alloc": round(win_peak_alloc, 2),
+                    "win_peak_rsv": round(win_peak_rsv, 2),
+                    "proc_vram": round(proc_vram_now, 2),
+                    "win_peak_proc_vram": round(proc_vram_peak, 2),
+                    "mem_window": f"{mem_window_start_iter}-{iteration}",
+                    "it/s": round(its, 1),
+                    "elapsed": f"{elapsed:.1f}s",
+                }
 
                 # logging
                 LOGGER.info(log)
@@ -525,6 +619,11 @@ def training_phase_2(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if WANDB and not DEBUG_MODE:
                     wandb.log(log, step=iteration)
                     wandb.log({f"block/{idx}_size": gs._xyz.shape[0] for idx, gs in enumerate(submodel_list)}, step=iteration)
+
+                if iteration < opt.iterations:
+                    torch.cuda.reset_peak_memory_stats()
+                    mem_window_start_iter = iteration + 1
+                    proc_vram_peak_bytes = 0
             
         # saving Gaussians ply    
         if (iteration in saving_iterations):
@@ -585,6 +684,10 @@ def prepare_output_and_logger(args):
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
+    # Mirror structured logger into the model output folder
+    if LOGGER is not None:
+        add_output_path(LOGGER, os.path.join(args.model_path, "logs"))
+
     # Create Tensorboard writer
     tb_writer = None
     if TENSORBOARD_FOUND:
@@ -629,6 +732,7 @@ if __name__ == "__main__":
         BRANCH = get_git_branch()
     
     LOGGER = get_logger(SCENE_NAME, os.path.join("./logs", "train", BRANCH, SCENE_NAME))
+    add_output_path(LOGGER, os.path.join("debug", BRANCH, SCENE_NAME), prefix="train")
     DEBUG_MODE = sys.gettrace() is not None
     
     if WANDB and not DEBUG_MODE:
