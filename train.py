@@ -131,6 +131,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     bench_rsv_list = []
     bench_peak_alloc_list = []
     bench_peak_rsv_list = []
+    bench_nvml_list = []
+    bench_peak_nvml_list = []
     bench_vis_list = []
     bench_loss_list = []
     log_interval = max(1, config.TRAIN_LOG_INTERVAL)
@@ -140,6 +142,10 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
     progress_last_iter = first_iter - 1
     mem_window_start_iter = first_iter
     torch.cuda.reset_peak_memory_stats()
+    # driver-side (NVML) memory: total - free. Includes rasterizer internal
+    # buffers & CUDA context that torch's caching allocator doesn't track.
+    gpu_total_bytes = torch.cuda.mem_get_info()[1]
+    peak_nvml_bytes_window = 0
 
     for iteration in range(first_iter, opt.iterations + 1):
         if iteration == TRACE_START:
@@ -439,6 +445,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
         alloc_bytes = None
         rsv_bytes = None
+        nvml_bytes = None
         if should_check_cache:
             alloc_bytes = torch.cuda.memory_allocated()
             rsv_bytes = torch.cuda.memory_reserved()
@@ -448,6 +455,10 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if should_log or should_sample_benchmark:
                     alloc_bytes = torch.cuda.memory_allocated()
                     rsv_bytes = torch.cuda.memory_reserved()
+            # sample driver-side memory here so peak tracking covers every check interval
+            nvml_bytes = gpu_total_bytes - torch.cuda.mem_get_info()[0]
+            if nvml_bytes > peak_nvml_bytes_window:
+                peak_nvml_bytes_window = nvml_bytes
 
         with torch.no_grad():
             pts_total = sum(submodel._xyz.shape[0] for submodel in submodel_list)
@@ -458,6 +469,10 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 if alloc_bytes is None or rsv_bytes is None:
                     alloc_bytes = torch.cuda.memory_allocated()
                     rsv_bytes = torch.cuda.memory_reserved()
+                if nvml_bytes is None:
+                    nvml_bytes = gpu_total_bytes - torch.cuda.mem_get_info()[0]
+                    if nvml_bytes > peak_nvml_bytes_window:
+                        peak_nvml_bytes_window = nvml_bytes
 
                 loss_scalar = loss.item()
                 ema_loss_for_log = 0.4 * loss_scalar + 0.6 * ema_loss_for_log
@@ -470,6 +485,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 gpu_peak_rsv = torch.cuda.max_memory_reserved() / 1024**3
                 alloc = alloc_bytes / 1024**3
                 rsv = rsv_bytes / 1024**3
+                nvml_gb = nvml_bytes / 1024**3
+                peak_nvml_gb = peak_nvml_bytes_window / 1024**3
 
             if should_sample_benchmark:
                 bench_its_list.append(its)
@@ -477,6 +494,8 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                 bench_rsv_list.append(rsv)
                 bench_peak_alloc_list.append(gpu_peak_alloc)
                 bench_peak_rsv_list.append(gpu_peak_rsv)
+                bench_nvml_list.append(nvml_gb)
+                bench_peak_nvml_list.append(peak_nvml_gb)
                 bench_vis_list.append(visible_pts)
                 bench_loss_list.append(ema_loss_for_log)
 
@@ -492,6 +511,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                     "alloc": f"{alloc:.2f}",
                     "rsv": f"{rsv:.2f}",
                     "peakW": f"{gpu_peak_alloc:.2f}",
+                    "nvml": f"{nvml_gb:.2f}",
                     "it/s": f"{its:.1f}",
                 })
 
@@ -506,8 +526,10 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                     "blk_sz": block_sizes,
                     "alloc": round(alloc, 2),
                     "rsv": round(rsv, 2),
+                    "nvml_gb": round(nvml_gb, 2),
                     "win_peak_alloc": round(gpu_peak_alloc, 2),
                     "win_peak_rsv": round(gpu_peak_rsv, 2),
+                    "peak_nvml_gb": round(peak_nvml_gb, 2),
                     "mem_window": f"{mem_window_start_iter}-{iteration}",
                     "it/s": round(its, 1),
                     "elapsed": f"{elapsed:.1f}s",
@@ -521,8 +543,10 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
                     "blk": len(submodel_list),
                     "alloc": round(alloc, 2),
                     "rsv": round(rsv, 2),
+                    "nvml_gb": round(nvml_gb, 2),
                     "win_peak_alloc": round(gpu_peak_alloc, 2),
                     "win_peak_rsv": round(gpu_peak_rsv, 2),
+                    "peak_nvml_gb": round(peak_nvml_gb, 2),
                     "it/s": round(its, 1),
                     "elapsed": round(elapsed, 1),
                 }
@@ -537,6 +561,7 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
 
                 if iteration < opt.iterations:
                     torch.cuda.reset_peak_memory_stats()
+                    peak_nvml_bytes_window = 0
                     mem_window_start_iter = iteration + 1
 
             if iteration == opt.iterations:
@@ -579,6 +604,9 @@ def training(dataset, opt, pipe, saving_iterations, debug_from, res):
         p(f"  最大区间峰值 alloc:   {max(bench_peak_alloc_list):.2f} GB\n")
         p(f"  平均区间峰值 rsv:     {sum(bench_peak_rsv_list)/n:.2f} GB\n")
         p(f"  最大区间峰值 rsv:     {max(bench_peak_rsv_list):.2f} GB\n")
+        p(f"  平均 nvml (driver):   {sum(bench_nvml_list)/n:.2f} GB\n")
+        p(f"  平均区间峰值 nvml:    {sum(bench_peak_nvml_list)/n:.2f} GB\n")
+        p(f"  最大区间峰值 nvml:    {max(bench_peak_nvml_list):.2f} GB\n")
         p(f"  总平均 mem:           {(sum(bench_alloc_list)+sum(bench_rsv_list))/(2*n):.2f} GB\n")
         p(f"{'='*50}\n")
 
