@@ -1,0 +1,27 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="redGrad" x1="256" y1="52" x2="256" y2="448" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#C62B1E"/>
+      <stop offset="1" stop-color="#A81710"/>
+    </linearGradient>
+  </defs>
+
+  <path d="M256 69
+           C265.8 69 274.9 74.2 279.9 82.8
+           L446.7 372.1
+           C456.7 389.5 444.2 411.2 424.1 411.2
+           H87.9
+           C67.8 411.2 55.3 389.5 65.3 372.1
+           L232.1 82.8
+           C237.1 74.2 246.2 69 256 69Z"
+        fill="url(#redGrad)"/>
+
+  <path d="M256 145
+           C270.2 145 280.5 157.9 277.9 171.8
+           L259.6 276.5
+           C259.2 278.6 256.8 278.6 256.4 276.5
+           L238.1 171.8
+           C235.5 157.9 245.8 145 256 145Z"
+        fill="white"/>
+  <circle cx="256" cy="330" r="24" fill="white"/>
+</svg>

@@ -39,7 +39,7 @@ SCENE_NAME = None
 BRANCH = None
 DEBUG_MODE = False
 
-WANDB = False
+WANDB = True
 LOGGER = None
 
 try:
